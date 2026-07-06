@@ -53,6 +53,22 @@ hardware, but the ranking has been stable across repeated runs):
 | `v_jsonescape` | ~415 MiB/s     |
 | `naive`        | ~190 MiB/s     |
 
+**Speculation on the effect of pre-allocation:** `sonic_rs` and `serde_json`
+gained the most from reusing pre-sized buffers (`sonic_rs` roughly 4x,
+`serde_json` roughly 2.5x versus the earlier fresh-`String`-per-call version),
+while `naive` and `v_jsonescape` barely moved. A plausible explanation is that
+`to_writer`-style serializers push output in several small `write_all`/chunk
+calls rather than one bulk copy, so when the destination starts at zero
+capacity each call has to repeatedly hit the allocator and follow Rust's
+geometric growth strategy (copying everything written so far every time it
+doubles) — punishing precisely the many-small-writes style these serializers
+use. The naive loop and `v_jsonescape`, by contrast, were already given a
+capacity estimate close to the final size before this change (`s.len() + 2`
+in the naive case), so they rarely triggered a reallocation even without the
+explicit 8x pre-sizing — there was little allocator overhead left to remove.
+This is an informal read of the numbers, not something confirmed by
+profiling the crates' internals.
+
 Run it yourself with:
 
 ```sh
