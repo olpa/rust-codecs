@@ -17,3 +17,7 @@ sonic-rs = "0.5"
 [[bench]]
 name = "escape"
 harness = false
+
+[[bench]]
+name = "unescape"
+harness = false

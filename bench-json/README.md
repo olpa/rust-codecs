@@ -46,12 +46,12 @@ hardware, but the ranking has been stable across repeated runs):
 
 | Crate          | Throughput     |
 | -------------- | -------------- |
-| `sonic_rs`     | ~5.7 GiB/s     |
-| `simd_json`    | ~3.5 GiB/s     |
-| `json_escape`  | ~2.25 GiB/s    |
-| `serde_json`   | ~990 MiB/s     |
-| `v_jsonescape` | ~415 MiB/s     |
-| `naive`        | ~190 MiB/s     |
+| `sonic_rs`     | ~4.7 GiB/s     |
+| `simd_json`    | ~3.2 GiB/s     |
+| `json_escape`  | ~2.4 GiB/s     |
+| `serde_json`   | ~960 MiB/s     |
+| `v_jsonescape` | ~385 MiB/s     |
+| `naive`        | ~160 MiB/s     |
 
 **Speculation on the effect of pre-allocation:** `sonic_rs` and `serde_json`
 gained the most from reusing pre-sized buffers (`sonic_rs` roughly 4x,
@@ -73,4 +73,67 @@ Run it yourself with:
 
 ```sh
 cargo bench --bench escape
+```
+
+## Unescaping benchmark
+
+`benches/unescape.rs` decodes a JSON string token (quotes included) back into
+its original text, the reverse of the benchmark above. The input corpus is
+the same `"text"` values, re-encoded once up front via `serde_json::to_string`
+(trusted correct, since that's exactly what the escape benchmark validates)
+to produce the escaped tokens each contender decodes. Every contender's
+output is checked against the pre-escape original before timing.
+
+Output buffers are pre-allocated once per item and reused, `clear()`-ed
+between calls — but sized at exactly the escaped token's byte length (not
+inflated like the escape benchmark's 8x), since unescaping only ever shrinks
+or preserves length, never grows it.
+
+`serde_json`, `simd_json`, and `sonic_rs` all implement `deserialize_str` by
+handing a `serde::de::Visitor` an already-unescaped `&str`/`String`; a shared
+`BufVisitor` copies those bytes straight into the reused buffer instead of
+letting the crate allocate its own `String` — so, unlike the escape
+benchmark, these three avoid an extra allocation here too. `simd_json`
+additionally parses in place, so it needs a reused mutable scratch copy of
+the escaped bytes, refreshed from the original token on every call.
+
+`v_jsonescape` is not included — it's an escape-only generated crate with no
+unescape counterpart.
+
+Contenders:
+
+- [`serde_json`](https://docs.rs/serde_json) — `Deserializer::deserialize_str`
+- naive hand-rolled unescape loop (handles `\uXXXX` and surrogate pairs)
+- [`json_escape`](https://docs.rs/json_escape) — `unescape_quoted`, iterator-based
+- [`sonic-rs`](https://docs.rs/sonic-rs) — `Deserializer::deserialize_str`
+- [`simd-json`](https://docs.rs/simd-json) — `Deserializer::from_slice` (in-place) + `deserialize_str`
+
+Indicative results on this machine:
+
+| Crate         | Throughput   |
+| ------------- | ------------ |
+| `json_escape` | ~2.7 GiB/s   |
+| `serde_json`  | ~1.4 GiB/s   |
+| `sonic_rs`    | ~655 MiB/s   |
+| `simd_json`   | ~317 MiB/s   |
+| `naive`       | ~200 MiB/s   |
+
+**Speculation:** the ranking flips substantially from the escape benchmark —
+`sonic_rs` and `simd_json` were the fastest encoders but land in the bottom
+half here. A plausible reason is that on this corpus most tweet text has few
+or no characters that need escaping, so encoding is dominated by a cheap
+"does this need any escaping at all" scan that these SIMD-oriented crates are
+built to accelerate; decoding a token that already has no escapes still
+requires going through each crate's general `deserialize_str`/tape-parsing
+machinery (for `simd_json`, a full in-place tape parse) rather than a
+similarly specialized "just copy it" fast path, so their SIMD advantage on
+the encode side doesn't carry over symmetrically. `json_escape`'s iterator
+design (zero-copy slices for unescaped runs) looks especially well suited to
+this mostly-plain-text corpus. As before, this is a read of the numbers, not
+something confirmed by profiling the crates' internals.
+
+Run it yourself with:
+
+```sh
+cargo bench --bench unescape
 ```
