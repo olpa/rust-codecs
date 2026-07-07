@@ -11,7 +11,12 @@
 //! token's byte length -- unescaping only ever shrinks or preserves
 //! length, never grows) and reused across iterations, `clear()`-ed but
 //! not reallocated between calls, so the timed loop measures unescaping
-//! work rather than allocator churn.
+//! work rather than allocator churn. The `clear()` itself happens in an
+//! untimed `iter_batched_ref` setup phase, so its cost isn't folded into
+//! the measured unescape time. (`simd_json`'s scratch-copy refresh is
+//! different: that `clear()` + `extend_from_slice` is inherent to how
+//! simd_json's in-place parser must be fed, so it stays inside the timed
+//! routine.)
 //!
 //! `serde_json`, `simd_json`, and `sonic_rs` all implement
 //! `deserialize_str` by handing a `Visitor` an already-unescaped
@@ -23,10 +28,11 @@
 //! `v_jsonescape` is not included: it is an escape-only generated crate
 //! with no unescape counterpart.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use serde::de::{Deserializer as _, Visitor};
 
 #[path = "common.rs"]
@@ -192,31 +198,57 @@ fn bench_unescape(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("unescape_text");
     group.throughput(Throughput::Bytes(total_bytes));
+    // `RefCell` + `iter_batched_ref` + `black_box` here follow the same
+    // pattern as `escape.rs`'s equivalent loop -- see the comments there
+    // for why each piece is needed.
     for (name, unescape) in &contenders {
-        let mut buffers = make_buffers(&tokens);
+        let buffers = RefCell::new(make_buffers(&tokens));
         group.bench_function(*name, |b| {
-            b.iter(|| {
-                for (t, buf) in tokens.iter().zip(buffers.iter_mut()) {
-                    buf.clear();
-                    unescape(black_box(t.as_str()), buf);
-                    black_box(&*buf);
-                }
-            });
+            b.iter_batched_ref(
+                || {
+                    for buf in buffers.borrow_mut().iter_mut() {
+                        buf.clear();
+                    }
+                },
+                |()| {
+                    for (t, buf) in tokens.iter().zip(buffers.borrow_mut().iter_mut()) {
+                        unescape(black_box(t.as_str()), buf);
+                        black_box(&*buf);
+                    }
+                },
+                BatchSize::PerIteration,
+            );
         });
     }
+    // simd_json can't share the loop above because `unescape_simd_json`
+    // doesn't fit the `fn(&str, &mut Vec<u8>)` shape the `contenders`
+    // vec relies on: simd_json parses in place, so it needs its own
+    // mutable scratch copy of the token's bytes (`scratch`) in addition
+    // to the output buffer, refreshed before every call since parsing
+    // consumes/mutates it. Hence a separate block with its own buffer
+    // setup instead of another entry in `contenders`.
     {
-        let mut scratch_buffers = make_buffers(&tokens);
-        let mut buffers = make_buffers(&tokens);
+        let scratch_buffers = RefCell::new(make_buffers(&tokens));
+        let buffers = RefCell::new(make_buffers(&tokens));
         group.bench_function("simd_json", |b| {
-            b.iter(|| {
-                for ((t, scratch), buf) in
-                    tokens.iter().zip(scratch_buffers.iter_mut()).zip(buffers.iter_mut())
-                {
-                    buf.clear();
-                    unescape_simd_json(black_box(t.as_str()), scratch, buf);
-                    black_box(&*buf);
-                }
-            });
+            b.iter_batched_ref(
+                || {
+                    for buf in buffers.borrow_mut().iter_mut() {
+                        buf.clear();
+                    }
+                },
+                |()| {
+                    for ((t, scratch), buf) in tokens
+                        .iter()
+                        .zip(scratch_buffers.borrow_mut().iter_mut())
+                        .zip(buffers.borrow_mut().iter_mut())
+                    {
+                        unescape_simd_json(black_box(t.as_str()), scratch, buf);
+                        black_box(&*buf);
+                    }
+                },
+                BatchSize::PerIteration,
+            );
         });
     }
     group.finish();

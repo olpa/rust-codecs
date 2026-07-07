@@ -8,11 +8,14 @@
 //! Buffers are pre-allocated once per item (capacity = 8x the input byte
 //! length) and reused across iterations, `clear()`-ed but not
 //! reallocated between calls, so the timed loop measures escaping work
-//! rather than allocator churn.
+//! rather than allocator churn. The `clear()` itself happens in an
+//! untimed `iter_batched_ref` setup phase, so its cost isn't folded into
+//! the measured escape time.
 
+use std::cell::RefCell;
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 
 #[path = "common.rs"]
 mod common;
@@ -113,15 +116,80 @@ fn bench_escape(c: &mut Criterion) {
     let mut group = c.benchmark_group("escape_text");
     group.throughput(Throughput::Bytes(total_bytes));
     for (name, escape) in &contenders {
-        let mut buffers = make_buffers(&texts);
+        // `buffers` is reused across every timed call below (that's the
+        // whole point -- no per-call allocation). Both the `setup` and
+        // `routine` closures passed to `iter_batched_ref` need mutable
+        // access to it, and since they're two separate closures alive at
+        // the same time, the borrow checker can't verify their borrows
+        // never overlap even though the runtime never actually overlaps
+        // them. `RefCell` moves that check to runtime (a cheap flag
+        // check) so both closures can just capture `&buffers` and call
+        // `.borrow_mut()` when they run.
+        let buffers = RefCell::new(make_buffers(&texts));
         group.bench_function(*name, |b| {
-            b.iter(|| {
-                for (s, buf) in texts.iter().zip(buffers.iter_mut()) {
-                    buf.clear();
-                    escape(black_box(s.as_str()), buf);
-                    black_box(&*buf);
-                }
-            });
+            // `iter_batched_ref(setup, routine, batch_size)` runs `setup`
+            // *before* starting the clock, then times only `routine`.
+            // We use this instead of a plain `b.iter(...)` closure so
+            // that `buf.clear()` -- which must happen before every call,
+            // see below -- doesn't get counted as part of the measured
+            // escape time.
+            b.iter_batched_ref(
+                || {
+                    // Reset every buffer's `len` to 0 before the timed
+                    // call. This does NOT touch `capacity` or free the
+                    // allocation (`Vec::clear` is just `truncate(0)`) --
+                    // it's still the same pre-sized buffer. It's needed
+                    // because `escape()` *appends* starting at the
+                    // buffer's current length rather than overwriting
+                    // from the start; without clearing, each of the many
+                    // timed calls below would pile another copy of the
+                    // escaped string on top of the last one, corrupting
+                    // the content and eventually forcing a reallocation
+                    // anyway once capacity is exceeded.
+                    //
+                    // This closure's return value becomes `I` in
+                    // `iter_batched_ref`'s `setup: FnMut() -> I`. Here
+                    // the for-loop is the whole body, so it evaluates to
+                    // `()` -- we're not threading any real data through
+                    // the setup/routine hand-off; the routine closure
+                    // below reaches the actual buffers by capturing
+                    // `&buffers` directly, same as this closure does.
+                    for buf in buffers.borrow_mut().iter_mut() {
+                        buf.clear();
+                    }
+                },
+                |()| {
+                    // Criterion calls this once per sample and only
+                    // times this closure. Its parameter type is
+                    // `&mut I` = `&mut ()`; the `()` pattern matches
+                    // that via match ergonomics (destructuring through
+                    // the reference), even though there's nothing to
+                    // bind -- we ignore the value and reach `buffers`
+                    // via the closure's own capture instead.
+                    for (s, buf) in texts.iter().zip(buffers.borrow_mut().iter_mut()) {
+                        // `black_box` is a compiler-optimization barrier
+                        // (`std::hint::black_box`, stable since Rust
+                        // 1.66): it returns its argument unchanged at
+                        // runtime but is opaque to the optimizer, which
+                        // otherwise could cheat in two ways here:
+                        //  - on the input: `s` is the exact same string
+                        //    every timed call, so without `black_box`
+                        //    the compiler could constant-fold or hoist
+                        //    the escape work since nothing about the
+                        //    input appears to change between calls.
+                        //  - on the output: `buf`'s contents are never
+                        //    read anywhere the compiler can see (it just
+                        //    gets `clear()`-ed again next time), so
+                        //    without `black_box` the compiler could
+                        //    prove the whole `escape()` call has no
+                        //    observable effect and delete it as dead
+                        //    code.
+                        escape(black_box(s.as_str()), buf);
+                        black_box(&*buf);
+                    }
+                },
+                BatchSize::PerIteration,
+            );
         });
     }
     group.finish();
