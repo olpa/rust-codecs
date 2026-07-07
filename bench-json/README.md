@@ -29,7 +29,9 @@ the benchmark rather than post a misleading number.
 To keep the measurement focused on escaping work rather than the allocator,
 each corpus item gets its own output buffer pre-allocated once (capacity = 8x
 the input's byte length) and reused across all iterations, `clear()`-ed
-between calls but never reallocated.
+between calls but never reallocated. The `clear()` itself runs in an untimed
+`iter_batched_ref` setup phase, so its cost isn't folded into the measured
+escape time either.
 
 Contenders:
 
@@ -46,12 +48,12 @@ hardware, but the ranking has been stable across repeated runs):
 
 | Crate          | Throughput     |
 | -------------- | -------------- |
-| `sonic_rs`     | ~4.7 GiB/s     |
-| `simd_json`    | ~3.2 GiB/s     |
-| `json_escape`  | ~2.4 GiB/s     |
-| `serde_json`   | ~960 MiB/s     |
-| `v_jsonescape` | ~385 MiB/s     |
-| `naive`        | ~160 MiB/s     |
+| `sonic_rs`     | ~8.0 GiB/s     |
+| `simd_json`    | ~5.5 GiB/s     |
+| `json_escape`  | ~4.0 GiB/s     |
+| `serde_json`   | ~976 MiB/s     |
+| `v_jsonescape` | ~599 MiB/s     |
+| `naive`        | ~310 MiB/s     |
 
 **Speculation on the effect of pre-allocation:** `sonic_rs` and `serde_json`
 gained the most from reusing pre-sized buffers (`sonic_rs` roughly 4x,
@@ -87,7 +89,9 @@ output is checked against the pre-escape original before timing.
 Output buffers are pre-allocated once per item and reused, `clear()`-ed
 between calls — but sized at exactly the escaped token's byte length (not
 inflated like the escape benchmark's 8x), since unescaping only ever shrinks
-or preserves length, never grows it.
+or preserves length, never grows it. As in the escape benchmark, the
+`clear()` runs in an untimed `iter_batched_ref` setup phase rather than
+inside the timed loop.
 
 `serde_json`, `simd_json`, and `sonic_rs` all implement `deserialize_str` by
 handing a `serde::de::Visitor` an already-unescaped `&str`/`String`; a shared
@@ -112,11 +116,11 @@ Indicative results on this machine:
 
 | Crate         | Throughput   |
 | ------------- | ------------ |
-| `json_escape` | ~2.7 GiB/s   |
-| `serde_json`  | ~1.4 GiB/s   |
-| `sonic_rs`    | ~655 MiB/s   |
-| `simd_json`   | ~317 MiB/s   |
-| `naive`       | ~200 MiB/s   |
+| `json_escape` | ~5.7 GiB/s   |
+| `serde_json`  | ~2.6 GiB/s   |
+| `sonic_rs`    | ~1.4 GiB/s   |
+| `simd_json`   | ~629 MiB/s   |
+| `naive`       | ~344 MiB/s   |
 
 **Speculation:** the ranking flips substantially from the escape benchmark —
 `sonic_rs` and `simd_json` were the fastest encoders but land in the bottom
