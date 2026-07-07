@@ -9,7 +9,7 @@ edition = "2024"
 criterion = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-json_escape = { package = "json-escape", version = "0.3" }
+json-escape = "0.3"
 v_jsonescape = "0.9"
 simd-json = "0.17"
 sonic-rs = "0.5"
