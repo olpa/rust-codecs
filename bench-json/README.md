@@ -113,3 +113,8 @@ Run it yourself with:
 ```sh
 cargo bench --bench unescape
 ```
+
+## Disclaimer
+
+The code and this README were written by an AI (Claude Code) under human
+control and review.
