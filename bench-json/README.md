@@ -42,9 +42,10 @@ Contenders:
 - [`simd-json`](https://docs.rs/simd-json) — `to_writer` via its `serde::Serialize` path
 - [`sonic-rs`](https://docs.rs/sonic-rs) — `to_writer` via its `serde::Serialize` path
 
-Indicative results on this machine (throughput over total input bytes,
-`cargo bench`, criterion's mean estimate — expect run-to-run noise on shared
-hardware, but the ranking has been stable across repeated runs):
+Indicative results (throughput over total input bytes, `cargo bench`,
+criterion's mean estimate), measured on a dev laptop — your mileage will
+vary on different hardware, but the ranking has been stable across repeated
+runs:
 
 | Crate          | Throughput     |
 | -------------- | -------------- |
@@ -54,22 +55,6 @@ hardware, but the ranking has been stable across repeated runs):
 | `serde_json`   | ~976 MiB/s     |
 | `v_jsonescape` | ~599 MiB/s     |
 | `naive`        | ~310 MiB/s     |
-
-**Speculation on the effect of pre-allocation:** `sonic_rs` and `serde_json`
-gained the most from reusing pre-sized buffers (`sonic_rs` roughly 4x,
-`serde_json` roughly 2.5x versus the earlier fresh-`String`-per-call version),
-while `naive` and `v_jsonescape` barely moved. A plausible explanation is that
-`to_writer`-style serializers push output in several small `write_all`/chunk
-calls rather than one bulk copy, so when the destination starts at zero
-capacity each call has to repeatedly hit the allocator and follow Rust's
-geometric growth strategy (copying everything written so far every time it
-doubles) — punishing precisely the many-small-writes style these serializers
-use. The naive loop and `v_jsonescape`, by contrast, were already given a
-capacity estimate close to the final size before this change (`s.len() + 2`
-in the naive case), so they rarely triggered a reallocation even without the
-explicit 8x pre-sizing — there was little allocator overhead left to remove.
-This is an informal read of the numbers, not something confirmed by
-profiling the crates' internals.
 
 Run it yourself with:
 
@@ -86,20 +71,7 @@ the same `"text"` values, re-encoded once up front via `serde_json::to_string`
 to produce the escaped tokens each contender decodes. Every contender's
 output is checked against the pre-escape original before timing.
 
-Output buffers are pre-allocated once per item and reused, `clear()`-ed
-between calls — but sized at exactly the escaped token's byte length (not
-inflated like the escape benchmark's 8x), since unescaping only ever shrinks
-or preserves length, never grows it. As in the escape benchmark, the
-`clear()` runs in an untimed `iter_batched_ref` setup phase rather than
-inside the timed loop.
-
-`serde_json`, `simd_json`, and `sonic_rs` all implement `deserialize_str` by
-handing a `serde::de::Visitor` an already-unescaped `&str`/`String`; a shared
-`BufVisitor` copies those bytes straight into the reused buffer instead of
-letting the crate allocate its own `String` — so, unlike the escape
-benchmark, these three avoid an extra allocation here too. `simd_json`
-additionally parses in place, so it needs a reused mutable scratch copy of
-the escaped bytes, refreshed from the original token on every call.
+Output buffers are pre-allocated and reused as in the escape benchmark.
 
 `v_jsonescape` is not included — it's an escape-only generated crate with no
 unescape counterpart.
@@ -112,7 +84,7 @@ Contenders:
 - [`sonic-rs`](https://docs.rs/sonic-rs) — `Deserializer::deserialize_str`
 - [`simd-json`](https://docs.rs/simd-json) — `Deserializer::from_slice` (in-place) + `deserialize_str`
 
-Indicative results on this machine:
+Indicative results (same caveats as the escape benchmark above):
 
 | Crate         | Throughput   |
 | ------------- | ------------ |
