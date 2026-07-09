@@ -3,7 +3,7 @@
 //! codec is ours.
 
 use std::fs::File;
-use std::io::Read;
+use std::io;
 
 use compcol::io::DecoderReader;
 use compcol::Algorithm;
@@ -12,8 +12,6 @@ use rust_twin_v2::Rot13;
 fn main() -> std::io::Result<()> {
     let raw = File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/encoded-hello.txt"))?;
     let mut reader = DecoderReader::new(raw, Rot13::decoder());
-    let mut decoded = String::new();
-    reader.read_to_string(&mut decoded)?;
-    print!("{decoded}");
+    io::copy(&mut reader, &mut io::stdout())?;
     Ok(())
 }
