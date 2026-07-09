@@ -1,5 +1,5 @@
 [package]
-name = "rust-codecs-base"
+name = "rust-codecs-core"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,5 +7,5 @@ edition = "2021"
 compcol = { version = "0.6", default-features = false, features = ["std"] }
 
 [lib]
-name = "rust_codecs_base"
+name = "rust_codecs_core"
 path = "src/lib.rs"

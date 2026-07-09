@@ -1,4 +1,4 @@
-//! Foundation crate for RustCodecs: re-exports the pieces a codec crate
+//! Core crate for RustCodecs: re-exports the pieces a codec crate
 //! and its clients need, so neither ever has to `use compcol` directly.
 //!
 //! - [`Encoder`] / [`Decoder`]: implement these to add a codec.

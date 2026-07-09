@@ -9,7 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28b37ce533aa0fddc1e6820e331968ba72aa48b5c8bbb2bebdc03d48b6ed0f16"
 
 [[package]]
-name = "rust-codecs-base"
+name = "rust-codecs-core"
 version = "0.1.0"
 dependencies = [
  "compcol",
