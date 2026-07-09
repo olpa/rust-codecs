@@ -1,0 +1,24 @@
+[package]
+name = "rust-twin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_twin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wrap-input"
+path = "src/bin/wrap_input.rs"
+
+[[bin]]
+name = "wrap-output"
+path = "src/bin/wrap_output.rs"
+
+[[bin]]
+name = "connect"
+path = "src/bin/connect.rs"
+
+[[bin]]
+name = "chain"
+path = "src/bin/chain.rs"

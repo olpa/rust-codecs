@@ -1,0 +1,29 @@
+[package]
+name = "rust-twin-v2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Only the trait layer and the std::io adapters — no compression
+# algorithms, no runtime factory (we construct the codec explicitly).
+compcol = { version = "0.6", default-features = false, features = ["std"] }
+
+[lib]
+name = "rust_twin_v2"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wrap-input"
+path = "src/bin/wrap_input.rs"
+
+[[bin]]
+name = "wrap-output"
+path = "src/bin/wrap_output.rs"
+
+[[bin]]
+name = "connect"
+path = "src/bin/connect.rs"
+
+[[bin]]
+name = "chain"
+path = "src/bin/chain.rs"
