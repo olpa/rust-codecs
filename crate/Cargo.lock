@@ -14,11 +14,3 @@ version = "0.1.0"
 dependencies = [
  "compcol",
 ]
-
-[[package]]
-name = "rust-codecs-io"
-version = "0.1.0"
-dependencies = [
- "compcol",
- "rust-codecs-base",
-]

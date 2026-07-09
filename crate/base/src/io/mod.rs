@@ -1,4 +1,4 @@
-//! Ways to run a [`rust_codecs_base::Encoder`]/[`rust_codecs_base::Decoder`]
+//! Ways to run an [`Encoder`](crate::Encoder)/[`Decoder`](crate::Decoder)
 //! over bytes you already have.
 //!
 //! - [`stream`]: wrap a `std::io::Read`/`Write` so the transform runs
@@ -6,8 +6,8 @@
 //! - [`vec`]: run the transform once over an in-memory buffer and get a
 //!   `Vec<u8>` back.
 
-pub mod stream;
-pub mod vec;
+mod stream;
+mod vec;
 
 pub use stream::{DecoderReader, DecoderWriter, EncoderReader, EncoderWriter};
 pub use vec::{decode_to_vec, encode_to_vec};

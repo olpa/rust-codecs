@@ -4,9 +4,8 @@
 //! - [`Encoder`] / [`Decoder`]: implement these to add a codec.
 //! - [`Error`], [`Progress`], [`Status`]: the shared vocabulary their
 //!   methods speak in.
-//!
-//! Stream adapters and one-shot `Vec<u8>` helpers live in the sibling
-//! `rust-codecs-io` crate, not here.
+//! - [`io`]: stream adapters (`std::io::Read`/`Write`) and one-shot
+//!   `Vec<u8>` helpers built on top of `Encoder`/`Decoder`.
 //!
 //! What is deliberately **not** re-exported: `compcol::Algorithm`. Codec
 //! crates should instead expose a pair of plain constructor functions,
@@ -14,3 +13,5 @@
 //! directly — see `design-interface/rust-twin-v2` for why.
 
 pub use compcol::{Decoder, Encoder, Error, Progress, Status};
+
+pub mod io;

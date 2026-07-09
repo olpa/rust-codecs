@@ -6,7 +6,7 @@
 //! crate's own `<name>_encoder()`/`<name>_decoder()` function and pass it
 //! in directly.
 
-use rust_codecs_base::{Decoder, Encoder, Error, Status};
+use compcol::{Decoder, Encoder, Error, Status};
 
 const SCRATCH: usize = 64 * 1024;
 
