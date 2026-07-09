@@ -6,12 +6,11 @@ use std::fs::File;
 use std::io;
 
 use compcol::io::DecoderReader;
-use compcol::Algorithm;
-use rust_twin_v2::Rot13;
+use rust_twin_v2::rot13_decoder;
 
 fn main() -> std::io::Result<()> {
     let raw = File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/encoded-hello.txt"))?;
-    let mut reader = DecoderReader::new(raw, Rot13::decoder());
+    let mut reader = DecoderReader::new(raw, rot13_decoder());
     io::copy(&mut reader, &mut io::stdout())?;
     Ok(())
 }

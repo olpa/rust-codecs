@@ -6,8 +6,8 @@
 //! | Python                          | This crate                                |
 //! |---------------------------------|-------------------------------------------|
 //! | the registered `"my-rot13"` codec | the explicit [`Rot13`] value            |
-//! | `codecs.getreader(enc)(stream)` | `compcol::io::DecoderReader::new(stream, Rot13::decoder())` |
-//! | `codecs.getwriter(enc)(stream)` | `compcol::io::EncoderWriter::new(stream, Rot13::encoder())` |
+//! | `codecs.getreader(enc)(stream)` | `compcol::io::DecoderReader::new(stream, rot13_decoder())` |
+//! | `codecs.getwriter(enc)(stream)` | `compcol::io::EncoderWriter::new(stream, rot13_encoder())` |
 //!
 //! The stream wrappers are **not** reimplemented here: implementing
 //! compcol's traits buys us its `io` adapters (and `vec` one-shot helpers)
@@ -19,4 +19,4 @@
 
 mod rot13;
 
-pub use rot13::Rot13;
+pub use rot13::{rot13_decoder, rot13_encoder, Rot13};

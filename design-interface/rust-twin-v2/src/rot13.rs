@@ -8,8 +8,9 @@ use compcol::{Algorithm, Decoder, Encoder, Error, Progress, Status};
 ///   (ROT13 is self-inverse and stateless — no history, no tail, no
 ///   in-band end marker);
 /// - it implements [`Algorithm`], with itself as both associated codec
-///   type, so the compcol-idiomatic constructors `Rot13::encoder()` /
-///   `Rot13::decoder()` work and the `vec` one-shot helpers accept it.
+///   type, so the `vec` one-shot helpers accept it; the [`rot13_encoder`] /
+///   [`rot13_decoder`] free functions are the plain constructors used
+///   everywhere else.
 ///
 /// Because both trait impls exist on the same type, a direct call like
 /// `codec.finish(&mut buf)` is ambiguous and needs
@@ -17,6 +18,14 @@ use compcol::{Algorithm, Decoder, Encoder, Error, Progress, Status};
 /// evidence in the "do we need two traits?" question.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Rot13;
+
+pub fn rot13_encoder() -> Rot13 {
+    Rot13
+}
+
+pub fn rot13_decoder() -> Rot13 {
+    Rot13
+}
 
 fn rot13_byte(b: u8) -> u8 {
     match b {
@@ -137,7 +146,7 @@ mod tests {
 
     #[test]
     fn encode_reports_output_full_and_resumes() {
-        let mut enc = Rot13::encoder();
+        let mut enc = rot13_encoder();
         let input = b"Hello, world!\n";
         let mut out = [0u8; 5];
 
@@ -159,7 +168,7 @@ mod tests {
 
     #[test]
     fn discard_output_skips_without_decoding() {
-        let mut dec = Rot13::decoder();
+        let mut dec = rot13_decoder();
         let encoded = b"Uryyb, jbeyq!\n";
 
         // Skip the "Uryyb, " prefix (7 decoded bytes)...
@@ -176,7 +185,7 @@ mod tests {
     #[test]
     fn reader_decodes_on_the_fly() {
         let raw = Cursor::new(b"Uryyb, jbeyq!\n".to_vec());
-        let mut reader = DecoderReader::new(raw, Rot13::decoder());
+        let mut reader = DecoderReader::new(raw, rot13_decoder());
         let mut out = String::new();
         reader.read_to_string(&mut out).unwrap();
         assert_eq!(out, "Hello, world!\n");
@@ -184,7 +193,7 @@ mod tests {
 
     #[test]
     fn writer_encodes_on_the_fly() {
-        let mut writer = EncoderWriter::new(Vec::new(), Rot13::encoder());
+        let mut writer = EncoderWriter::new(Vec::new(), rot13_encoder());
         writer.write_all(b"Hello, ").unwrap();
         writer.write_all(b"world!\n").unwrap();
         let raw = writer.finish().unwrap();
@@ -194,10 +203,10 @@ mod tests {
     #[test]
     fn readers_stack_like_python_chain() {
         let raw = Cursor::new(b"Hello, world!\n".to_vec());
-        let reader1 = DecoderReader::new(raw, Rot13::decoder());
-        let reader2 = DecoderReader::new(reader1, Rot13::decoder());
-        let reader3 = DecoderReader::new(reader2, Rot13::decoder());
-        let mut reader4 = DecoderReader::new(reader3, Rot13::decoder());
+        let reader1 = DecoderReader::new(raw, rot13_decoder());
+        let reader2 = DecoderReader::new(reader1, rot13_decoder());
+        let reader3 = DecoderReader::new(reader2, rot13_decoder());
+        let mut reader4 = DecoderReader::new(reader3, rot13_decoder());
         let mut out = Vec::new();
         reader4.read_to_end(&mut out).unwrap();
         assert_eq!(out, b"Hello, world!\n");
