@@ -11,9 +11,9 @@
 //! listed runs first, closest to the incoming bytes, before reaching
 //! stdout).
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 
-use rust_codecs_core::io::{CodecReader, CodecWriter};
+use rust_codecs_core::io::{CodecReader, CodecWriter, FinishWrite};
 use rust_codecs_core::Codec;
 
 fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
@@ -21,35 +21,6 @@ fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
         "identity" => Ok(Box::new(rust_codecs_core::identity::identity())),
         "rot13" => Ok(Box::new(rust_codecs_core::rot13::rot13())),
         other => Err(format!("unknown codec {other:?} (expected \"identity\" or \"rot13\")")),
-    }
-}
-
-/// `CodecWriter::finish` consumes `self` by value and returns the wrapped
-/// writer, so it can't be called through `dyn Write`. This trait gives a
-/// chain of boxed writers a way to unwind and finish every layer in turn.
-trait Finish: Write {
-    fn finish_writer(self: Box<Self>) -> io::Result<()>;
-}
-
-impl Finish for io::Stdout {
-    fn finish_writer(mut self: Box<Self>) -> io::Result<()> {
-        (*self).flush()
-    }
-}
-
-// Mirrors the same `Box<T: ?Sized>` pattern as `Codec for Box<C>` in
-// rust-codecs-core: lets a `Box<dyn Finish>` itself satisfy `Finish`, so
-// the chain-building loop below can rebox each layer uniformly.
-impl<F: Finish + ?Sized> Finish for Box<F> {
-    fn finish_writer(self: Box<Self>) -> io::Result<()> {
-        (*self).finish_writer()
-    }
-}
-
-impl<W: Finish + 'static> Finish for CodecWriter<W, Box<dyn Codec>> {
-    fn finish_writer(self: Box<Self>) -> io::Result<()> {
-        let inner = (*self).finish()?;
-        Box::new(inner).finish_writer()
     }
 }
 
@@ -90,14 +61,14 @@ fn run() -> Result<(), String> {
         reader = Box::new(CodecReader::new(reader, codec));
     }
 
-    let mut writer: Box<dyn Finish> = Box::new(io::stdout());
+    let mut writer: Box<dyn FinishWrite> = Box::new(io::stdout());
     for name in writer_names.iter().rev() {
         let codec = make_codec(name)?;
         writer = Box::new(CodecWriter::new(writer, codec));
     }
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
-    writer.finish_writer().map_err(|e| e.to_string())?;
+    writer.finish_boxed().map_err(|e| e.to_string())?;
     Ok(())
 }
 

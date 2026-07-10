@@ -4,9 +4,12 @@
 //!   the fly as the wrapped stream is used.
 //! - [`vec`]: run the transform once over an in-memory buffer and get a
 //!   `Vec<u8>` back.
+//! - [`FinishWrite`]: finish a runtime-built, boxed chain of
+//!   [`CodecWriter`]s (e.g. one assembled from a list of codec names)
+//!   without knowing its depth at compile time.
 
 mod stream;
 mod vec;
 
-pub use stream::{CodecReader, CodecWriter};
+pub use stream::{CodecReader, CodecWriter, FinishWrite};
 pub use vec::to_vec;
