@@ -1,17 +1,17 @@
-//! Core crate for RustCodecs: re-exports the pieces a codec crate
-//! and its clients need, so neither ever has to `use compcol` directly.
+//! Core crate for RustCodecs: re-exports the shared vocabulary and stream
+//! adapters a codec crate and its clients build on, so neither ever has to
+//! `use compcol` directly — `compcol` is an implementation detail behind
+//! this crate's boundary.
 //!
-//! - [`Encoder`] / [`Decoder`]: implement these to add a codec.
-//! - [`Error`], [`Progress`], [`Status`]: the shared vocabulary their
+//! - [`Codec`]: implement this to add a codec.
+//! - [`Error`], [`Progress`], [`Status`]: the shared vocabulary [`Codec`]'s
 //!   methods speak in.
 //! - [`io`]: stream adapters (`std::io::Read`/`Write`) and one-shot
-//!   `Vec<u8>` helpers built on top of `Encoder`/`Decoder`.
-//!
-//! What is deliberately **not** re-exported: `compcol::Algorithm`. Codec
-//! crates should instead expose a pair of plain constructor functions,
-//! e.g. `rot13_encoder()` / `rot13_decoder()`, that build the codec type
-//! directly — see `design-interface/rust-twin-v2` for why.
+//!   `Vec<u8>` helpers built on top of [`Codec`].
 
-pub use compcol::{Decoder, Encoder, Error, Progress, Status};
+pub use compcol::{Error, Progress, Status};
+
+mod codec;
+pub use codec::Codec;
 
 pub mod io;
