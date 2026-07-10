@@ -104,3 +104,15 @@ assert_eq!(decoded, b"Hello, world!\n");
 Unlike `compcol::vec::compress_to_vec`/`decompress_to_vec`, this takes an
 already-constructed codec value (built via the codec crate's own
 constructor function) rather than being generic over `Algorithm`.
+
+## Trying it from the command line
+
+The [`cli`](../cli/README.md) crate wires named codecs into a
+`CodecReader`/`CodecWriter` chain over stdin/stdout, for exercising a
+chain without writing Rust:
+
+```
+echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
+```
+
+See `cli/README.md` for the full flag reference and more examples.
