@@ -11,96 +11,96 @@ This document covers **using** an existing codec. See
 ## What's exposed
 
 ```rust
-pub use compcol::{Decoder, Encoder, Error, Progress, Status};
+pub use compcol::{Error, Progress, Status};
 
-pub mod io; // DecoderReader, DecoderWriter, EncoderReader, EncoderWriter,
-            // encode_to_vec, decode_to_vec
+pub trait Codec { /* ... */ } // implement this to add a codec
+
+pub mod io; // CodecReader, CodecWriter, to_vec
 ```
 
-Deliberately **not** re-exported: `compcol::Algorithm`. A codec crate
-exposes its codec through a pair of plain constructor functions instead
-— conventionally `<name>_encoder()` / `<name>_decoder()` — so building a
-codec never needs a trait in scope, just two function calls. See
-`CREATING-CODECS.md` for why.
+Deliberately **not** exposed: any `Algorithm`-style pairing trait. A codec
+crate exposes each codec through a plain constructor function —
+conventionally `<name>_enc()` / `<name>_dec()` for a pair that reverse
+each other — so building a codec never needs a trait in scope, just a
+function call. See `CREATING-CODECS.md` for why.
 
 ## Streaming through `std::io`
 
-Wrap a `Read` to decode on the fly, or a `Write` to encode on the fly.
-These two examples are taken directly from the `rust-twin-v2` experiment
-that this crate grew out of (there `rot13_decoder()`/`rot13_encoder()`
-come from the experiment's own `rot13` module; in a real codec crate
-they'd come from that crate, e.g. `rust_codecs_rot13::rot13_decoder()`).
+Wrap a `Read` to run a codec on the fly as bytes are pulled through, or a
+`Write` to run one as bytes are pushed through. These examples use a
+ROT13 codec (in a real codec crate, its constructor would come from that
+crate, e.g. `rust_codecs_rot13::rot13_dec()`).
 
-**Decoding a file as you read it** (`design-interface/rust-twin-v2/src/bin/wrap_input.rs`):
+**Transforming a file as you read it**:
 
 ```rust
 use std::fs::File;
 use std::io;
 
-use compcol::io::DecoderReader;
-use rust_twin_v2::rot13_decoder;
+use rust_codecs_core::io::CodecReader;
+use rust_codecs_rot13::rot13_dec;
 
 fn main() -> std::io::Result<()> {
-    let raw = File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/encoded-hello.txt"))?;
-    let mut reader = DecoderReader::new(raw, rot13_decoder());
+    let raw = File::open("encoded-hello.txt")?;
+    let mut reader = CodecReader::new(raw, rot13_dec());
     io::copy(&mut reader, &mut io::stdout())?;
     Ok(())
 }
 ```
 
-`DecoderReader` reads raw bytes from the wrapped source, decodes them
-on the fly, and yields the *decoded* bytes to its own caller. It detects
-end-of-stream from the inner reader's EOF and drains the codec
+`CodecReader` reads raw bytes from the wrapped source, runs the codec on
+them on the fly, and yields the transformed bytes to its own caller. It
+detects end-of-stream from the inner reader's EOF and drains the codec
 internally — the caller never needs to call `finish()` explicitly.
 
-**Encoding as you write** (`design-interface/rust-twin-v2/src/bin/wrap_output.rs`):
+**Transforming as you write**:
 
 ```rust
 use std::io::Write;
 
-use compcol::io::EncoderWriter;
-use rust_twin_v2::rot13_encoder;
+use rust_codecs_core::io::CodecWriter;
+use rust_codecs_rot13::rot13_enc;
 
 fn main() -> std::io::Result<()> {
-    let plain = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/input-hello.txt"))?;
-    let mut writer = EncoderWriter::new(std::io::stdout().lock(), rot13_encoder());
+    let plain = std::fs::read("input-hello.txt")?;
+    let mut writer = CodecWriter::new(std::io::stdout().lock(), rot13_enc());
     writer.write_all(&plain)?;
     let _stdout = writer.finish()?;
     Ok(())
 }
 ```
 
-`EncoderWriter` encodes bytes on the fly as they're written to it. Unlike
-reading, writing has no built-in "no more input" signal — `write_all`
-just accepts bytes — so the caller must call `.finish()` explicitly once
-all input has been written. `finish()` flushes any bytes the encoder was
-still holding, finalizes the stream (trailer, checksum, padding — for a
-stateful codec), and hands back ownership of the wrapped writer.
+`CodecWriter` runs the codec on bytes on the fly as they're written to
+it. Unlike reading, writing has no built-in "no more input" signal —
+`write_all` just accepts bytes — so the caller must call `.finish()`
+explicitly once all input has been written. `finish()` flushes any bytes
+the codec was still holding, finalizes the stream (trailer, checksum,
+padding — for a stateful codec), and hands back ownership of the wrapped
+writer.
 
-`EncoderReader` (a `Read` that encodes what it pulls from its source) and
-`DecoderWriter` (a `Write` that decodes what's pushed to it) round out
-the four combinations; pick by which side you control and which
-direction the bytes need to flow.
+There's one `CodecReader` and one `CodecWriter` — not four — since a
+codec no longer comes in a direction-typed pair; which one you reach for
+depends only on which side you control and which way the bytes need to
+flow.
 
 Because `Read` pulls and `Write` pushes, a wrapper of one direction can't
 be nested directly inside a wrapper of the other — bridging a
 read-then-write (or write-then-read) boundary needs an explicit
 `std::io::copy` through an intermediate buffer.
 
-## One-shot `Vec<u8>` helpers
+## One-shot `Vec<u8>` helper
 
 For a payload you already have fully in memory:
 
 ```rust
-use rust_codecs_core::io::{decode_to_vec, encode_to_vec};
-// rot13_encoder()/rot13_decoder() come from a codec crate, as above.
+use rust_codecs_core::io::to_vec;
+// rot13_enc()/rot13_dec() come from a codec crate, as above.
 
-let encoded = encode_to_vec(rot13_encoder(), b"Hello, world!\n")?;
-let decoded = decode_to_vec(rot13_decoder(), &encoded)?;
+let encoded = to_vec(rot13_enc(), b"Hello, world!\n")?;
+let decoded = to_vec(rot13_dec(), &encoded)?;
 assert_eq!(decoded, b"Hello, world!\n");
 ```
 
-Unlike `compcol::vec::compress_to_vec`/`decompress_to_vec`, these take an
-already-constructed codec value (built via the codec crate's
-`<name>_encoder()`/`<name>_decoder()`) rather than being generic over
-`Algorithm`.
+Unlike `compcol::vec::compress_to_vec`/`decompress_to_vec`, this takes an
+already-constructed codec value (built via the codec crate's own
+constructor function) rather than being generic over `Algorithm`.
