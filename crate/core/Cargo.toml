@@ -6,6 +6,10 @@ edition = "2021"
 [dependencies]
 compcol = { version = "0.6", default-features = false, features = ["std"] }
 
+[features]
+identity = []
+rot13 = []
+
 [lib]
 name = "rust_codecs_core"
 path = "src/lib.rs"

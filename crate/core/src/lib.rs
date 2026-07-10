@@ -15,3 +15,9 @@ mod codec;
 pub use codec::Codec;
 
 pub mod io;
+
+#[cfg(feature = "identity")]
+pub mod identity;
+
+#[cfg(feature = "rot13")]
+pub mod rot13;
