@@ -37,8 +37,6 @@ impl Codec for Rot13 {
     fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
         Ok((Progress::default(), Status::StreamEnd))
     }
-
-    fn reset(&mut self) {}
 }
 ```
 
@@ -52,18 +50,10 @@ Notes on the trait contract:
   repeatedly with a fresh output buffer until it reports `StreamEnd`.
   A stateless, self-inverse codec like ROT13 has nothing to flush, so
   `finish` returns `StreamEnd` immediately.
-- `reset` returns the codec to its just-constructed state, preserving
-  any configuration passed at construction time.
 - `Codec` also has `flush` (drain pending state to a sync boundary
   *without* ending the stream — unlike `finish`, it never reports
   `StreamEnd`). It has a no-op default; only override it if your format
   defines an in-band sync marker (deflate/zlib/gzip do, ROT13 doesn't).
-- `Codec` also has `discard_output` (advance the transformed stream by
-  `n` bytes without emitting them, for `tar`-style archive skimming) —
-  the default implementation runs `process` and discards the result
-  through a scratch buffer; override it if your format can skip faster
-  (ROT13 can: skipping `n` output bytes is just consuming `n` input
-  bytes, no transform needed).
 
 A codec that reverses another one (e.g. a compressor and its matching
 decompressor) is a separate, independent value with its own `Codec`
@@ -101,7 +91,6 @@ At minimum, exercise:
   smaller than the input, to confirm `Status::OutputFull` is handled and
   the call resumes correctly.
 - `finish()` reaching `Status::StreamEnd`.
-- `discard_output` if you overrode the default implementation.
 
 That's the whole surface: implement `Codec`, expose constructor
 function(s), and the rest of RustCodecs (stream adapters, `Vec<u8>`

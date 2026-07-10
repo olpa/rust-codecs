@@ -23,18 +23,4 @@ pub trait Codec {
     fn flush(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
         Ok((Progress::default(), Status::InputEmpty))
     }
-
-    /// Advance the transformed stream by up to `n` bytes without emitting
-    /// them (e.g. `tar`-style archive skimming on a codec that expands
-    /// its input). The default runs `process` into a scratch buffer and
-    /// discards the result; override it if the codec can skip faster
-    /// (e.g. a fixed-ratio transform can skip by counting input bytes).
-    fn discard_output(&mut self, input: &[u8], n: usize) -> Result<Progress, Error> {
-        let mut scratch = vec![0u8; n];
-        self.process(input, &mut scratch).map(|(progress, _status)| progress)
-    }
-
-    /// Return the codec to its just-constructed state, preserving any
-    /// configuration passed at construction time.
-    fn reset(&mut self);
 }
