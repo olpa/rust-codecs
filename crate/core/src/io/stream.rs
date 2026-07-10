@@ -49,6 +49,10 @@ impl<R: Read, C: Codec> CodecReader<R, C> {
 
 impl<R: Read, C: Codec> Read for CodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
         loop {
             if self.stream_end {
                 return Ok(0);
