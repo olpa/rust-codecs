@@ -24,3 +24,43 @@ impl Codec for Identity {
 pub fn identity() -> Identity {
     Identity
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Read, Write};
+
+    use super::identity;
+    use crate::io::{to_vec, CodecReader, CodecWriter};
+
+    const INPUT: &[u8] = b"Hello, world!";
+
+    #[test]
+    fn to_vec_round_trip() {
+        assert_eq!(to_vec(identity(), INPUT).unwrap(), INPUT);
+    }
+
+    #[test]
+    fn reader_with_small_output_buffer() {
+        let mut reader = CodecReader::new(Cursor::new(INPUT), identity());
+        let mut out = Vec::new();
+        let mut buf = [0u8; 3];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(out, INPUT);
+    }
+
+    #[test]
+    fn writer_finish_reaches_stream_end() {
+        let mut writer = CodecWriter::new(Vec::new(), identity());
+        for chunk in INPUT.chunks(3) {
+            writer.write_all(chunk).unwrap();
+        }
+        let out = writer.finish().unwrap();
+        assert_eq!(out, INPUT);
+    }
+}
