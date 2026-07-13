@@ -24,3 +24,20 @@ pub trait Codec {
         Ok((Progress::default(), Status::InputEmpty))
     }
 }
+
+// Mirrors std's `impl<R: Read + ?Sized> Read for Box<R>`: lets a `Box<dyn
+// Codec>` (or a boxed concrete codec) stand in anywhere a `Codec` is
+// expected, e.g. to build a runtime-determined chain of codecs.
+impl<C: Codec + ?Sized> Codec for Box<C> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        (**self).process(input, output)
+    }
+
+    fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        (**self).finish(output)
+    }
+
+    fn flush(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        (**self).flush(output)
+    }
+}

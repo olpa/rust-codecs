@@ -57,25 +57,25 @@ Notes on the trait contract:
 
 A codec that reverses another one (e.g. a compressor and its matching
 decompressor) is a separate, independent value with its own `Codec`
-impl — there's no shared type or trait connecting the two. ROT13 doesn't
-need a second type: the transform is genuinely the same both ways, so
-one `Rot13` value serves both constructors below.
+impl — there's no shared type or trait connecting the two.
 
-## 2. Expose `<name>_enc()` / `<name>_dec()` constructors
+## 2. Expose a constructor
 
 ```rust
-pub fn rot13_enc() -> Rot13 {
-    Rot13
-}
-
-pub fn rot13_dec() -> Rot13 {
+pub fn rot13() -> Rot13 {
     Rot13
 }
 ```
 
 Plain functions need no trait import and no pairing machinery — callers
-just call `rot13_dec()`/`rot13_enc()` and get a value ready to hand to
-`CodecReader`, `CodecWriter`, `to_vec`, etc.
+just call `rot13()` and get a value ready to hand to `CodecReader`,
+`CodecWriter`, `to_vec`, etc.
+
+ROT13 is stateless and self-inverse — the same value handles both
+directions — so one `<name>()` constructor is enough. If encoding and
+decoding genuinely need different values (different initial state,
+different configuration), expose the pair as `<name>_enc()` /
+`<name>_dec()` instead, one returning each.
 
 If your codec takes configuration (compression level, dictionary, …),
 give the constructor a parameter or add a `_with` variant — there's no
