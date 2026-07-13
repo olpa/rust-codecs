@@ -1,9 +1,9 @@
 //! Example [`Codec`]s: standard base64 encode/decode, built on the
 //! `base64` crate (<https://docs.rs/base64/>).
 //!
-//! Both codecs buffer at most one incomplete group between `process`
-//! calls: up to 2 leftover bytes for the encoder, up to 3 leftover
-//! base64 characters for the decoder.
+//! Both codecs carry a `pending_group` of at most one incomplete group
+//! between `process` calls: up to 2 leftover bytes for the encoder, up
+//! to 3 leftover base64 characters for the decoder.
 
 use base64::engine::{general_purpose::STANDARD, Engine};
 
