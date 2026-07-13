@@ -20,12 +20,14 @@ pub struct B64Enc {
 }
 
 impl Codec for B64Enc {
-    fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        todo!()
+    // Dummy: discards input, writes nothing. Replaced by the real
+    // encoder in the next commit.
+    fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        Ok((Progress { consumed: input.len(), written: 0 }, Status::InputEmpty))
     }
 
     fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        todo!()
+        Ok((Progress::default(), Status::StreamEnd))
     }
 }
 
@@ -42,12 +44,14 @@ pub struct B64Dec {
 }
 
 impl Codec for B64Dec {
-    fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        todo!()
+    // Dummy: discards input, writes nothing. Replaced by the real
+    // decoder in the next commit.
+    fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        Ok((Progress { consumed: input.len(), written: 0 }, Status::InputEmpty))
     }
 
     fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        todo!()
+        Ok((Progress::default(), Status::StreamEnd))
     }
 }
 
