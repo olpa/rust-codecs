@@ -36,6 +36,14 @@ impl Codec for B64Enc {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
             }
             if output.len() < ENCODED_GROUP {
+                if in_pos == 0 {
+                    // Buffer was already full on entry (a previous call
+                    // topped it up but couldn't fit the output) and this
+                    // call took no new input either — no progress at
+                    // all, so retrying with the same buffer would spin
+                    // forever.
+                    return Err(Error::OutputTooSmall);
+                }
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
             }
             out_pos += STANDARD
@@ -114,13 +122,76 @@ pub struct B64Dec {
 }
 
 impl Codec for B64Dec {
-    // Dummy: discards input, writes nothing. Replaced by the real
-    // decoder in the next commit.
-    fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        Ok((Progress { consumed: input.len(), written: 0 }, Status::InputEmpty))
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        let mut in_pos = 0;
+        let mut out_pos = 0;
+
+        // Top up a pending partial group with fresh input.
+        if self.buf_len > 0 {
+            let need = ENCODED_GROUP - self.buf_len;
+            let take = need.min(input.len());
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&input[..take]);
+            self.buf_len += take;
+            in_pos += take;
+
+            if self.buf_len < ENCODED_GROUP {
+                return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
+            }
+            if output.len() < GROUP {
+                if in_pos == 0 {
+                    return Err(Error::OutputTooSmall);
+                }
+                return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
+            }
+            out_pos += STANDARD
+                .decode_slice(&self.buf[..], &mut output[..GROUP])
+                .map_err(|_| Error::Corrupt)?;
+            self.buf_len = 0;
+        }
+
+        // Bulk-decode as many whole groups as fit both remaining
+        // input and output, straight from the caller's slices.
+        let remaining_in = input.len() - in_pos;
+        let remaining_out = output.len() - out_pos;
+        let groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
+        if groups > 0 {
+            let in_bytes = groups * ENCODED_GROUP;
+            let out_bytes = groups * GROUP;
+            out_pos += STANDARD
+                .decode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
+                .map_err(|_| Error::Corrupt)?;
+            in_pos += in_bytes;
+        }
+
+        // A full group's worth of unconsumed input means the output
+        // buffer ran out before a bulk group could be decoded.
+        let remaining = input.len() - in_pos;
+        if remaining >= ENCODED_GROUP {
+            if out_pos == 0 {
+                return Err(Error::OutputTooSmall);
+            }
+            return Ok((Progress { consumed: in_pos, written: out_pos }, Status::OutputFull));
+        }
+
+        // Buffer any leftover < ENCODED_GROUP characters for the next
+        // call.
+        if remaining > 0 {
+            self.buf[..remaining].copy_from_slice(&input[in_pos..]);
+            self.buf_len = remaining;
+            in_pos = input.len();
+        }
+
+        let status = if in_pos == input.len() { Status::InputEmpty } else { Status::OutputFull };
+        Ok((Progress { consumed: in_pos, written: out_pos }, status))
     }
 
     fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        if self.buf_len != 0 {
+            // A trailing group of 1-3 base64 characters can never be
+            // valid (a full group is always 4 chars, whitespace/padding
+            // included) — the stream was truncated mid-symbol.
+            return Err(Error::UnexpectedEnd);
+        }
         Ok((Progress::default(), Status::StreamEnd))
     }
 }
