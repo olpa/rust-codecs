@@ -20,14 +20,84 @@ pub struct B64Enc {
 }
 
 impl Codec for B64Enc {
-    // Dummy: discards input, writes nothing. Replaced by the real
-    // encoder in the next commit.
-    fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        Ok((Progress { consumed: input.len(), written: 0 }, Status::InputEmpty))
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        let mut in_pos = 0;
+        let mut out_pos = 0;
+
+        // Top up a pending partial group with fresh input.
+        if self.buf_len > 0 {
+            let need = GROUP - self.buf_len;
+            let take = need.min(input.len());
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&input[..take]);
+            self.buf_len += take;
+            in_pos += take;
+
+            if self.buf_len < GROUP {
+                return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
+            }
+            if output.len() < ENCODED_GROUP {
+                return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
+            }
+            out_pos += STANDARD
+                .encode_slice(&self.buf[..], &mut output[..ENCODED_GROUP])
+                .map_err(|_| Error::Corrupt)?;
+            self.buf_len = 0;
+        }
+
+        // Bulk-encode as many whole groups as fit both remaining
+        // input and output, straight from the caller's slices.
+        let remaining_in = input.len() - in_pos;
+        let remaining_out = output.len() - out_pos;
+        let groups = (remaining_in / GROUP).min(remaining_out / ENCODED_GROUP);
+        if groups > 0 {
+            let in_bytes = groups * GROUP;
+            let out_bytes = groups * ENCODED_GROUP;
+            out_pos += STANDARD
+                .encode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
+                .map_err(|_| Error::Corrupt)?;
+            in_pos += in_bytes;
+        }
+
+        // A full group's worth of unconsumed input means the output
+        // buffer ran out before a bulk group could be encoded — leave
+        // it for the caller to retry with more output space, rather
+        // than overflowing the leftover buffer (which only ever holds
+        // < GROUP bytes).
+        let remaining = input.len() - in_pos;
+        if remaining >= GROUP {
+            if out_pos == 0 {
+                // Nothing was written this call and the output buffer
+                // is smaller than one encoded group (4 bytes) — this
+                // codec has a minimum atomic output size, so retrying
+                // with the same buffer would spin forever.
+                return Err(Error::OutputTooSmall);
+            }
+            return Ok((Progress { consumed: in_pos, written: out_pos }, Status::OutputFull));
+        }
+
+        // Buffer any leftover < GROUP bytes for the next call.
+        if remaining > 0 {
+            self.buf[..remaining].copy_from_slice(&input[in_pos..]);
+            self.buf_len = remaining;
+            in_pos = input.len();
+        }
+
+        let status = if in_pos == input.len() { Status::InputEmpty } else { Status::OutputFull };
+        Ok((Progress { consumed: in_pos, written: out_pos }, status))
     }
 
-    fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        Ok((Progress::default(), Status::StreamEnd))
+    fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        if self.buf_len == 0 {
+            return Ok((Progress::default(), Status::StreamEnd));
+        }
+        if output.len() < ENCODED_GROUP {
+            return Ok((Progress::default(), Status::OutputFull));
+        }
+        let written = STANDARD
+            .encode_slice(&self.buf[..self.buf_len], &mut output[..ENCODED_GROUP])
+            .map_err(|_| Error::Corrupt)?;
+        self.buf_len = 0;
+        Ok((Progress { consumed: 0, written }, Status::StreamEnd))
     }
 }
 
@@ -82,9 +152,11 @@ mod tests {
 
     #[test]
     fn encode_reader_with_small_output_buffer() {
+        // 4 bytes is base64's atomic output size (one encoded group);
+        // a smaller buffer can never receive a full group.
         let mut reader = CodecReader::new(Cursor::new(INPUT), b64_enc());
         let mut out = Vec::new();
-        let mut buf = [0u8; 3];
+        let mut buf = [0u8; 4];
         loop {
             let n = reader.read(&mut buf).unwrap();
             if n == 0 {
