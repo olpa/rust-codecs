@@ -15,8 +15,8 @@ const ENCODED_GROUP: usize = 4;
 /// Standard base64 encoder.
 #[derive(Debug, Clone, Default)]
 pub struct B64Enc {
-    buf: [u8; GROUP],
-    buf_len: usize,
+    pending_group: [u8; GROUP],
+    len: usize,
 }
 
 impl Codec for B64Enc {
@@ -25,14 +25,14 @@ impl Codec for B64Enc {
         let mut out_pos = 0;
 
         // Top up a pending partial group with fresh input.
-        if self.buf_len > 0 {
-            let need = GROUP - self.buf_len;
+        if self.len > 0 {
+            let need = GROUP - self.len;
             let take = need.min(input.len());
-            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&input[..take]);
-            self.buf_len += take;
+            self.pending_group[self.len..self.len + take].copy_from_slice(&input[..take]);
+            self.len += take;
             in_pos += take;
 
-            if self.buf_len < GROUP {
+            if self.len < GROUP {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
             }
             if output.len() < ENCODED_GROUP {
@@ -47,9 +47,9 @@ impl Codec for B64Enc {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
             }
             out_pos += STANDARD
-                .encode_slice(&self.buf[..], &mut output[..ENCODED_GROUP])
+                .encode_slice(&self.pending_group[..], &mut output[..ENCODED_GROUP])
                 .map_err(|_| Error::Corrupt)?;
-            self.buf_len = 0;
+            self.len = 0;
         }
 
         // Bulk-encode as many whole groups as fit both remaining
@@ -85,8 +85,8 @@ impl Codec for B64Enc {
 
         // Buffer any leftover < GROUP bytes for the next call.
         if remaining > 0 {
-            self.buf[..remaining].copy_from_slice(&input[in_pos..]);
-            self.buf_len = remaining;
+            self.pending_group[..remaining].copy_from_slice(&input[in_pos..]);
+            self.len = remaining;
             in_pos = input.len();
         }
 
@@ -95,16 +95,16 @@ impl Codec for B64Enc {
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        if self.buf_len == 0 {
+        if self.len == 0 {
             return Ok((Progress::default(), Status::StreamEnd));
         }
         if output.len() < ENCODED_GROUP {
             return Ok((Progress::default(), Status::OutputFull));
         }
         let written = STANDARD
-            .encode_slice(&self.buf[..self.buf_len], &mut output[..ENCODED_GROUP])
+            .encode_slice(&self.pending_group[..self.len], &mut output[..ENCODED_GROUP])
             .map_err(|_| Error::Corrupt)?;
-        self.buf_len = 0;
+        self.len = 0;
         Ok((Progress { consumed: 0, written }, Status::StreamEnd))
     }
 }
@@ -117,8 +117,8 @@ pub fn b64_enc() -> B64Enc {
 /// Standard base64 decoder.
 #[derive(Debug, Clone, Default)]
 pub struct B64Dec {
-    buf: [u8; ENCODED_GROUP],
-    buf_len: usize,
+    pending_group: [u8; ENCODED_GROUP],
+    len: usize,
 }
 
 impl Codec for B64Dec {
@@ -127,14 +127,14 @@ impl Codec for B64Dec {
         let mut out_pos = 0;
 
         // Top up a pending partial group with fresh input.
-        if self.buf_len > 0 {
-            let need = ENCODED_GROUP - self.buf_len;
+        if self.len > 0 {
+            let need = ENCODED_GROUP - self.len;
             let take = need.min(input.len());
-            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&input[..take]);
-            self.buf_len += take;
+            self.pending_group[self.len..self.len + take].copy_from_slice(&input[..take]);
+            self.len += take;
             in_pos += take;
 
-            if self.buf_len < ENCODED_GROUP {
+            if self.len < ENCODED_GROUP {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
             }
             if output.len() < GROUP {
@@ -144,9 +144,9 @@ impl Codec for B64Dec {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
             }
             out_pos += STANDARD
-                .decode_slice(&self.buf[..], &mut output[..GROUP])
+                .decode_slice(&self.pending_group[..], &mut output[..GROUP])
                 .map_err(|_| Error::Corrupt)?;
-            self.buf_len = 0;
+            self.len = 0;
         }
 
         // Bulk-decode as many whole groups as fit both remaining
@@ -176,8 +176,8 @@ impl Codec for B64Dec {
         // Buffer any leftover < ENCODED_GROUP characters for the next
         // call.
         if remaining > 0 {
-            self.buf[..remaining].copy_from_slice(&input[in_pos..]);
-            self.buf_len = remaining;
+            self.pending_group[..remaining].copy_from_slice(&input[in_pos..]);
+            self.len = remaining;
             in_pos = input.len();
         }
 
@@ -186,7 +186,7 @@ impl Codec for B64Dec {
     }
 
     fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        if self.buf_len != 0 {
+        if self.len != 0 {
             // A trailing group of 1-3 base64 characters can never be
             // valid (a full group is always 4 chars, whitespace/padding
             // included) — the stream was truncated mid-symbol.
