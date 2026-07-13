@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "cli"
 version = "0.1.0"
 dependencies = [
@@ -19,5 +25,6 @@ checksum = "28b37ce533aa0fddc1e6820e331968ba72aa48b5c8bbb2bebdc03d48b6ed0f16"
 name = "rust-codecs-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "compcol",
 ]
