@@ -20,7 +20,11 @@ fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
     match name {
         "identity" => Ok(Box::new(rust_codecs_core::identity::identity())),
         "rot13" => Ok(Box::new(rust_codecs_core::rot13::rot13())),
-        other => Err(format!("unknown codec {other:?} (expected \"identity\" or \"rot13\")")),
+        "b64-enc" => Ok(Box::new(rust_codecs_core::base64::b64_enc())),
+        "b64-dec" => Ok(Box::new(rust_codecs_core::base64::b64_dec())),
+        other => Err(format!(
+            "unknown codec {other:?} (expected \"identity\", \"rot13\", \"b64-enc\", or \"b64-dec\")"
+        )),
     }
 }
 
