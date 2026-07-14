@@ -16,16 +16,45 @@ use std::io::{self, Read};
 use rust_codecs_core::io::{CodecReader, CodecWriter, FinishWrite};
 use rust_codecs_core::Codec;
 
+/// Single source of truth for known codec names: `make_codec`, the
+/// "unknown codec" error, and `--help`'s codec list all read from
+/// this instead of repeating the name list.
+const CODECS: &[(&str, fn() -> Box<dyn Codec>)] = &[
+    ("identity", || Box::new(rust_codecs_core::identity::identity())),
+    ("rot13", || Box::new(rust_codecs_core::rot13::rot13())),
+    ("b64-enc", || Box::new(rust_codecs_core::base64::b64_enc())),
+    ("b64-dec", || Box::new(rust_codecs_core::base64::b64_dec())),
+];
+
+fn usage() -> String {
+    let names = CODECS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+    format!(
+        "\
+Test harness for chaining codecs: builds a CodecReader chain from
+--readers and a CodecWriter chain from --writers, then copies stdin
+through the readers, through the writers, to stdout.
+
+Usage:
+  cargo run -p cli -- [--readers CODEC...] [--writers CODEC...]
+
+Codecs: {names}
+
+Reader codecs apply in the order listed (first listed runs on the raw
+bytes first). Writer codecs also apply in the order listed (first
+listed runs first, closest to the incoming bytes, before reaching
+stdout).
+
+Example:
+  echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
+"
+    )
+}
+
 fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
-    match name {
-        "identity" => Ok(Box::new(rust_codecs_core::identity::identity())),
-        "rot13" => Ok(Box::new(rust_codecs_core::rot13::rot13())),
-        "b64-enc" => Ok(Box::new(rust_codecs_core::base64::b64_enc())),
-        "b64-dec" => Ok(Box::new(rust_codecs_core::base64::b64_dec())),
-        other => Err(format!(
-            "unknown codec {other:?} (expected \"identity\", \"rot13\", \"b64-enc\", or \"b64-dec\")"
-        )),
-    }
+    CODECS.iter().find(|(n, _)| *n == name).map(|(_, ctor)| ctor()).ok_or_else(|| {
+        let names = CODECS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ");
+        format!("unknown codec {name:?} (expected one of: {names})")
+    })
 }
 
 enum Mode {
@@ -56,8 +85,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<(Vec<String>, Vec<St
     Ok((readers, writers))
 }
 
-fn run() -> Result<(), String> {
-    let (reader_names, writer_names) = parse_args(std::env::args().skip(1))?;
+fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (reader_names, writer_names) = parse_args(args)?;
 
     let mut reader: Box<dyn Read> = Box::new(io::stdin());
     for name in &reader_names {
@@ -77,7 +106,13 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
-    if let Err(err) = run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{}", usage());
+        return;
+    }
+
+    if let Err(err) = run(args.into_iter()) {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
