@@ -24,6 +24,23 @@ use crate::{Codec, Error, Progress, Status};
 const GROUP: usize = 3;
 const ENCODED_GROUP: usize = 4;
 
+/// Copy as much of `input` as fits into `pending[*len..]` (up to
+/// `pending.len()`), advance `*len` by however much was taken, and
+/// return that amount so the caller can advance its own `in_pos`.
+fn append_to_pending(pending: &mut [u8], len: &mut usize, input: &[u8]) -> usize {
+    let take = (pending.len() - *len).min(input.len());
+    pending[*len..*len + take].copy_from_slice(&input[..take]);
+    *len += take;
+    take
+}
+
+/// Stash `tail` (shorter than `pending.len()`) in `pending` for the next
+/// call, recording how many bytes are buffered in `*len`.
+fn buffer_leftover(pending: &mut [u8], len: &mut usize, tail: &[u8]) {
+    pending[..tail.len()].copy_from_slice(tail);
+    *len = tail.len();
+}
+
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it encodes with.
 ///
@@ -57,11 +74,7 @@ impl<E: Engine> Codec for Base64Enc<E> {
 
         // Top up a pending partial group with fresh input.
         if self.len > 0 {
-            let need = GROUP - self.len;
-            let take = need.min(input.len());
-            self.pending_group[self.len..self.len + take].copy_from_slice(&input[..take]);
-            self.len += take;
-            in_pos += take;
+            in_pos += append_to_pending(&mut self.pending_group, &mut self.len, input);
 
             if self.len < GROUP {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
@@ -125,8 +138,7 @@ impl<E: Engine> Codec for Base64Enc<E> {
 
         // Buffer any leftover < GROUP bytes for the next call.
         if remaining > 0 {
-            self.pending_group[..remaining].copy_from_slice(&input[in_pos..]);
-            self.len = remaining;
+            buffer_leftover(&mut self.pending_group, &mut self.len, &input[in_pos..]);
             in_pos = input.len();
         }
 
@@ -184,11 +196,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
 
         // Top up a pending partial group with fresh input.
         if self.len > 0 {
-            let need = ENCODED_GROUP - self.len;
-            let take = need.min(input.len());
-            self.pending_group[self.len..self.len + take].copy_from_slice(&input[..take]);
-            self.len += take;
-            in_pos += take;
+            in_pos += append_to_pending(&mut self.pending_group, &mut self.len, input);
 
             if self.len < ENCODED_GROUP {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
@@ -260,8 +268,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
         if remaining >= ENCODED_GROUP {
             let next_group = &input[in_pos..in_pos + ENCODED_GROUP];
             if next_group.contains(&b'=') {
-                self.pending_group.copy_from_slice(next_group);
-                self.len = ENCODED_GROUP;
+                buffer_leftover(&mut self.pending_group, &mut self.len, next_group);
                 in_pos += ENCODED_GROUP;
                 if in_pos < input.len() {
                     return Err(Error::Corrupt);
@@ -277,8 +284,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
         // Buffer any leftover < ENCODED_GROUP characters for the next
         // call.
         if remaining > 0 {
-            self.pending_group[..remaining].copy_from_slice(&input[in_pos..]);
-            self.len = remaining;
+            buffer_leftover(&mut self.pending_group, &mut self.len, &input[in_pos..]);
             in_pos = input.len();
         }
 
