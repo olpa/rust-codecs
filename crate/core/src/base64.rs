@@ -5,10 +5,10 @@
 //! between `process` calls: up to 2 leftover bytes for the encoder, up
 //! to 3 leftover base64 characters for the decoder.
 //!
-//! [`b64_enc`]/[`b64_dec`] build the standard base64 alphabet with
+//! [`base64_enc`]/[`base64_dec`] build the standard base64 alphabet with
 //! padding. To use a different alphabet or padding behavior (e.g.
-//! URL-safe, or no padding), construct [`B64Enc::with_engine`]/
-//! [`B64Dec::with_engine`] with any other `base64` crate [`Engine`].
+//! URL-safe, or no padding), construct [`Base64Enc::with_engine`]/
+//! [`Base64Dec::with_engine`] with any other `base64` crate [`Engine`].
 
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
@@ -36,21 +36,21 @@ const ENCODED_GROUP: usize = 4;
 /// Engine` couldn't represent more than one concrete engine type
 /// anyway. Monomorphized generics are the only option here.
 #[derive(Debug, Clone)]
-pub struct B64Enc<E: Engine = GeneralPurpose> {
+pub struct Base64Enc<E: Engine = GeneralPurpose> {
     engine: E,
     pending_group: [u8; GROUP],
     len: usize,
 }
 
-impl<E: Engine> B64Enc<E> {
-    /// Build a [`B64Enc`] that encodes with a caller-supplied `Engine`
+impl<E: Engine> Base64Enc<E> {
+    /// Build a [`Base64Enc`] that encodes with a caller-supplied `Engine`
     /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
     pub fn with_engine(engine: E) -> Self {
         Self { engine, pending_group: [0; GROUP], len: 0 }
     }
 }
 
-impl<E: Engine> Codec for B64Enc<E> {
+impl<E: Engine> Codec for Base64Enc<E> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
@@ -149,35 +149,35 @@ impl<E: Engine> Codec for B64Enc<E> {
     }
 }
 
-/// Build a [`B64Enc`] codec using the standard base64 alphabet with
+/// Build a [`Base64Enc`] codec using the standard base64 alphabet with
 /// padding. For a different alphabet or padding behavior, use
-/// [`B64Enc::with_engine`].
-pub fn b64_enc() -> B64Enc {
-    B64Enc::with_engine(STANDARD)
+/// [`Base64Enc::with_engine`].
+pub fn base64_enc() -> Base64Enc {
+    Base64Enc::with_engine(STANDARD)
 }
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it decodes with.
 ///
 /// Generic over `E` rather than boxed as `dyn Engine` for the same
-/// reason as [`B64Enc`]: `encode_slice`/`decode_slice` are generic
+/// reason as [`Base64Enc`]: `encode_slice`/`decode_slice` are generic
 /// methods, which can't be called through a trait object.
 #[derive(Debug, Clone)]
-pub struct B64Dec<E: Engine = GeneralPurpose> {
+pub struct Base64Dec<E: Engine = GeneralPurpose> {
     engine: E,
     pending_group: [u8; ENCODED_GROUP],
     len: usize,
 }
 
-impl<E: Engine> B64Dec<E> {
-    /// Build a [`B64Dec`] that decodes with a caller-supplied `Engine`
+impl<E: Engine> Base64Dec<E> {
+    /// Build a [`Base64Dec`] that decodes with a caller-supplied `Engine`
     /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
     pub fn with_engine(engine: E) -> Self {
         Self { engine, pending_group: [0; ENCODED_GROUP], len: 0 }
     }
 }
 
-impl<E: Engine> Codec for B64Dec<E> {
+impl<E: Engine> Codec for Base64Dec<E> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
@@ -270,11 +270,11 @@ impl<E: Engine> Codec for B64Dec<E> {
     }
 }
 
-/// Build a [`B64Dec`] codec using the standard base64 alphabet with
+/// Build a [`Base64Dec`] codec using the standard base64 alphabet with
 /// padding. For a different alphabet or padding behavior, use
-/// [`B64Dec::with_engine`].
-pub fn b64_dec() -> B64Dec {
-    B64Dec::with_engine(STANDARD)
+/// [`Base64Dec::with_engine`].
+pub fn base64_dec() -> Base64Dec {
+    Base64Dec::with_engine(STANDARD)
 }
 
 #[cfg(test)]
@@ -283,7 +283,7 @@ mod tests {
 
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-    use super::{b64_dec, b64_enc, B64Dec, B64Enc};
+    use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
     use crate::io::{to_vec, CodecReader, CodecWriter};
 
     const INPUT: &[u8] = b"Hello, World! 123";
@@ -291,19 +291,19 @@ mod tests {
 
     #[test]
     fn encode_to_vec() {
-        assert_eq!(to_vec(b64_enc(), INPUT).unwrap(), ENCODED);
+        assert_eq!(to_vec(base64_enc(), INPUT).unwrap(), ENCODED);
     }
 
     #[test]
     fn decode_to_vec() {
-        assert_eq!(to_vec(b64_dec(), ENCODED).unwrap(), INPUT);
+        assert_eq!(to_vec(base64_dec(), ENCODED).unwrap(), INPUT);
     }
 
     #[test]
     fn encode_reader_with_small_output_buffer() {
         // 4 bytes is base64's atomic output size (one encoded group);
         // a smaller buffer can never receive a full group.
-        let mut reader = CodecReader::new(Cursor::new(INPUT), b64_enc());
+        let mut reader = CodecReader::new(Cursor::new(INPUT), base64_enc());
         let mut out = Vec::new();
         let mut buf = [0u8; 4];
         loop {
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn decode_reader_with_small_output_buffer() {
-        let mut reader = CodecReader::new(Cursor::new(ENCODED), b64_dec());
+        let mut reader = CodecReader::new(Cursor::new(ENCODED), base64_dec());
         let mut out = Vec::new();
         let mut buf = [0u8; 3];
         loop {
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn encode_writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), b64_enc());
+        let mut writer = CodecWriter::new(Vec::new(), base64_enc());
         for chunk in INPUT.chunks(3) {
             writer.write_all(chunk).unwrap();
         }
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn decode_writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), b64_dec());
+        let mut writer = CodecWriter::new(Vec::new(), base64_dec());
         for chunk in ENCODED.chunks(3) {
             writer.write_all(chunk).unwrap();
         }
@@ -353,9 +353,9 @@ mod tests {
 
     #[test]
     fn round_trip_small_input_chunks() {
-        let encoded = to_vec(b64_enc(), INPUT).unwrap();
+        let encoded = to_vec(base64_enc(), INPUT).unwrap();
         assert_eq!(encoded, ENCODED);
-        let decoded = to_vec(b64_dec(), &encoded).unwrap();
+        let decoded = to_vec(base64_dec(), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
     }
 
@@ -366,7 +366,7 @@ mod tests {
         // but STANDARD requires padding and must still reject a
         // stream cut off mid-symbol.
         let truncated = &ENCODED[..ENCODED.len() - 2];
-        assert!(to_vec(b64_dec(), truncated).is_err());
+        assert!(to_vec(base64_dec(), truncated).is_err());
     }
 
     #[test]
@@ -374,9 +374,9 @@ mod tests {
         // URL_SAFE_NO_PAD drops the trailing '=' that STANDARD adds,
         // proving with_engine actually swaps the engine rather than
         // silently falling back to STANDARD.
-        let encoded = to_vec(B64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
+        let encoded = to_vec(Base64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
         assert_eq!(encoded, ENCODED.strip_suffix(b"=").unwrap());
-        let decoded = to_vec(B64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
+        let decoded = to_vec(Base64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
     }
 }

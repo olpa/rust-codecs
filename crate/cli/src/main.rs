@@ -22,8 +22,8 @@ use rust_codecs_core::Codec;
 const CODECS: &[(&str, fn() -> Box<dyn Codec>)] = &[
     ("identity", || Box::new(rust_codecs_core::identity::identity())),
     ("rot13", || Box::new(rust_codecs_core::rot13::rot13())),
-    ("b64-enc", || Box::new(rust_codecs_core::base64::b64_enc())),
-    ("b64-dec", || Box::new(rust_codecs_core::base64::b64_dec())),
+    ("base64-enc", || Box::new(rust_codecs_core::base64::base64_enc())),
+    ("base64-dec", || Box::new(rust_codecs_core::base64::base64_dec())),
 ];
 
 fn usage() -> String {
