@@ -1,25 +1,41 @@
-//! Example [`Codec`]s: standard base64 encode/decode, built on the
-//! `base64` crate (<https://docs.rs/base64/>).
+//! Example [`Codec`]s: base64 encode/decode, built on the `base64`
+//! crate (<https://docs.rs/base64/>).
 //!
 //! Both codecs carry a `pending_group` of at most one incomplete group
 //! between `process` calls: up to 2 leftover bytes for the encoder, up
 //! to 3 leftover base64 characters for the decoder.
+//!
+//! [`b64_enc`]/[`b64_dec`] build the standard base64 alphabet with
+//! padding. To use a different alphabet or padding behavior (e.g.
+//! URL-safe, or no padding), construct [`B64Enc::with_engine`]/
+//! [`B64Dec::with_engine`] with any other `base64` crate [`Engine`].
 
-use base64::engine::{general_purpose::STANDARD, Engine};
+use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
+use base64::engine::Engine;
 
 use crate::{Codec, Error, Progress, Status};
 
 const GROUP: usize = 3;
 const ENCODED_GROUP: usize = 4;
 
-/// Standard base64 encoder.
-#[derive(Debug, Clone, Default)]
-pub struct B64Enc {
+/// Base64 encoder, parameterized over the [`Engine`] (alphabet and
+/// padding behavior) it encodes with.
+#[derive(Debug, Clone)]
+pub struct B64Enc<E: Engine = GeneralPurpose> {
+    engine: E,
     pending_group: [u8; GROUP],
     len: usize,
 }
 
-impl Codec for B64Enc {
+impl<E: Engine> B64Enc<E> {
+    /// Build a [`B64Enc`] that encodes with a caller-supplied `Engine`
+    /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
+    pub fn with_engine(engine: E) -> Self {
+        Self { engine, pending_group: [0; GROUP], len: 0 }
+    }
+}
+
+impl<E: Engine> Codec for B64Enc<E> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
@@ -46,7 +62,7 @@ impl Codec for B64Enc {
                 }
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
             }
-            out_pos += STANDARD
+            out_pos += self.engine
                 .encode_slice(&self.pending_group[..], &mut output[..ENCODED_GROUP])
                 .map_err(|_| Error::Corrupt)?;
             self.len = 0;
@@ -60,7 +76,7 @@ impl Codec for B64Enc {
         if groups > 0 {
             let in_bytes = groups * GROUP;
             let out_bytes = groups * ENCODED_GROUP;
-            out_pos += STANDARD
+            out_pos += self.engine
                 .encode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
                 .map_err(|_| Error::Corrupt)?;
             in_pos += in_bytes;
@@ -101,7 +117,7 @@ impl Codec for B64Enc {
         if output.len() < ENCODED_GROUP {
             return Ok((Progress::default(), Status::OutputFull));
         }
-        let written = STANDARD
+        let written = self.engine
             .encode_slice(&self.pending_group[..self.len], &mut output[..ENCODED_GROUP])
             .map_err(|_| Error::Corrupt)?;
         self.len = 0;
@@ -109,19 +125,31 @@ impl Codec for B64Enc {
     }
 }
 
-/// Build a [`B64Enc`] codec.
+/// Build a [`B64Enc`] codec using the standard base64 alphabet with
+/// padding. For a different alphabet or padding behavior, use
+/// [`B64Enc::with_engine`].
 pub fn b64_enc() -> B64Enc {
-    B64Enc::default()
+    B64Enc::with_engine(STANDARD)
 }
 
-/// Standard base64 decoder.
-#[derive(Debug, Clone, Default)]
-pub struct B64Dec {
+/// Base64 decoder, parameterized over the [`Engine`] (alphabet and
+/// padding behavior) it decodes with.
+#[derive(Debug, Clone)]
+pub struct B64Dec<E: Engine = GeneralPurpose> {
+    engine: E,
     pending_group: [u8; ENCODED_GROUP],
     len: usize,
 }
 
-impl Codec for B64Dec {
+impl<E: Engine> B64Dec<E> {
+    /// Build a [`B64Dec`] that decodes with a caller-supplied `Engine`
+    /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
+    pub fn with_engine(engine: E) -> Self {
+        Self { engine, pending_group: [0; ENCODED_GROUP], len: 0 }
+    }
+}
+
+impl<E: Engine> Codec for B64Dec<E> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
@@ -143,7 +171,7 @@ impl Codec for B64Dec {
                 }
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
             }
-            out_pos += STANDARD
+            out_pos += self.engine
                 .decode_slice(&self.pending_group[..], &mut output[..GROUP])
                 .map_err(|_| Error::Corrupt)?;
             self.len = 0;
@@ -157,7 +185,7 @@ impl Codec for B64Dec {
         if groups > 0 {
             let in_bytes = groups * ENCODED_GROUP;
             let out_bytes = groups * GROUP;
-            out_pos += STANDARD
+            out_pos += self.engine
                 .decode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
                 .map_err(|_| Error::Corrupt)?;
             in_pos += in_bytes;
@@ -185,27 +213,40 @@ impl Codec for B64Dec {
         Ok((Progress { consumed: in_pos, written: out_pos }, status))
     }
 
-    fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        if self.len != 0 {
-            // A trailing group of 1-3 base64 characters can never be
-            // valid (a full group is always 4 chars, whitespace/padding
-            // included) — the stream was truncated mid-symbol.
-            return Err(Error::UnexpectedEnd);
+    fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
+        if self.len == 0 {
+            return Ok((Progress::default(), Status::StreamEnd));
         }
-        Ok((Progress::default(), Status::StreamEnd))
+        if output.len() < GROUP {
+            return Ok((Progress::default(), Status::OutputFull));
+        }
+        // A short trailing group is only valid at true end-of-stream,
+        // and only for engines that don't require padding (e.g.
+        // URL_SAFE_NO_PAD); the engine itself enforces that — a padded
+        // engine like STANDARD rejects an unpadded partial group here.
+        let written = self
+            .engine
+            .decode_slice(&self.pending_group[..self.len], &mut output[..GROUP])
+            .map_err(|_| Error::UnexpectedEnd)?;
+        self.len = 0;
+        Ok((Progress { consumed: 0, written }, Status::StreamEnd))
     }
 }
 
-/// Build a [`B64Dec`] codec.
+/// Build a [`B64Dec`] codec using the standard base64 alphabet with
+/// padding. For a different alphabet or padding behavior, use
+/// [`B64Dec::with_engine`].
 pub fn b64_dec() -> B64Dec {
-    B64Dec::default()
+    B64Dec::with_engine(STANDARD)
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read, Write};
 
-    use super::{b64_dec, b64_enc};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    use super::{b64_dec, b64_enc, B64Dec, B64Enc};
     use crate::io::{to_vec, CodecReader, CodecWriter};
 
     const INPUT: &[u8] = b"Hello, World! 123";
@@ -278,6 +319,27 @@ mod tests {
         let encoded = to_vec(b64_enc(), INPUT).unwrap();
         assert_eq!(encoded, ENCODED);
         let decoded = to_vec(b64_dec(), &encoded).unwrap();
+        assert_eq!(decoded, INPUT);
+    }
+
+    #[test]
+    fn decode_truncated_padded_stream_errors() {
+        // finish() decodes a short trailing group instead of always
+        // erroring (so no-pad engines' final 2-3 char group works),
+        // but STANDARD requires padding and must still reject a
+        // stream cut off mid-symbol.
+        let truncated = &ENCODED[..ENCODED.len() - 2];
+        assert!(to_vec(b64_dec(), truncated).is_err());
+    }
+
+    #[test]
+    fn round_trip_with_custom_engine() {
+        // URL_SAFE_NO_PAD drops the trailing '=' that STANDARD adds,
+        // proving with_engine actually swaps the engine rather than
+        // silently falling back to STANDARD.
+        let encoded = to_vec(B64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
+        assert_eq!(encoded, ENCODED.strip_suffix(b"=").unwrap());
+        let decoded = to_vec(B64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
     }
 }
