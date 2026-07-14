@@ -21,3 +21,6 @@ pub mod identity;
 
 #[cfg(feature = "rot13")]
 pub mod rot13;
+
+#[cfg(feature = "base64")]
+pub mod base64;
