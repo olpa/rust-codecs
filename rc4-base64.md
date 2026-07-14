@@ -1,6 +1,6 @@
-# rc4-base64: add b64-enc / b64-dec codecs
+# rc4-base64: add base64-enc / base64-dec codecs
 
-Add `b64-enc` and `b64-dec` codecs based on the `base64` crate
+Add `base64-enc` and `base64-dec` codecs based on the `base64` crate
 (https://docs.rs/base64/), following the existing `identity`/`rot13`
 pattern in `crate/core`, and wire them into the CLI.
 
@@ -20,17 +20,17 @@ Dependency: `base64 = "0.22"`, engine =
 
 ## Commits (red = compiles, tests fail; green = tests pass)
 
-1. **Red — scaffold**: `crate/core/src/base64.rs` with `B64Enc`/`B64Dec`
-   structs, `Codec` impls stubbed via `todo!()`, `b64_enc()`/`b64_dec()`
+1. **Red — scaffold**: `crate/core/src/base64.rs` with `Base64Enc`/`Base64Dec`
+   structs, `Codec` impls stubbed via `todo!()`, `base64_enc()`/`base64_dec()`
    constructors, `base64` feature flag + dep in `crate/core/Cargo.toml`,
    module wired into `lib.rs`, and a test module (round-trip,
    small-output-buffer, small-input-chunk cases) copied in the style of
    `rot13.rs`'s tests.
-2. **Green — encoder**: implement `B64Enc::process`/`finish`; encoder
+2. **Green — encoder**: implement `Base64Enc::process`/`finish`; encoder
    tests pass (decoder tests still panic on `todo!()`).
-3. **Green — decoder**: implement `B64Dec::process`/`finish`; all tests
+3. **Green — decoder**: implement `Base64Dec::process`/`finish`; all tests
    pass.
-4. **CLI wiring**: add `"b64-enc"`/`"b64-dec"` to `make_codec` in
+4. **CLI wiring**: add `"base64-enc"`/`"base64-dec"` to `make_codec` in
    `crate/cli/src/main.rs`, add the `base64` feature to the `cli`
    crate's dependency on `rust-codecs-core`, update the error message
    listing known codec names.
