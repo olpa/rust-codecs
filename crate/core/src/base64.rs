@@ -193,6 +193,19 @@ impl<E: Engine> Codec for Base64Dec<E> {
             if self.len < ENCODED_GROUP {
                 return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
             }
+            if self.pending_group.contains(&b'=') {
+                // Padding is only valid in the true last group of the
+                // whole stream, and `process` can't tell it's at the
+                // end — only `finish` can. Defer decoding this group
+                // until then. If more input shows up first (right here,
+                // or on a future call while self.len is still
+                // ENCODED_GROUP), that proves this wasn't the last
+                // group after all.
+                if in_pos < input.len() {
+                    return Err(Error::Corrupt);
+                }
+                return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
+            }
             if output.len() < GROUP {
                 if in_pos == 0 {
                     return Err(Error::OutputTooSmall);
@@ -216,9 +229,20 @@ impl<E: Engine> Codec for Base64Dec<E> {
         // make it treat that slice as the final chunk, applying
         // end-of-stream padding validation to a group that isn't
         // actually the last one.
+        //
+        // A group containing padding is excluded from the bulk batch
+        // even when it lands last in `input`: `decode_slice` validates
+        // padding placement only within the slice it's given, so
+        // padding at the end of *this* slice would be accepted even if
+        // more (non-padding) input follows in a later `process` call.
+        // Capping the batch before that group forces it through the
+        // single-group deferred path below instead.
         let remaining_in = input.len() - in_pos;
         let remaining_out = output.len() - out_pos;
-        let groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
+        let mut groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
+        if let Some(pad_pos) = input[in_pos..in_pos + groups * ENCODED_GROUP].iter().position(|&b| b == b'=') {
+            groups = pad_pos / ENCODED_GROUP;
+        }
         if groups > 0 {
             let in_bytes = groups * ENCODED_GROUP;
             let out_bytes = groups * GROUP;
@@ -228,10 +252,22 @@ impl<E: Engine> Codec for Base64Dec<E> {
             in_pos += in_bytes;
         }
 
-        // A full group's worth of unconsumed input means the output
-        // buffer ran out before a bulk group could be decoded.
+        // A full group's worth of unconsumed input means either the
+        // next group contains padding (deferred until `finish` confirms
+        // it's truly the last group) or the output buffer ran out
+        // before a bulk group could be decoded.
         let remaining = input.len() - in_pos;
         if remaining >= ENCODED_GROUP {
+            let next_group = &input[in_pos..in_pos + ENCODED_GROUP];
+            if next_group.contains(&b'=') {
+                self.pending_group.copy_from_slice(next_group);
+                self.len = ENCODED_GROUP;
+                in_pos += ENCODED_GROUP;
+                if in_pos < input.len() {
+                    return Err(Error::Corrupt);
+                }
+                return Ok((Progress { consumed: in_pos, written: out_pos }, Status::InputEmpty));
+            }
             if out_pos == 0 {
                 return Err(Error::OutputTooSmall);
             }
@@ -285,6 +321,7 @@ mod tests {
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
     use crate::io::{to_vec, CodecReader, CodecWriter};
+    use crate::{Codec, Status};
 
     const INPUT: &[u8] = b"Hello, World! 123";
     const ENCODED: &[u8] = b"SGVsbG8sIFdvcmxkISAxMjM=";
@@ -378,5 +415,40 @@ mod tests {
         assert_eq!(encoded, ENCODED.strip_suffix(b"=").unwrap());
         let decoded = to_vec(Base64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
+    }
+
+    #[test]
+    fn decode_rejects_padding_before_end_in_one_call() {
+        // "QQ==" ("A") followed by more encoded data is corrupt: padding
+        // is only valid in the true last group of the stream.
+        assert!(to_vec(base64_dec(), b"QQ==QQ==").is_err());
+    }
+
+    #[test]
+    fn decode_rejects_padding_before_end_split_across_calls() {
+        // Same corrupt input as above, but fed as two process() calls
+        // that each happen to align exactly on the padded group's
+        // boundary. Decoding a padded group must be deferred until
+        // finish() confirms it's truly last, or this slips through as
+        // "AA" instead of being rejected.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 16];
+        let (p1, _) = dec.process(b"QQ==", &mut out).unwrap();
+        assert!(dec.process(b"QQ==", &mut out[p1.written..]).is_err());
+    }
+
+    #[test]
+    fn decode_accepts_padded_final_group_as_sole_input() {
+        // A legitimate padded final group handed to `process` on its
+        // own (not preceded by any other group in the same call) must
+        // still decode successfully once finish() confirms it's last.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 16];
+        let (p, status) = dec.process(b"QQ==", &mut out).unwrap();
+        assert_eq!(status, Status::InputEmpty);
+        assert_eq!(p.written, 0);
+        let (fp, fstatus) = dec.finish(&mut out).unwrap();
+        assert_eq!(fstatus, Status::StreamEnd);
+        assert_eq!(&out[..fp.written], b"A");
     }
 }
