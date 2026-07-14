@@ -15,11 +15,26 @@ use base64::engine::Engine;
 
 use crate::{Codec, Error, Progress, Status};
 
+// 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
+// of the base64 algorithm itself, not a detail of any one alphabet or
+// padding config. It's also a documented requirement of every `Engine`
+// impl (see `Engine::internal_decode`'s doc: "each complete 4-byte
+// chunk of encoded data decodes to 3 bytes"), so these constants hold
+// no matter which `Engine` a caller plugs in via `with_engine`.
 const GROUP: usize = 3;
 const ENCODED_GROUP: usize = 4;
 
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it encodes with.
+///
+/// Generic over `E` rather than boxed as `dyn Engine`: `encode_slice`/
+/// `decode_slice` (what this codec actually calls) are generic methods
+/// on `Engine`, and generic methods can't go in a trait object's
+/// vtable — there's no fixed function pointer for an unbounded set of
+/// monomorphizations. `Engine` also has associated types (`Config`,
+/// `DecodeEstimate`) that differ per implementation, so a single `dyn
+/// Engine` couldn't represent more than one concrete engine type
+/// anyway. Monomorphized generics are the only option here.
 #[derive(Debug, Clone)]
 pub struct B64Enc<E: Engine = GeneralPurpose> {
     engine: E,
@@ -134,6 +149,10 @@ pub fn b64_enc() -> B64Enc {
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it decodes with.
+///
+/// Generic over `E` rather than boxed as `dyn Engine` for the same
+/// reason as [`B64Enc`]: `encode_slice`/`decode_slice` are generic
+/// methods, which can't be called through a trait object.
 #[derive(Debug, Clone)]
 pub struct B64Dec<E: Engine = GeneralPurpose> {
     engine: E,
