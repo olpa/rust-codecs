@@ -85,6 +85,15 @@ impl<E: Engine> Codec for B64Enc<E> {
 
         // Bulk-encode as many whole groups as fit both remaining
         // input and output, straight from the caller's slices.
+        //
+        // This sizing has to be done by hand: `encode_slice` is
+        // all-or-nothing on whatever slice it's given — it computes
+        // the padded encoded length of the *entire* input and either
+        // encodes all of it or returns `Err` with nothing written if
+        // `output` is too small, it never partially fills the buffer.
+        // Handing it a slice whose length isn't a multiple of `GROUP`
+        // would also make it treat that slice as the final chunk and
+        // add padding, which must only ever appear once, in `finish`.
         let remaining_in = input.len() - in_pos;
         let remaining_out = output.len() - out_pos;
         let groups = (remaining_in / GROUP).min(remaining_out / ENCODED_GROUP);
@@ -198,6 +207,15 @@ impl<E: Engine> Codec for B64Dec<E> {
 
         // Bulk-decode as many whole groups as fit both remaining
         // input and output, straight from the caller's slices.
+        //
+        // This sizing has to be done by hand, same as the encoder:
+        // `decode_slice` is all-or-nothing on whatever slice it's
+        // given — it either decodes all of it or returns `Err` with
+        // nothing written if `output` is too small. Handing it a slice
+        // whose length isn't a multiple of `ENCODED_GROUP` would also
+        // make it treat that slice as the final chunk, applying
+        // end-of-stream padding validation to a group that isn't
+        // actually the last one.
         let remaining_in = input.len() - in_pos;
         let remaining_out = output.len() - out_pos;
         let groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
