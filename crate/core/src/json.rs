@@ -2,15 +2,19 @@
 //!
 //! Escapes raw bytes into the form they'd take inside a JSON string
 //! literal (the content between the quotes, quotes not included).
-//! `json_escape::token::escape_bytes` does the actual escaping — it scans
-//! for `"`, `\`, and control bytes and yields literal/escaped tokens
-//! directly over `&[u8]`, so this codec never needs to know or care about
-//! UTF-8 character boundaries, even when a `process` call's input slice
-//! splits a multi-byte character. `pending` is the only state: escaped
-//! output not yet flushed to the caller's (possibly smaller) output
-//! slice.
+//! `json_escape::explicit::escape_bytes` does the actual escaping — it
+//! scans for `"`, `\`, and control bytes and yields literal/escaped
+//! chunks directly over `&[u8]`, so this codec never needs to know or
+//! care about UTF-8 character boundaries, even when a `process` call's
+//! input slice splits a multi-byte character. The `explicit` module
+//! (rather than `token`) is used because it pairs each literal run with
+//! its trailing escape in one chunk instead of two separate tokens,
+//! which the crate's docs call out as measurably faster on inputs with a
+//! high density of escape sequences. `pending` is the only state:
+//! escaped output not yet flushed to the caller's (possibly smaller)
+//! output slice.
 
-use json_escape::token::{escape_bytes, EscapedByteToken};
+use json_escape::explicit::escape_bytes;
 
 use crate::{Codec, Error, Progress, Status};
 
@@ -47,10 +51,10 @@ impl Codec for JsonEnc {
             return Ok((Progress { consumed: 0, written }, Status::InputEmpty));
         }
 
-        for tok in escape_bytes(input) {
-            match tok {
-                EscapedByteToken::Literal(bytes) => self.pending.extend_from_slice(bytes),
-                EscapedByteToken::Escaped(s) => self.pending.extend_from_slice(s.as_bytes()),
+        for chunk in escape_bytes(input) {
+            self.pending.extend_from_slice(chunk.literal());
+            if let Some(s) = chunk.escaped() {
+                self.pending.extend_from_slice(s.as_bytes());
             }
         }
 

@@ -24,7 +24,7 @@ checksum = "28b37ce533aa0fddc1e6820e331968ba72aa48b5c8bbb2bebdc03d48b6ed0f16"
 [[package]]
 name = "json-escape"
 version = "0.3.1"
-source = "git+https://github.com/olpa/json-escape?branch=feat%2Fescape-bytes-try2#e5e84b2aa44af8debcaf525658d6654a74fc290b"
+source = "git+https://github.com/olpa/json-escape?branch=feat%2Fescape-bytes-try2#f08a2f26d308738a5c48957d8eb151f1e5bdea60"
 dependencies = [
  "memchr",
 ]
