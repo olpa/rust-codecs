@@ -13,23 +13,28 @@
 //! high density of escape sequences.
 //!
 //! A literal chunk is already a slice of `input`, so it's copied
-//! straight into `output` piece by piece — no buffering needed. Two
-//! things can still outlive a single `process` call, when `output` runs
-//! out mid-chunk:
+//! straight into `output` piece by piece — no buffering needed, at any
+//! output size. An escape sequence (`\uXXXX`, at most 6 bytes), though,
+//! is only ever written to `output` in one go, never split across
+//! calls: as a `&'static str` constant, it costs nothing to just hold
+//! the reference itself (`pending_escape`) until there's room to write
+//! all of it, rather than track a partial-write position. The
+//! consequence is a minimum-output-size contract, like the base64
+//! codecs' atomic-group requirement: a call that both needs to write an
+//! escape and makes no other progress, with an `output` too small to
+//! ever fit that escape, returns `Error::OutputTooSmall` rather than
+//! spinning forever.
 //!
-//! - A partially-written escape sequence (`\uXXXX`, at most 6 bytes).
-//!   Since those are `&'static str` constants, holding one across calls
-//!   costs nothing more than the reference itself plus how much of it
-//!   has been written so far (`pending_escape`/`pending_pos`).
-//! - The tail of a literal run that's already been scanned but not yet
-//!   copied out. The `Codec` contract guarantees a byte a call didn't
-//!   consume is presented again, unchanged, at the front of the next
-//!   call's `input` — so instead of re-running `escape_bytes` over it
-//!   (which would rescan the same already-known-literal bytes on every
-//!   call, turning one big literal run paired with a tiny output buffer
-//!   into O(n²) work), `pending_literal` just remembers how many leading
-//!   bytes of the next `input` are known-literal and copies them
-//!   directly.
+//! The tail of a literal run that's already been scanned but not yet
+//! copied out also outlives a `process` call when `output` runs out
+//! mid-chunk. The `Codec` contract guarantees a byte a call didn't
+//! consume is presented again, unchanged, at the front of the next
+//! call's `input` — so instead of re-running `escape_bytes` over it
+//! (which would rescan the same already-known-literal bytes on every
+//! call, turning one big literal run paired with a tiny output buffer
+//! into O(n²) work), `pending_literal` just remembers how many leading
+//! bytes of the next `input` are known-literal and copies them
+//! directly.
 //!
 //! A chunk pairs a literal run with its one trailing escape, and both
 //! can go unwritten in the same call if `output` runs out mid-literal —
@@ -54,10 +59,10 @@ pub struct JsonEnc {
     /// The escape sequence for the byte right after `pending_literal`'s
     /// bytes, if that byte's chunk had one — known from the same scan
     /// that set `pending_literal`, so it doesn't need to be rediscovered
-    /// once the literal tail finishes draining.
+    /// once the literal tail finishes draining. Always written in one
+    /// go, so unlike `pending_literal` there's no partial-write position
+    /// to track.
     pending_escape: Option<&'static str>,
-    /// How much of `pending_escape` has already been written.
-    pending_pos: usize,
 }
 
 impl JsonEnc {
@@ -66,7 +71,7 @@ impl JsonEnc {
     /// `input`), then — only once that's fully drained, since its bytes
     /// precede the escape's trigger byte in the stream — the escape
     /// sequence. Returns `(consumed, written)`.
-    fn flush_pending(&mut self, input: &[u8], output: &mut [u8]) -> (usize, usize) {
+    fn flush_pending(&mut self, input: &[u8], output: &mut [u8]) -> Result<(usize, usize), Error> {
         let mut consumed = 0;
         let mut written = 0;
 
@@ -77,7 +82,7 @@ impl JsonEnc {
             consumed += n;
             self.pending_literal -= n;
             if self.pending_literal > 0 {
-                return (consumed, written);
+                return Ok((consumed, written));
             }
             if self.pending_escape.is_some() {
                 // The escape's trigger byte was already scanned — that's
@@ -89,24 +94,25 @@ impl JsonEnc {
         }
 
         if let Some(s) = self.pending_escape {
-            let left = &s.as_bytes()[self.pending_pos..];
-            let n = left.len().min(output.len() - written);
-            output[written..written + n].copy_from_slice(&left[..n]);
-            self.pending_pos += n;
-            written += n;
-            if self.pending_pos == s.len() {
-                self.pending_escape = None;
-                self.pending_pos = 0;
+            let bytes = s.as_bytes();
+            if output.len() - written < bytes.len() {
+                if written == 0 {
+                    return Err(Error::OutputTooSmall);
+                }
+                return Ok((consumed, written));
             }
+            output[written..written + bytes.len()].copy_from_slice(bytes);
+            written += bytes.len();
+            self.pending_escape = None;
         }
 
-        (consumed, written)
+        Ok((consumed, written))
     }
 }
 
 impl Codec for JsonEnc {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        let (mut consumed, mut written) = self.flush_pending(input, output);
+        let (mut consumed, mut written) = self.flush_pending(input, output)?;
         if self.pending_escape.is_some() {
             return Ok((Progress { consumed, written }, Status::OutputFull));
         }
@@ -125,21 +131,26 @@ impl Codec for JsonEnc {
                 // have to re-run `escape_bytes` to rediscover it.
                 self.pending_literal = literal.len() - n;
                 self.pending_escape = chunk.escaped();
-                self.pending_pos = 0;
                 return Ok((Progress { consumed, written }, Status::OutputFull));
             }
 
             let Some(s) = chunk.escaped() else { continue };
             let bytes = s.as_bytes();
-            let n = bytes.len().min(output.len() - written);
-            output[written..written + n].copy_from_slice(&bytes[..n]);
-            written += n;
-            consumed += 1;
-            if n < bytes.len() {
+            if output.len() - written < bytes.len() {
+                // Unlike a literal, an escape sequence is written in one
+                // go — if this call already wrote nothing else either,
+                // no future call with the same output size could ever
+                // make progress here.
+                if written == 0 {
+                    return Err(Error::OutputTooSmall);
+                }
+                consumed += 1;
                 self.pending_escape = Some(s);
-                self.pending_pos = n;
                 return Ok((Progress { consumed, written }, Status::OutputFull));
             }
+            output[written..written + bytes.len()].copy_from_slice(bytes);
+            written += bytes.len();
+            consumed += 1;
         }
         // The loop above only returns early when output runs out
         // mid-chunk; reaching here means every chunk `escape_bytes`
@@ -152,13 +163,14 @@ impl Codec for JsonEnc {
         // `process` reports consumed < input.len(), which keeps the
         // driver calling `process` again instead of `finish`. So `&[]`
         // is a safe stand-in for "no input" in the shared helper.
-        let (_, written) = self.flush_pending(&[], output);
+        let (_, written) = self.flush_pending(&[], output)?;
         let status = if self.pending_escape.is_none() { Status::StreamEnd } else { Status::OutputFull };
         Ok((Progress { consumed: 0, written }, status))
     }
 }
 
-/// Build a [`JsonEnc`] codec.
+/// Build a [`JsonEnc`] codec. `output` buffers passed to it should be at
+/// least 6 bytes, enough to fit any single escape sequence.
 pub fn json_enc() -> JsonEnc {
     JsonEnc::default()
 }
@@ -169,7 +181,7 @@ mod tests {
 
     use super::{escape_bytes, json_enc, JsonEnc};
     use crate::io::{to_vec, CodecReader, CodecWriter};
-    use crate::Codec;
+    use crate::{Codec, Error};
 
     const INPUT: &[u8] = b"He said \"hi\"\n\tBack\\slash\x01\x1f\x7f\xc3\xa9";
     const ESCAPED: &[u8] =
@@ -211,13 +223,14 @@ mod tests {
     }
 
     #[test]
-    fn matches_one_shot_escape_when_streamed_one_byte_at_a_time() {
-        // Exercise every kind of state transition across a 1-byte output
-        // buffer: literal -> escape, escape -> escape, escape -> literal,
-        // and a literal run long enough to need pending_literal on its
-        // own. The expected output comes from a single, non-streaming
-        // call to the same underlying `escape_bytes`, independent of
-        // this codec's pending-state bookkeeping.
+    fn matches_one_shot_escape_when_streamed_through_the_minimum_output_buffer() {
+        // Exercise every kind of state transition across the smallest
+        // output buffer this codec accepts (6 bytes, the longest escape
+        // sequence): literal -> escape, escape -> escape, escape ->
+        // literal, and a literal run long enough to need pending_literal
+        // on its own. The expected output comes from a single,
+        // non-streaming call to the same underlying `escape_bytes`,
+        // independent of this codec's pending-state bookkeeping.
         let mut input = Vec::new();
         input.extend_from_slice(&[b'A'; 5]); // long literal run
         input.push(b'\n'); // 2-byte escape, right after a literal
@@ -240,7 +253,7 @@ mod tests {
 
         let mut reader = CodecReader::new(Cursor::new(input.clone()), json_enc());
         let mut via_reader = Vec::new();
-        let mut buf = [0u8; 1];
+        let mut buf = [0u8; 6];
         loop {
             let n = reader.read(&mut buf).unwrap();
             if n == 0 {
@@ -251,11 +264,22 @@ mod tests {
         assert_eq!(via_reader, expected);
 
         let mut writer = CodecWriter::new(Vec::new(), json_enc());
-        for &b in &input {
-            writer.write_all(&[b]).unwrap();
+        for chunk in input.chunks(1) {
+            writer.write_all(chunk).unwrap();
         }
         let via_writer = writer.finish().unwrap();
         assert_eq!(via_writer, expected);
+    }
+
+    #[test]
+    fn output_buffer_smaller_than_the_longest_escape_errors() {
+        // An escape sequence is always written atomically, so an output
+        // buffer that can never fit one (here, a call that writes
+        // nothing else either) can never make progress.
+        let mut codec = json_enc();
+        let mut output = [0u8; 5];
+        let result = codec.process(b"\x01", &mut output);
+        assert!(matches!(result, Err(Error::OutputTooSmall)));
     }
 
     #[test]
@@ -280,24 +304,11 @@ mod tests {
 
     #[test]
     fn reader_with_small_output_buffer() {
+        // 6 bytes: the smallest buffer that can always fit an escape
+        // sequence atomically (see output_buffer_smaller_than_the_longest_escape_errors).
         let mut reader = CodecReader::new(Cursor::new(INPUT), json_enc());
         let mut out = Vec::new();
-        let mut buf = [0u8; 3];
-        loop {
-            let n = reader.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(out, ESCAPED);
-    }
-
-    #[test]
-    fn reader_with_one_byte_output_buffer_splits_escapes_across_reads() {
-        let mut reader = CodecReader::new(Cursor::new(INPUT), json_enc());
-        let mut out = Vec::new();
-        let mut buf = [0u8; 1];
+        let mut buf = [0u8; 6];
         loop {
             let n = reader.read(&mut buf).unwrap();
             if n == 0 {
