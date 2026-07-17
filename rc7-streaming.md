@@ -62,6 +62,24 @@ chaining for free.
    showing per-call overhead dominating for a real codec — then add an
    opt-in policy parameter, never a new default.
 
+5. **The io adapters are policy-free, and their buffers are
+   caller-provided too.** `CodecReader`/`CodecWriter` never withhold:
+   the writer `write_all`s everything the codec emits before returning
+   (its buffer is workspace, not a queue), and the reader's `inner.read`
+   returns as soon as any bytes arrive. Batching policy already has a
+   canonical, composable expression in each ecosystem — `BufReader`/
+   `BufWriter` placement in the client's stack (`BufWriter<CodecWriter>`
+   batches codec calls; `CodecWriter<BufWriter>` batches sink syscalls;
+   tokio and embedded have their own equivalents) — so a knob inside our
+   adapters would duplicate that non-composably. The hardcoded
+   `SCRATCH = 64 * 1024` goes away: adapter constructors take a
+   caller-provided buffer, same `S: AsMut<[u8]>` convention as `Chain`
+   (decision 1). Exception: `to_vec` keeps allocating internally — it is
+   the alloc-gated convenience API and already allocates its output.
+   *Change of opinion looks like:* the buffer argument proves too noisy
+   for std users — then add back a `Vec`-allocating convenience
+   constructor behind `alloc`, keeping the buffer-taking one primary.
+
 ## Step 1 — `Chain` combinator: compose two codecs into one `Codec`
 
 New `core/src/chain.rs`, exported from `lib.rs`.
@@ -158,7 +176,11 @@ invents an `io::Error`, `CodecReader` loops); pick one behavior and
 document it.
 
 Rewrite `CodecReader`, `CodecWriter`, `to_vec` as thin loops over
-`Engine`. Refactor commit: existing tests pass unchanged; the only
+`Engine`. While the constructors are open anyway, apply decision 5:
+drop the hardcoded `SCRATCH` const — `CodecReader::new` /
+`CodecWriter::new` take a caller-provided buffer (`S: AsMut<[u8]>`,
+same convention as `Chain`); `to_vec` keeps allocating internally.
+Existing tests pass with mechanical constructor updates; the only
 intended behavior change is the unified no-progress error.
 
 ## Step 4 — Make the core no_std
@@ -191,10 +213,10 @@ intended behavior change is the unified no-progress error.
 New `core/src/io/embedded.rs` behind an `embedded-io` feature:
 `CodecReader`/`CodecWriter` equivalents implementing
 `embedded_io::Read`/`Write`, written over `Engine` so they're mechanical.
-Differences from std: the buffer is caller-provided (same `AsMut<[u8]>`
-convention as `Chain` — no allocation), and errors map into an
-`embedded_io::Error`-implementing wrapper enum
-(`Codec(crate::Error)` / `Io(E)`).
+The buffer is caller-provided — after Step 3 that's the same convention
+the std adapters use (decision 5), so the only real difference from std
+is error mapping: errors map into an `embedded_io::Error`-implementing
+wrapper enum (`Codec(crate::Error)` / `Io(E)`).
 
 Test host-side: `embedded_io` traits are testable on std targets (or via
 `embedded_io_adapters` over `std::io` types); round-trip the same
