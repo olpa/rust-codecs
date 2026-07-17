@@ -10,31 +10,37 @@
 //! (rather than `token`) is used because it pairs each literal run with
 //! its trailing escape in one chunk instead of two separate tokens,
 //! which the crate's docs call out as measurably faster on inputs with a
-//! high density of escape sequences. `pending` is the only state:
-//! escaped output not yet flushed to the caller's (possibly smaller)
-//! output slice.
+//! high density of escape sequences.
+//!
+//! A literal chunk is already a slice of `input`, so it's copied
+//! straight into `output` piece by piece — no buffering needed. The one
+//! thing that can outlive a `process` call is a partially-written escape
+//! sequence (`\uXXXX`, at most 6 bytes), but since those are `&'static
+//! str` constants, holding one across calls costs nothing more than the
+//! reference itself plus how much of it has been written so far.
 
 use json_escape::explicit::escape_bytes;
 
 use crate::{Codec, Error, Progress, Status};
 
 /// Escapes raw bytes into JSON string content.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct JsonEnc {
-    pending: Vec<u8>,
+    pending_escape: Option<&'static str>,
     pending_pos: usize,
 }
 
 impl JsonEnc {
-    /// Copy as much of the unflushed `pending` escape output as fits into
+    /// Copy as much of an unflushed pending escape sequence as fits into
     /// `output`. Returns how many bytes were written.
     fn flush_pending(&mut self, output: &mut [u8]) -> usize {
-        let left = &self.pending[self.pending_pos..];
+        let Some(s) = self.pending_escape else { return 0 };
+        let left = &s.as_bytes()[self.pending_pos..];
         let n = left.len().min(output.len());
         output[..n].copy_from_slice(&left[..n]);
         self.pending_pos += n;
-        if self.pending_pos == self.pending.len() {
-            self.pending.clear();
+        if self.pending_pos == s.len() {
+            self.pending_escape = None;
             self.pending_pos = 0;
         }
         n
@@ -44,28 +50,42 @@ impl JsonEnc {
 impl Codec for JsonEnc {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
         let mut written = self.flush_pending(output);
-        if !self.pending.is_empty() {
+        if self.pending_escape.is_some() {
             return Ok((Progress { consumed: 0, written }, Status::OutputFull));
         }
-        if input.is_empty() {
-            return Ok((Progress { consumed: 0, written }, Status::InputEmpty));
-        }
 
+        let mut consumed = 0;
         for chunk in escape_bytes(input) {
-            self.pending.extend_from_slice(chunk.literal());
-            if let Some(s) = chunk.escaped() {
-                self.pending.extend_from_slice(s.as_bytes());
+            let literal = chunk.literal();
+            let n = literal.len().min(output.len() - written);
+            output[written..written + n].copy_from_slice(&literal[..n]);
+            written += n;
+            consumed += n;
+            if n < literal.len() {
+                return Ok((Progress { consumed, written }, Status::OutputFull));
+            }
+
+            let Some(s) = chunk.escaped() else { continue };
+            let bytes = s.as_bytes();
+            let n = bytes.len().min(output.len() - written);
+            output[written..written + n].copy_from_slice(&bytes[..n]);
+            written += n;
+            consumed += 1;
+            if n < bytes.len() {
+                self.pending_escape = Some(s);
+                self.pending_pos = n;
+                return Ok((Progress { consumed, written }, Status::OutputFull));
             }
         }
-
-        written += self.flush_pending(&mut output[written..]);
-        let status = if self.pending.is_empty() { Status::InputEmpty } else { Status::OutputFull };
-        Ok((Progress { consumed: input.len(), written }, status))
+        // The loop above only returns early when output runs out
+        // mid-chunk; reaching here means every chunk `escape_bytes`
+        // yielded — i.e. all of `input` — was fully written.
+        Ok((Progress { consumed, written }, Status::InputEmpty))
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
         let written = self.flush_pending(output);
-        let status = if self.pending.is_empty() { Status::StreamEnd } else { Status::OutputFull };
+        let status = if self.pending_escape.is_none() { Status::StreamEnd } else { Status::OutputFull };
         Ok((Progress { consumed: 0, written }, status))
     }
 }
