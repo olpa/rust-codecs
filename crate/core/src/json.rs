@@ -113,7 +113,12 @@ impl JsonEnc {
 impl Codec for JsonEnc {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
         let (mut consumed, mut written) = self.flush_pending(input, output)?;
-        if self.pending_escape.is_some() {
+        if self.pending_literal > 0 || self.pending_escape.is_some() {
+            // Still pending: either flush_pending ran out of output
+            // mid-literal (pending_escape may or may not also be set),
+            // or an escape didn't fit. Either way, re-scanning
+            // input[consumed..] now would rescan bytes already known to
+            // be part of pending_literal's run.
             return Ok((Progress { consumed, written }, Status::OutputFull));
         }
 
