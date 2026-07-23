@@ -42,9 +42,12 @@
 //! `pending_escape` too rather than thrown away and rediscovered later.
 //! `pending_literal` must drain first: its bytes precede the escape's
 //! trigger byte in the stream, and `Progress::consumed` is a plain
-//! prefix length, so the trigger byte can't be marked consumed — nor
-//! the cached escape flushed — until the literal tail in front of it
-//! has actually been written out.
+//! prefix length, so the literal tail in front of it has to actually be
+//! written out before the trigger byte can even be attempted. The
+//! trigger byte itself is only ever marked consumed at the moment its
+//! escape is actually copied into `output` — never earlier — so a
+//! cached `pending_escape` that still doesn't fit leaves the trigger
+//! byte uncounted, to be re-presented (and retried) on the next call.
 
 use json_escape::explicit::escape_bytes;
 
@@ -84,13 +87,6 @@ impl JsonEnc {
             if self.pending_literal > 0 {
                 return Ok((consumed, written));
             }
-            if self.pending_escape.is_some() {
-                // The escape's trigger byte was already scanned — that's
-                // how `pending_escape` got set — but it comes right
-                // after the literal tail we just finished draining, so
-                // only now can it be counted as consumed.
-                consumed += 1;
-            }
         }
 
         if let Some(s) = self.pending_escape {
@@ -103,6 +99,7 @@ impl JsonEnc {
             }
             output[written..written + bytes.len()].copy_from_slice(bytes);
             written += bytes.len();
+            consumed += 1;
             self.pending_escape = None;
         }
 
@@ -149,7 +146,6 @@ impl Codec for JsonEnc {
                 if written == 0 {
                     return Err(Error::OutputTooSmall);
                 }
-                consumed += 1;
                 self.pending_escape = Some(s);
                 return Ok((Progress { consumed, written }, Status::OutputFull));
             }
