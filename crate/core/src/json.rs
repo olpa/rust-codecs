@@ -69,6 +69,34 @@ pub struct JsonEnc {
 }
 
 impl JsonEnc {
+    /// Write `s` to `output[*written..]` atomically, bumping `*written`
+    /// and `*consumed` past it and clearing `pending_escape` on success.
+    /// On failure (`s` doesn't fit), caches `s` in `pending_escape` so a
+    /// future call can retry without rediscovering it — unless this
+    /// call made no progress on `output` at all, in which case no
+    /// future call with the same output size could ever succeed either.
+    fn write_escape(
+        &mut self,
+        s: &'static str,
+        output: &mut [u8],
+        written: &mut usize,
+        consumed: &mut usize,
+    ) -> Result<bool, Error> {
+        let bytes = s.as_bytes();
+        if output.len() - *written < bytes.len() {
+            if *written == 0 {
+                return Err(Error::OutputTooSmall);
+            }
+            self.pending_escape = Some(s);
+            return Ok(false);
+        }
+        output[*written..*written + bytes.len()].copy_from_slice(bytes);
+        *written += bytes.len();
+        *consumed += 1;
+        self.pending_escape = None;
+        Ok(true)
+    }
+
     /// Drain whatever `process`/`finish` left pending from a previous
     /// call: first the literal tail (copied straight from the front of
     /// `input`), then — only once that's fully drained, since its bytes
@@ -90,17 +118,9 @@ impl JsonEnc {
         }
 
         if let Some(s) = self.pending_escape {
-            let bytes = s.as_bytes();
-            if output.len() - written < bytes.len() {
-                if written == 0 {
-                    return Err(Error::OutputTooSmall);
-                }
+            if !self.write_escape(s, output, &mut written, &mut consumed)? {
                 return Ok((consumed, written));
             }
-            output[written..written + bytes.len()].copy_from_slice(bytes);
-            written += bytes.len();
-            consumed += 1;
-            self.pending_escape = None;
         }
 
         Ok((consumed, written))
@@ -137,21 +157,9 @@ impl Codec for JsonEnc {
             }
 
             let Some(s) = chunk.escaped() else { continue };
-            let bytes = s.as_bytes();
-            if output.len() - written < bytes.len() {
-                // Unlike a literal, an escape sequence is written in one
-                // go — if this call already wrote nothing else either,
-                // no future call with the same output size could ever
-                // make progress here.
-                if written == 0 {
-                    return Err(Error::OutputTooSmall);
-                }
-                self.pending_escape = Some(s);
+            if !self.write_escape(s, output, &mut written, &mut consumed)? {
                 return Ok((Progress { consumed, written }, Status::OutputFull));
             }
-            output[written..written + bytes.len()].copy_from_slice(bytes);
-            written += bytes.len();
-            consumed += 1;
         }
         // The loop above only returns early when output runs out
         // mid-chunk; reaching here means every chunk `escape_bytes`
