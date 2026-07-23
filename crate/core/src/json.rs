@@ -231,15 +231,13 @@ mod tests {
         assert_eq!(codec.pending_escape, Some("\\n"));
     }
 
-    #[test]
-    fn matches_one_shot_escape_when_streamed_through_the_minimum_output_buffer() {
-        // Exercise every kind of state transition across the smallest
-        // output buffer this codec accepts (6 bytes, the longest escape
-        // sequence): literal -> escape, escape -> escape, escape ->
-        // literal, and a literal run long enough to need pending_literal
-        // on its own. The expected output comes from a single,
-        // non-streaming call to the same underlying `escape_bytes`,
-        // independent of this codec's pending-state bookkeeping.
+    /// Input covering every kind of state transition: literal ->
+    /// escape, escape -> escape, escape -> literal, and a literal run
+    /// long enough to need `pending_literal` on its own. Paired with the
+    /// expected output from a single, non-streaming call to the
+    /// underlying `escape_bytes`, independent of this codec's
+    /// pending-state bookkeeping.
+    fn escape_transitions_fixture() -> (Vec<u8>, Vec<u8>) {
         let mut input = Vec::new();
         input.extend_from_slice(&[b'A'; 5]); // long literal run
         input.push(b'\n'); // 2-byte escape, right after a literal
@@ -250,7 +248,7 @@ mod tests {
         input.push(b'\\'); // 2-byte escape
         input.extend_from_slice(&[b'D'; 4000]); // literal run longer than any output buffer
 
-        let expected: Vec<u8> = escape_bytes(&input)
+        let expected = escape_bytes(&input)
             .flat_map(|chunk| {
                 let mut v = chunk.literal().to_vec();
                 if let Some(s) = chunk.escaped() {
@@ -260,7 +258,17 @@ mod tests {
             })
             .collect();
 
-        let mut reader = CodecReader::new(Cursor::new(input.clone()), json_enc());
+        (input, expected)
+    }
+
+    #[test]
+    fn reader_matches_one_shot_escape_through_the_minimum_output_buffer() {
+        // 6 bytes: the smallest buffer that can always fit an escape
+        // sequence atomically, so every pending-state transition in
+        // `escape_transitions_fixture` gets forced to actually happen.
+        let (input, expected) = escape_transitions_fixture();
+
+        let mut reader = CodecReader::new(Cursor::new(input), json_enc());
         let mut via_reader = Vec::new();
         let mut buf = [0u8; 6];
         loop {
@@ -271,6 +279,15 @@ mod tests {
             via_reader.extend_from_slice(&buf[..n]);
         }
         assert_eq!(via_reader, expected);
+    }
+
+    #[test]
+    fn writer_matches_one_shot_escape_fed_one_byte_at_a_time() {
+        // `CodecWriter`'s internal output buffer isn't caller-tunable
+        // (see `SCRATCH` in `io::stream`), so this doesn't exercise a
+        // small output buffer — only that feeding `write_all` a single
+        // byte of input at a time still round-trips correctly.
+        let (input, expected) = escape_transitions_fixture();
 
         let mut writer = CodecWriter::new(Vec::new(), json_enc());
         for chunk in input.chunks(1) {
