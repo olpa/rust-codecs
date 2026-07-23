@@ -168,10 +168,17 @@ impl Codec for JsonEnc {
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        // `pending_literal` is always 0 here: as long as it's nonzero,
-        // `process` reports consumed < input.len(), which keeps the
-        // driver calling `process` again instead of `finish`. So `&[]`
-        // is a safe stand-in for "no input" in the shared helper.
+        // A well-behaved driver never reaches this with pending_literal
+        // nonzero: as long as it's nonzero, `process` reports consumed
+        // < input.len(), which keeps the driver calling `process` again
+        // instead of `finish`. But those leftover literal bytes only
+        // ever existed in a previous `process` call's `input`, which
+        // `finish` has no access to — so a caller that violates the
+        // convention gets an error here instead of an out-of-bounds
+        // panic from indexing `&[]` in the shared helper below.
+        if self.pending_literal > 0 {
+            return Err(Error::UnexpectedEnd);
+        }
         let (_, written) = self.flush_pending(&[], output)?;
         let status = if self.pending_escape.is_none() { Status::StreamEnd } else { Status::OutputFull };
         Ok((Progress { consumed: 0, written }, status))
@@ -306,6 +313,24 @@ mod tests {
         let mut output = [0u8; 5];
         let result = codec.process(b"\x01", &mut output);
         assert!(matches!(result, Err(Error::OutputTooSmall)));
+    }
+
+    #[test]
+    fn finish_before_pending_literal_drains_errors_instead_of_panicking() {
+        // A caller that ignores `Status::OutputFull` and calls `finish`
+        // anyway has no legitimate way to recover those leftover
+        // literal bytes (they only ever existed in the prior `process`
+        // call's `input`), so this must surface as an error rather than
+        // panic on the empty-slice stand-in `finish` uses internally.
+        let mut codec = json_enc();
+        let mut output = [0u8; 2];
+        let (_, status) = codec.process(b"AAA\n", &mut output).unwrap();
+        assert_eq!(status, crate::Status::OutputFull);
+        assert_eq!(codec.pending_literal, 1);
+
+        let mut finish_output = [0u8; 16];
+        let result = codec.finish(&mut finish_output);
+        assert!(matches!(result, Err(Error::UnexpectedEnd)));
     }
 
     #[test]
