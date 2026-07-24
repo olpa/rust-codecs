@@ -22,9 +22,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28b37ce533aa0fddc1e6820e331968ba72aa48b5c8bbb2bebdc03d48b6ed0f16"
 
 [[package]]
+name = "json-escape"
+version = "0.3.1"
+source = "git+https://github.com/olpa/json-escape?branch=feat%2Fescape-bytes-try2#f08a2f26d308738a5c48957d8eb151f1e5bdea60"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
 name = "rust-codecs-core"
 version = "0.1.0"
 dependencies = [
  "base64",
  "compcol",
+ "json-escape",
 ]
