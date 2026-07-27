@@ -1,6 +1,6 @@
-//! Test harness for chaining codecs: builds a `CodecReader` chain from
-//! `--readers` and a `CodecWriter` chain from `--writers`, then copies
-//! stdin through the readers, through the writers, to stdout.
+//! Test harness for chaining codecs: folds `--readers` into one `Chain`
+//! and `--writers` into another, then copies stdin through the readers,
+//! through the writers, to stdout.
 //!
 //! ```text
 //! echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
@@ -11,10 +11,13 @@
 //! listed runs first, closest to the incoming bytes, before reaching
 //! stdout).
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
-use rust_codecs_core::io::{CodecReader, CodecWriter, FinishWrite};
-use rust_codecs_core::Codec;
+use rust_codecs_core::io::{CodecReader, CodecWriter};
+use rust_codecs_core::{Chain, Codec};
+
+/// Staging buffer size for each link in a `--readers`/`--writers` chain.
+const STAGING: usize = 4 * 1024;
 
 /// Single source of truth for known codec names: `make_codec`, the
 /// "unknown codec" error, and `--help`'s codec list all read from
@@ -31,9 +34,9 @@ fn usage() -> String {
     let names = CODECS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
     format!(
         "\
-Test harness for chaining codecs: builds a CodecReader chain from
---readers and a CodecWriter chain from --writers, then copies stdin
-through the readers, through the writers, to stdout.
+Test harness for chaining codecs: folds --readers into one Chain and
+--writers into another, then copies stdin through the readers, through
+the writers, to stdout.
 
 Usage:
   cargo run -p cli -- [--readers CODEC...] [--writers CODEC...]
@@ -86,23 +89,39 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<(Vec<String>, Vec<St
     Ok((readers, writers))
 }
 
-fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let (reader_names, writer_names) = parse_args(args)?;
-
-    let mut reader: Box<dyn Read> = Box::new(io::stdin());
-    for name in &reader_names {
+/// Fold `names` into a single `Codec`, first name applied first, closest
+/// to the raw bytes. An empty list folds down to a transparent
+/// `identity()` — the base every real chain builds on top of, rather
+/// than a separate zero/one/many special case.
+fn compose(names: &[String]) -> Result<Box<dyn Codec>, String> {
+    let mut composed: Box<dyn Codec> = Box::new(rust_codecs_core::identity::identity());
+    for name in names.iter().rev() {
         let codec = make_codec(name)?;
-        reader = Box::new(CodecReader::new(reader, codec));
+        composed =
+            Box::new(Chain::new(codec, composed, vec![0u8; STAGING]).map_err(|e| format!("{e:?}"))?);
     }
+    Ok(composed)
+}
 
-    let mut writer: Box<dyn FinishWrite> = Box::new(io::stdout());
-    for name in writer_names.iter().rev() {
-        let codec = make_codec(name)?;
-        writer = Box::new(CodecWriter::new(writer, codec));
-    }
+fn run_io<R: Read, W: Write>(
+    reader_names: &[String],
+    writer_names: &[String],
+    input: R,
+    output: W,
+) -> Result<W, String> {
+    let reader_codec = compose(reader_names)?;
+    let writer_codec = compose(writer_names)?;
+
+    let mut reader = CodecReader::new(input, reader_codec);
+    let mut writer = CodecWriter::new(output, writer_codec);
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
-    writer.finish_boxed().map_err(|e| e.to_string())?;
+    writer.finish().map_err(|e| e.to_string())
+}
+
+fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (reader_names, writer_names) = parse_args(args)?;
+    run_io(&reader_names, &writer_names, io::stdin(), io::stdout())?;
     Ok(())
 }
 
@@ -116,5 +135,72 @@ fn main() {
     if let Err(err) = run(args.into_iter()) {
         eprintln!("error: {err}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::io::{Cursor, Write};
+    use std::rc::Rc;
+
+    use rust_codecs_core::io::to_vec;
+    use rust_codecs_core::rot13::rot13;
+
+    use super::{compose, run_io};
+
+    fn names(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn end_to_end_round_trip_from_module_doc() {
+        // --readers identity identity rot13 nets out to a single rot13
+        // on the raw bytes; --writers rot13 rot13 identity nets out to
+        // the identity (the two rot13s cancel) — so the whole pipeline
+        // is equivalent to running the input through rot13 once.
+        let reader_names = names(&["identity", "identity", "rot13"]);
+        let writer_names = names(&["rot13", "rot13", "identity"]);
+        let input = b"hello";
+
+        let output =
+            run_io(&reader_names, &writer_names, Cursor::new(input.to_vec()), Vec::new()).unwrap();
+
+        let expected = to_vec(rot13(), input).unwrap();
+        assert_eq!(output, expected);
+    }
+
+    /// A `Write` sink that shares its buffer via `Rc<RefCell<_>>`, so a
+    /// clone kept by the test can inspect what's arrived without going
+    /// through `CodecWriter::finish` (which consumes the writer).
+    #[derive(Clone, Default)]
+    struct SharedSink(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writer_stack_is_interactive() {
+        // A single `--writers rot13` still runs through `compose`'s
+        // Chain-over-identity base. Writing one line and flushing must
+        // deliver the transformed bytes to the sink right away — the
+        // return-clean guarantee `Chain` provides — without ever
+        // calling `finish`.
+        let writer_codec = compose(&names(&["rot13"])).unwrap();
+        let sink = SharedSink::default();
+        let mut writer = rust_codecs_core::io::CodecWriter::new(sink.clone(), writer_codec);
+
+        writer.write_all(b"hi\n").unwrap();
+        writer.flush().unwrap();
+
+        let expected = to_vec(rot13(), b"hi\n").unwrap();
+        assert_eq!(sink.0.borrow().as_slice(), expected.as_slice());
     }
 }
