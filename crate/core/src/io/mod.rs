@@ -8,8 +8,10 @@
 //!   [`CodecWriter`]s (e.g. one assembled from a list of codec names)
 //!   without knowing its depth at compile time.
 
+mod copy;
 mod stream;
 mod vec;
 
+pub use copy::{copy, CopyError};
 pub use stream::{CodecReader, CodecWriter, FinishWrite};
 pub use vec::to_vec;
