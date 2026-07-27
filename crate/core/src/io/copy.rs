@@ -102,10 +102,12 @@ where
         if matches!(status, Status::StreamEnd) {
             return Ok(total);
         }
-        if progress.written == 0 {
-            // The current slot (if any) couldn't take another byte —
-            // the codec made zero progress with the room it had, so
-            // only a fresh slot can move things forward.
+        if matches!(status, Status::OutputFull) && progress.written == 0 {
+            // The codec reported the output slot as the bottleneck and
+            // still made zero progress — the slot had no room at all
+            // (as opposed to zero *input* being the reason `written`
+            // came back 0, which reports `InputEmpty`/`StreamEnd`
+            // instead) — so only a fresh slot can move things forward.
             match output.next() {
                 Some(s) => cur_out = Some((s, 0)),
                 None => return Err(CopyError::OutputExhausted),
