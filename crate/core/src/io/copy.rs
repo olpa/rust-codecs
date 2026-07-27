@@ -139,6 +139,45 @@ mod tests {
         data.chunks(chunk_size).map(Ok)
     }
 
+    /// A test-only codec that copies bytes 1:1, like [`Identity`], but
+    /// self-terminates: once `limit` bytes have been written, `process`
+    /// reports `StreamEnd` even if more input is still sitting in the
+    /// caller's slice (or in further chunks `copy` hasn't pulled yet).
+    /// Models a self-describing format (e.g. one with an in-band length
+    /// or terminator) that ends before the input stream does.
+    struct EarlyEnd {
+        limit: usize,
+        done: usize,
+    }
+
+    impl crate::Codec for EarlyEnd {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [u8],
+        ) -> Result<(crate::Progress, crate::Status), crate::Error> {
+            let remaining = self.limit - self.done;
+            let n = input.len().min(output.len()).min(remaining);
+            output[..n].copy_from_slice(&input[..n]);
+            self.done += n;
+            let status = if self.done >= self.limit {
+                crate::Status::StreamEnd
+            } else if n == input.len() {
+                crate::Status::InputEmpty
+            } else {
+                crate::Status::OutputFull
+            };
+            Ok((crate::Progress { consumed: n, written: n }, status))
+        }
+
+        fn finish(
+            &mut self,
+            _output: &mut [u8],
+        ) -> Result<(crate::Progress, crate::Status), crate::Error> {
+            Ok((crate::Progress::default(), crate::Status::StreamEnd))
+        }
+    }
+
     #[test]
     fn basic_round_trip() {
         let expected = to_vec(rot13(), INPUT).unwrap();
@@ -210,5 +249,64 @@ mod tests {
         let result =
             copy::<_, _, (), _, _, _>(ok_chunks(truncated, 4), base64_dec(), slot_iter(&mut out));
         assert!(matches!(result, Err(CopyError::Codec(_))));
+    }
+
+    #[test]
+    fn empty_input_chunk_does_not_consume_an_output_slot() {
+        // A zero-length chunk from the input iterator makes `process`
+        // report `InputEmpty` with zero bytes written — the same
+        // "wrote nothing" signal `copy` otherwise treats as "the
+        // output slot is the bottleneck, fetch a new one". It must
+        // not: there's plenty of room left in the single slot below,
+        // and a second real chunk still to come. Fetching an unneeded
+        // slot here starves `copy` of the one it actually needs later
+        // and errors as `OutputExhausted` even though nothing ever
+        // ran out.
+        let chunks: Vec<Result<&[u8], ()>> =
+            vec![Ok(&INPUT[..4]), Ok(&[]), Ok(&INPUT[4..8])];
+        let mut out = slots(1, 100);
+        let written = copy::<_, _, (), _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out))
+            .unwrap();
+        assert_eq!(written, 8);
+    }
+
+    #[test]
+    fn early_stream_end_ignores_remaining_input() {
+        // `EarlyEnd` reports `StreamEnd` from `process` itself after 3
+        // bytes, with a whole second chunk left unpulled. `copy` must
+        // stop right there rather than erroring or trying to drain the
+        // rest of the input.
+        let chunks: Vec<Result<&[u8], ()>> = vec![Ok(b"Hello"), Ok(b"World")];
+        let mut out = slots(4, 8);
+        let written = copy::<_, _, (), _, _, _>(
+            chunks.into_iter(),
+            EarlyEnd { limit: 3, done: 0 },
+            slot_iter(&mut out),
+        )
+        .unwrap();
+        assert_eq!(written, 3);
+    }
+
+    #[test]
+    fn zero_length_output_slot_is_skipped() {
+        // A degenerate slot (e.g. from a pool that handed back an
+        // empty buffer) has no room at all; `copy` must move past it
+        // to the next slot rather than getting stuck reporting
+        // `OutputExhausted` or corrupting later slots.
+        let mut out = vec![vec![0u8; 10], vec![], vec![0u8; 10]];
+        let expected = to_vec(rot13(), INPUT).unwrap();
+        let written =
+            copy::<_, _, (), _, _, _>(ok_chunks(INPUT, 5), rot13(), slot_iter(&mut out)).unwrap();
+        assert_eq!(written, expected.len());
+    }
+
+    #[test]
+    fn input_error_as_first_item() {
+        // No successful chunk ever arrives; `copy` must report the
+        // error without needing to touch the output iterator.
+        let mut out = slots(4, 8);
+        let chunks: Vec<Result<&[u8], &'static str>> = vec![Err("boom")];
+        let result = copy::<_, _, _, _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out));
+        assert!(matches!(result, Err(CopyError::Input("boom"))));
     }
 }
