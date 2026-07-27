@@ -14,6 +14,9 @@ pub use compcol::{Error, Progress, Status};
 mod codec;
 pub use codec::Codec;
 
+mod chain;
+pub use chain::Chain;
+
 pub mod io;
 
 #[cfg(feature = "identity")]
