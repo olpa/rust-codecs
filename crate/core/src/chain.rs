@@ -73,7 +73,17 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // Return-clean (decision 3): don't withhold anything `second`
             // could take — only stop when there's genuinely nothing left
             // to feed `first`.
-            if self.first_ended || in_pos == input.len() {
+            if self.first_ended {
+                // `first` will never consume another byte (self-terminating
+                // format, already past its end) — the rest of `input` is
+                // simply not this stream's to read. `InputEmpty` means
+                // "all of input was consumed" per the `Codec` contract, so
+                // that has to include whatever's left here too, or a
+                // caller driving off `Progress::consumed` alone would spin
+                // forever re-offering the same unconsumed tail.
+                return Ok((Progress { consumed: input.len(), written: out_pos }, Status::InputEmpty));
+            }
+            if in_pos == input.len() {
                 return Ok((Progress { consumed: in_pos, written: out_pos }, Status::InputEmpty));
             }
 

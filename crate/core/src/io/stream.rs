@@ -4,39 +4,41 @@
 //!   is itself a `Read` yielding the transformed bytes.
 //! - [`CodecWriter`]: wraps a `Write`; bytes written to it are
 //!   transformed on the fly before reaching the wrapped writer.
+//!
+//! Both drive their codec through an [`Engine`](crate::Engine) and take
+//! a caller-provided scratch buffer (`S: AsMut<[u8]>` — same convention
+//! as [`Chain`](crate::Chain)) rather than allocating one internally:
+//! batching policy already has a canonical, composable expression in
+//! `BufReader`/`BufWriter` placement in the client's own stack, so a
+//! knob inside these adapters would just duplicate that.
 
 use std::io::{self, Read, Write};
 
-use crate::{Codec, Status};
+use crate::{Codec, Engine, Error, Status, Step};
 
-const SCRATCH: usize = 64 * 1024;
-
-fn to_io_error(err: crate::Error) -> io::Error {
+fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
 }
 
 /// Wraps a `Read`, running `C` over the bytes as they're pulled through.
-pub struct CodecReader<R, C> {
+pub struct CodecReader<R, C: Codec, S> {
     inner: R,
-    codec: C,
-    inbuf: Vec<u8>,
+    engine: Engine<C>,
+    inbuf: S,
     inpos: usize,
     inlen: usize,
     inner_eof: bool,
-    stream_end: bool,
 }
 
-impl<R: Read, C: Codec> CodecReader<R, C> {
-    pub fn new(inner: R, codec: C) -> Self {
-        Self {
-            inner,
-            codec,
-            inbuf: vec![0u8; SCRATCH],
-            inpos: 0,
-            inlen: 0,
-            inner_eof: false,
-            stream_end: false,
+impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+    /// Build a `CodecReader`. Rejects an empty `inbuf`: it could never
+    /// hold a byte read from `inner`, so the codec could never see any
+    /// input.
+    pub fn new(inner: R, codec: C, mut inbuf: S) -> Result<Self, Error> {
+        if inbuf.as_mut().is_empty() {
+            return Err(Error::OutputTooSmall);
         }
+        Ok(Self { inner, engine: Engine::new(codec), inbuf, inpos: 0, inlen: 0, inner_eof: false })
     }
 
     /// Unwrap this reader, discarding the codec, and return the wrapped
@@ -47,59 +49,56 @@ impl<R: Read, C: Codec> CodecReader<R, C> {
     }
 }
 
-impl<R: Read, C: Codec> Read for CodecReader<R, C> {
+impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
 
         loop {
-            if self.stream_end {
-                return Ok(0);
-            }
-
             if self.inpos == self.inlen && !self.inner_eof {
-                self.inlen = self.inner.read(&mut self.inbuf)?;
+                self.inlen = self.inner.read(self.inbuf.as_mut())?;
                 self.inpos = 0;
                 if self.inlen == 0 {
                     self.inner_eof = true;
                 }
-                continue;
             }
 
-            let (progress, status) = if self.inpos == self.inlen {
-                self.codec.finish(buf).map_err(to_io_error)?
-            } else {
-                self.codec
-                    .process(&self.inbuf[self.inpos..self.inlen], buf)
-                    .map_err(to_io_error)?
-            };
-            self.inpos += progress.consumed;
+            let input = &self.inbuf.as_mut()[self.inpos..self.inlen];
+            let (consumed, step) =
+                self.engine.step(input, self.inner_eof, buf).map_err(to_io_error)?;
+            self.inpos += consumed;
 
-            if matches!(status, Status::StreamEnd) {
-                self.stream_end = true;
+            match step {
+                Step::Wrote(n) => return Ok(n),
+                Step::Done => return Ok(0),
+                Step::NeedInput => {
+                    // Nothing produced yet (e.g. codec is still
+                    // buffering internally) — go around and feed it
+                    // more input.
+                }
             }
-            if progress.written > 0 || self.stream_end {
-                return Ok(progress.written);
-            }
-            // Nothing produced yet (e.g. codec is still buffering
-            // internally) and the stream hasn't ended — go around and
-            // feed it more input.
         }
     }
 }
 
 /// Wraps a `Write`; bytes written to this adapter are run through `C`
 /// before being written to the wrapped writer.
-pub struct CodecWriter<W, C> {
+pub struct CodecWriter<W, C: Codec, S> {
     inner: W,
-    codec: C,
-    outbuf: Vec<u8>,
+    engine: Engine<C>,
+    outbuf: S,
 }
 
-impl<W: Write, C: Codec> CodecWriter<W, C> {
-    pub fn new(inner: W, codec: C) -> Self {
-        Self { inner, codec, outbuf: vec![0u8; SCRATCH] }
+impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
+    /// Build a `CodecWriter`. Rejects an empty `outbuf`, for the same
+    /// reason [`CodecReader::new`] does: it could never hold a byte for
+    /// `inner` to receive.
+    pub fn new(inner: W, codec: C, mut outbuf: S) -> Result<Self, Error> {
+        if outbuf.as_mut().is_empty() {
+            return Err(Error::OutputTooSmall);
+        }
+        Ok(Self { inner, engine: Engine::new(codec), outbuf })
     }
 
     /// Flush any bytes the codec was still holding, finalize the stream
@@ -107,15 +106,12 @@ impl<W: Write, C: Codec> CodecWriter<W, C> {
     /// ownership of the wrapped writer.
     pub fn finish(mut self) -> io::Result<W> {
         loop {
-            let (progress, status) = self.codec.finish(&mut self.outbuf).map_err(to_io_error)?;
-            if progress.written > 0 {
-                self.inner.write_all(&self.outbuf[..progress.written])?;
-            }
-            if matches!(status, Status::StreamEnd) {
-                break;
-            }
-            if progress.written == 0 {
-                return Err(io::Error::other("codec made no progress finishing the stream"));
+            let outbuf = self.outbuf.as_mut();
+            let (_, step) = self.engine.step(&[], true, outbuf).map_err(to_io_error)?;
+            match step {
+                Step::Wrote(n) => self.inner.write_all(&outbuf[..n])?,
+                Step::Done => break,
+                Step::NeedInput => unreachable!("finishing never reports NeedInput"),
             }
         }
         self.inner.flush()?;
@@ -123,20 +119,18 @@ impl<W: Write, C: Codec> CodecWriter<W, C> {
     }
 }
 
-impl<W: Write, C: Codec> Write for CodecWriter<W, C> {
+impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut consumed = 0usize;
         while consumed < buf.len() {
-            let (progress, status) = self
-                .codec
-                .process(&buf[consumed..], &mut self.outbuf)
-                .map_err(to_io_error)?;
-            if progress.written > 0 {
-                self.inner.write_all(&self.outbuf[..progress.written])?;
-            }
-            consumed += progress.consumed;
-            if matches!(status, Status::StreamEnd) {
-                break;
+            let outbuf = self.outbuf.as_mut();
+            let (n, step) =
+                self.engine.step(&buf[consumed..], false, outbuf).map_err(to_io_error)?;
+            consumed += n;
+            match step {
+                Step::Wrote(written) => self.inner.write_all(&outbuf[..written])?,
+                Step::Done => break,
+                Step::NeedInput => {}
             }
         }
         Ok(consumed)
@@ -144,14 +138,36 @@ impl<W: Write, C: Codec> Write for CodecWriter<W, C> {
 
     fn flush(&mut self) -> io::Result<()> {
         loop {
-            let (progress, status) = self.codec.flush(&mut self.outbuf).map_err(to_io_error)?;
+            let outbuf = self.outbuf.as_mut();
+            let (progress, status) = self.engine.flush(outbuf).map_err(to_io_error)?;
             if progress.written > 0 {
-                self.inner.write_all(&self.outbuf[..progress.written])?;
+                self.inner.write_all(&outbuf[..progress.written])?;
             }
             if progress.written == 0 || matches!(status, Status::InputEmpty) {
                 break;
             }
         }
         self.inner.flush()
+    }
+}
+
+#[cfg(all(test, feature = "rot13"))]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{CodecReader, CodecWriter};
+    use crate::rot13::rot13;
+    use crate::Error;
+
+    #[test]
+    fn codec_reader_rejects_empty_buffer() {
+        let result = CodecReader::new(Cursor::new(b"hi".as_slice()), rot13(), Vec::<u8>::new());
+        assert!(matches!(result, Err(Error::OutputTooSmall)));
+    }
+
+    #[test]
+    fn codec_writer_rejects_empty_buffer() {
+        let result = CodecWriter::new(Vec::<u8>::new(), rot13(), Vec::<u8>::new());
+        assert!(matches!(result, Err(Error::OutputTooSmall)));
     }
 }

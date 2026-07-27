@@ -112,8 +112,10 @@ fn run_io<R: Read, W: Write>(
     let reader_codec = compose(reader_names)?;
     let writer_codec = compose(writer_names)?;
 
-    let mut reader = CodecReader::new(input, reader_codec);
-    let mut writer = CodecWriter::new(output, writer_codec);
+    let mut reader = CodecReader::new(input, reader_codec, vec![0u8; STAGING])
+        .map_err(|e| format!("{e:?}"))?;
+    let mut writer = CodecWriter::new(output, writer_codec, vec![0u8; STAGING])
+        .map_err(|e| format!("{e:?}"))?;
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
     writer.finish().map_err(|e| e.to_string())
@@ -195,7 +197,9 @@ mod tests {
         // calling `finish`.
         let writer_codec = compose(&names(&["rot13"])).unwrap();
         let sink = SharedSink::default();
-        let mut writer = rust_codecs_core::io::CodecWriter::new(sink.clone(), writer_codec);
+        let mut writer =
+            rust_codecs_core::io::CodecWriter::new(sink.clone(), writer_codec, vec![0u8; 64])
+                .unwrap();
 
         writer.write_all(b"hi\n").unwrap();
         writer.flush().unwrap();

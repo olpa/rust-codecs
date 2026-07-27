@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn reader_with_small_output_buffer() {
-        let mut reader = CodecReader::new(Cursor::new(INPUT), identity());
+        let mut reader = CodecReader::new(Cursor::new(INPUT), identity(), vec![0u8; 3]).unwrap();
         let mut out = Vec::new();
         let mut buf = [0u8; 3];
         loop {
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), identity());
+        let mut writer = CodecWriter::new(Vec::new(), identity(), vec![0u8; 64]).unwrap();
         for chunk in INPUT.chunks(3) {
             writer.write_all(chunk).unwrap();
         }

@@ -346,7 +346,7 @@ mod tests {
     fn encode_reader_with_small_output_buffer() {
         // 4 bytes is base64's atomic output size (one encoded group);
         // a smaller buffer can never receive a full group.
-        let mut reader = CodecReader::new(Cursor::new(INPUT), base64_enc());
+        let mut reader = CodecReader::new(Cursor::new(INPUT), base64_enc(), vec![0u8; 4]).unwrap();
         let mut out = Vec::new();
         let mut buf = [0u8; 4];
         loop {
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn decode_reader_with_small_output_buffer() {
-        let mut reader = CodecReader::new(Cursor::new(ENCODED), base64_dec());
+        let mut reader = CodecReader::new(Cursor::new(ENCODED), base64_dec(), vec![0u8; 3]).unwrap();
         let mut out = Vec::new();
         let mut buf = [0u8; 3];
         loop {
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn encode_writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), base64_enc());
+        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 64]).unwrap();
         for chunk in INPUT.chunks(3) {
             writer.write_all(chunk).unwrap();
         }
@@ -386,12 +386,24 @@ mod tests {
 
     #[test]
     fn decode_writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), base64_dec());
+        let mut writer = CodecWriter::new(Vec::new(), base64_dec(), vec![0u8; 64]).unwrap();
         for chunk in ENCODED.chunks(3) {
             writer.write_all(chunk).unwrap();
         }
         let out = writer.finish().unwrap();
         assert_eq!(out, INPUT);
+    }
+
+    #[test]
+    fn writer_finish_surfaces_output_too_small() {
+        // A 2-byte outbuf is never exercised for real output during
+        // write() — one leftover byte just gets buffered, no group to
+        // emit yet — but base64's padded trailer needs 4 bytes.
+        // finish() must surface that as an error rather than looping
+        // forever retrying the same undersized fixed buffer.
+        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 2]).unwrap();
+        writer.write_all(b"A").unwrap();
+        assert!(writer.finish().is_err());
     }
 
     #[test]
