@@ -77,6 +77,9 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
                     // buffering internally) — go around and feed it
                     // more input.
                 }
+                Step::NeedOutput => {
+                    unreachable!("buf is checked non-empty above")
+                }
             }
         }
     }
@@ -112,6 +115,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
                 Step::Wrote(n) => self.inner.write_all(&outbuf[..n])?,
                 Step::Done => break,
                 Step::NeedInput => unreachable!("finishing never reports NeedInput"),
+                Step::NeedOutput => unreachable!("outbuf is rejected empty by CodecWriter::new"),
             }
         }
         self.inner.flush()?;
@@ -131,6 +135,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
                 Step::Wrote(written) => self.inner.write_all(&outbuf[..written])?,
                 Step::Done => break,
                 Step::NeedInput => {}
+                Step::NeedOutput => unreachable!("outbuf is rejected empty by CodecWriter::new"),
             }
         }
         Ok(consumed)

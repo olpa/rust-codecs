@@ -12,6 +12,11 @@ pub enum Step {
     /// Nothing was written; call again with more input (or, once at
     /// EOF, the same empty input again to move toward `finish`).
     NeedInput,
+    /// `output` was empty, so nothing could be written regardless of
+    /// how much input there was; call again with a fresh, non-empty
+    /// buffer. Reported without touching the codec at all — an empty
+    /// slice can never hold a byte, so there's nothing to ask it.
+    NeedOutput,
     /// `n` bytes landed in `output`. There may or may not be more to
     /// come — call again to find out.
     Wrote(usize),
@@ -43,6 +48,17 @@ impl<C: Codec> Engine<C> {
         self.codec
     }
 
+    /// Whether the codec has already emitted everything it ever will.
+    /// Lets a driver that latches its own progress across a call (e.g.
+    /// pulling the next chunk from an iterator only once it needs to)
+    /// check *before* doing that work, rather than finding out only
+    /// after an unnecessary pull — `step` can report `Wrote(n)` and
+    /// become done in the very same call, since a call can both
+    /// deliver final bytes and reach `StreamEnd`.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
     /// One turn of the crank. `input` is the bytes available right now
     /// (may be empty); `at_eof` says no more will ever come once
     /// `input` runs out. Returns how much of `input` was consumed and
@@ -65,14 +81,27 @@ impl<C: Codec> Engine<C> {
 
         if self.finishing || (input.is_empty() && at_eof) {
             self.finishing = true;
+            // Unlike `process`, every codec's `finish` tolerates a
+            // too-small (even empty) buffer gracefully — that's what
+            // "callable repeatedly with a fresh output buffer" means —
+            // so call it regardless, and only decide it's `NeedOutput`
+            // rather than a hard error based on whether *this* buffer
+            // was empty. Short-circuiting on `output.is_empty()` here
+            // the way `process` does below would force a slot-fetch
+            // even for a stateless codec whose `finish` never touches
+            // output at all.
+            let output_was_empty = output.is_empty();
             let (p, status) = self.codec.finish(output)?;
             self.latch(status);
-            return Ok((0, self.finish_step(p)?));
+            return Ok((0, self.finish_step(output_was_empty, p)?));
         }
 
         if input.is_empty() {
             // Not at EOF: nothing to do until the caller supplies more.
             return Ok((0, Step::NeedInput));
+        }
+        if output.is_empty() {
+            return Ok((0, Step::NeedOutput));
         }
 
         let (p, status) = self.codec.process(input, output)?;
@@ -98,15 +127,22 @@ impl<C: Codec> Engine<C> {
     }
 
     /// Turn a `finish` call's progress into a `Step`, once `self.done`
-    /// has already been updated by `latch`.
-    fn finish_step(&self, p: Progress) -> Result<Step, Error> {
+    /// has already been updated by `latch`. `output_was_empty` is
+    /// whether *this* call's buffer had zero room — the difference
+    /// between "give me a slot at all" (`NeedOutput`, worth another
+    /// try) and "gave you real room and you still choked"
+    /// (`OutputTooSmall`, retrying the same fixed buffer can't help).
+    fn finish_step(&self, output_was_empty: bool, p: Progress) -> Result<Step, Error> {
         if p.written > 0 {
             return Ok(Step::Wrote(p.written));
         }
         if self.done {
             return Ok(Step::Done);
         }
-        // No progress, and `finish` is contractually re-callable with a
+        if output_was_empty {
+            return Ok(Step::NeedOutput);
+        }
+        // Non-empty, and `finish` is contractually re-callable with a
         // *fresh* output buffer to make more — but every caller in this
         // crate hands `Engine` the same fixed-size buffer each time, so
         // "try again" can never help. That's specifically what a
@@ -231,6 +267,77 @@ mod tests {
         let mut tiny = [0u8; 2];
         let result = engine.step(&[], true, &mut tiny);
         assert!(matches!(result, Err(Error::OutputTooSmall)));
+    }
+
+    #[test]
+    fn process_reports_need_output_without_touching_codec() {
+        let mut engine = Engine::new(CountingCodec::default());
+        let (consumed, step) = engine.step(b"hi", false, &mut []).unwrap();
+        assert_eq!(consumed, 0);
+        assert_eq!(step, Step::NeedOutput);
+        assert_eq!(engine.codec.process_calls, 0);
+    }
+
+    #[test]
+    fn finish_with_empty_buffer_still_reaches_done_for_stateless_codec() {
+        // Unlike `process`, `finish` tolerates a too-small (even empty)
+        // buffer gracefully for every codec here — so a stateless
+        // codec's `finish` gets called (and immediately reports
+        // `StreamEnd`) even with a zero-length buffer, rather than
+        // Engine assuming it needs output and asking for a slot it has
+        // no use for.
+        let mut engine = Engine::new(CountingCodec::default());
+        let (consumed, step) = engine.step(&[], true, &mut []).unwrap();
+        assert_eq!(consumed, 0);
+        assert_eq!(step, Step::Done);
+        assert_eq!(engine.codec.finish_calls, 1);
+    }
+
+    #[test]
+    fn finish_reports_need_output_when_stuck_with_an_empty_buffer() {
+        // base64_enc actually needs room to flush a pending leftover's
+        // padded group. An empty buffer can't provide it, but a fresh
+        // non-empty one still might — so this is `NeedOutput`, not an
+        // error, unlike a non-empty-but-still-too-small buffer (see
+        // `no_progress_during_finish_errors_output_too_small`).
+        let mut engine = Engine::new(base64_enc());
+        let mut big = [0u8; 8];
+        let (_, step) = engine.step(b"A", false, &mut big).unwrap();
+        assert_eq!(step, Step::NeedInput);
+
+        let (consumed, step) = engine.step(&[], true, &mut []).unwrap();
+        assert_eq!(consumed, 0);
+        assert_eq!(step, Step::NeedOutput);
+
+        let (_, step) = engine.step(&[], true, &mut big).unwrap();
+        assert!(matches!(step, Step::Wrote(n) if n > 0));
+    }
+
+    #[test]
+    fn need_output_then_real_buffer_makes_progress() {
+        let mut engine = Engine::new(rot13());
+        let (consumed, step) = engine.step(b"Hello", false, &mut []).unwrap();
+        assert_eq!(consumed, 0);
+        assert_eq!(step, Step::NeedOutput);
+
+        let mut out = [0u8; 8];
+        let (consumed, step) = engine.step(b"Hello", false, &mut out).unwrap();
+        assert_eq!(consumed, 5);
+        assert_eq!(step, Step::Wrote(5));
+    }
+
+    #[test]
+    fn is_done_can_be_true_even_when_last_step_reported_wrote() {
+        // CountingCodec's process reports StreamEnd as soon as it's
+        // consumed all its input, in the very same call that writes
+        // the bytes — so `is_done` must already be true right after,
+        // without a further `step` call needed to discover it.
+        let mut engine = Engine::new(CountingCodec::default());
+        let mut out = [0u8; 8];
+        let (consumed, step) = engine.step(b"hi", true, &mut out).unwrap();
+        assert_eq!(consumed, 2);
+        assert_eq!(step, Step::Wrote(2));
+        assert!(engine.is_done());
     }
 
     #[test]

@@ -13,9 +13,13 @@
 //!
 //! This mirrors [`CodecReader`](super::CodecReader)/
 //! [`CodecWriter`](super::CodecWriter), which drive the same `Codec`
-//! trait over `std::io::Read`/`Write` instead.
+//! trait over `std::io::Read`/`Write` instead — both are built on
+//! [`Engine`](crate::Engine). Unlike those two, an output slot here can
+//! legitimately be empty (a degenerate slot, or one just exhausted),
+//! so `copy` relies on [`Step::NeedOutput`](crate::Step::NeedOutput)
+//! rather than treating every empty-output turn as "needs input."
 
-use crate::{Codec, Status};
+use crate::{Codec, Engine, Step};
 
 /// Why [`copy`] stopped before the codec reached `StreamEnd`.
 #[derive(Debug)]
@@ -39,7 +43,7 @@ pub enum CopyError<E> {
 /// from the returned total and the sizes of the slots it handed out.
 pub fn copy<I, B, E, O, S, C>(
     mut input: I,
-    mut codec: C,
+    codec: C,
     mut output: O,
 ) -> Result<usize, CopyError<E>>
 where
@@ -49,69 +53,70 @@ where
     S: AsMut<[u8]>,
     C: Codec,
 {
+    let mut engine = Engine::new(codec);
     let mut cur_in: Option<(B, usize)> = None;
+    let mut inner_eof = false;
     let mut cur_out: Option<(S, usize)> = None;
-    let mut finishing = false;
     let mut total = 0usize;
 
     loop {
-        // The slice the codec can write into this turn: the unused tail
-        // of the current output slot, or empty if there is no current
-        // slot (or it's fully used) — a fresh slot is only pulled once
-        // the codec proves it can't make progress without one, so a
-        // codec that needs no more room (e.g. `finish` on a stateless
-        // codec) never forces a slot it doesn't need.
+        // Checked first and before pulling anything: a call can both
+        // deliver final bytes and reach `StreamEnd` in the same turn,
+        // so by the next turn `is_done` may already be true — return
+        // right away rather than pulling an input chunk (or an output
+        // slot) that will never be used. Unlike `CodecReader`, which
+        // documents that trailing unread bytes are simply lost, an
+        // unused pull here would silently drop a real item the caller
+        // handed over (or claim a slot never actually needed).
+        if engine.is_done() {
+            return Ok(total);
+        }
+
+        let need_input = match &cur_in {
+            Some((b, pos)) => *pos >= b.as_ref().len(),
+            None => true,
+        };
+        if need_input && !inner_eof {
+            match input.next() {
+                Some(Ok(b)) => cur_in = Some((b, 0)),
+                Some(Err(e)) => return Err(CopyError::Input(e)),
+                None => inner_eof = true,
+            }
+        }
+
+        // The slice fed to the codec this turn: empty once the current
+        // chunk (or slot) is exhausted, or there is none yet — `Engine`
+        // tells us which side is the bottleneck instead of us guessing.
+        let in_buf: &[u8] = match &cur_in {
+            Some((b, pos)) if *pos < b.as_ref().len() => &b.as_ref()[*pos..],
+            _ => &[],
+        };
         let out_buf: &mut [u8] = match &mut cur_out {
             Some((s, pos)) => &mut s.as_mut()[*pos..],
             None => &mut [],
         };
 
-        let (progress, status) = if finishing {
-            codec.finish(out_buf).map_err(CopyError::Codec)?
-        } else {
-            let need_input = match &cur_in {
-                Some((b, pos)) => *pos >= b.as_ref().len(),
-                None => true,
-            };
-            if need_input {
-                match input.next() {
-                    Some(Ok(b)) => cur_in = Some((b, 0)),
-                    Some(Err(e)) => return Err(CopyError::Input(e)),
-                    None => {
-                        finishing = true;
-                        continue;
-                    }
+        let (consumed, step) = engine.step(in_buf, inner_eof, out_buf).map_err(CopyError::Codec)?;
+        if let Some((_, pos)) = cur_in.as_mut() {
+            *pos += consumed;
+        }
+
+        match step {
+            Step::Wrote(n) => {
+                if let Some((_, pos)) = cur_out.as_mut() {
+                    *pos += n;
                 }
+                total += n;
             }
-            let in_buf: &[u8] = match &cur_in {
-                Some((b, pos)) => &b.as_ref()[*pos..],
-                None => unreachable!("just ensured cur_in is populated"),
-            };
-            let (progress, status) = codec.process(in_buf, out_buf).map_err(CopyError::Codec)?;
-            if let Some((_, pos)) = cur_in.as_mut() {
-                *pos += progress.consumed;
+            Step::Done => return Ok(total),
+            Step::NeedInput => {
+                // Loop around: `need_input` is recomputed from `cur_in`
+                // at the top, so the next chunk gets pulled then.
             }
-            (progress, status)
-        };
-
-        if let Some((_, pos)) = cur_out.as_mut() {
-            *pos += progress.written;
-        }
-        total += progress.written;
-
-        if matches!(status, Status::StreamEnd) {
-            return Ok(total);
-        }
-        if matches!(status, Status::OutputFull) && progress.written == 0 {
-            // The codec reported the output slot as the bottleneck and
-            // still made zero progress — the slot had no room at all
-            // (as opposed to zero *input* being the reason `written`
-            // came back 0, which reports `InputEmpty`/`StreamEnd`
-            // instead) — so only a fresh slot can move things forward.
-            match output.next() {
+            Step::NeedOutput => match output.next() {
                 Some(s) => cur_out = Some((s, 0)),
                 None => return Err(CopyError::OutputExhausted),
-            }
+            },
         }
     }
 }
@@ -287,6 +292,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(written, 3);
+    }
+
+    #[test]
+    fn done_does_not_pull_an_extra_input_chunk() {
+        // `EarlyEnd`'s limit (5) lands exactly on the first chunk's
+        // length, so `Wrote` and the engine's internal `done` both
+        // happen in the same call that finishes consuming "Hello" —
+        // exactly the case where a driver that refills its current
+        // input *before* checking whether it's already done would pull
+        // the never-needed second chunk. `copy` must not: it checks
+        // done-ness first, so the input iterator's second item stays
+        // untouched.
+        use std::cell::Cell;
+        let pulls = Cell::new(0);
+        let chunks: [&[u8]; 2] = [b"Hello", b"World"];
+        let mut idx = 0;
+        let input = std::iter::from_fn(|| {
+            if idx >= chunks.len() {
+                return None;
+            }
+            pulls.set(pulls.get() + 1);
+            let chunk = chunks[idx];
+            idx += 1;
+            Some(Ok::<_, ()>(chunk))
+        });
+        let mut out = slots(4, 8);
+        let written = copy::<_, _, (), _, _, _>(
+            input,
+            EarlyEnd { limit: 5, done: 0 },
+            slot_iter(&mut out),
+        )
+        .unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(pulls.get(), 1);
     }
 
     #[test]

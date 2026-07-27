@@ -28,6 +28,7 @@ pub fn to_vec<C: Codec>(codec: C, input: &[u8]) -> Result<Vec<u8>, Error> {
             Step::Wrote(n) => out.extend_from_slice(&scratch[..n]),
             Step::NeedInput => {}
             Step::Done => break,
+            Step::NeedOutput => unreachable!("scratch is a fixed non-empty allocation"),
         }
     }
     Ok(out)
