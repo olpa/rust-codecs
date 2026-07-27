@@ -39,18 +39,105 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        let _ = (input, output);
-        // Stub: not yet implemented. Deliberately wrong (rather than
-        // `todo!()`) so driving this through `to_vec` fails fast and
-        // deterministically (`InputEmpty` on the first call, no
-        // progress) instead of spinning, and the tests below fail as
-        // real assertion mismatches.
-        Ok((Progress::default(), Status::InputEmpty))
+        let mut in_pos = 0;
+        let mut out_pos = 0;
+
+        loop {
+            let staging = self.staging.as_mut();
+
+            // Drain whatever's already staged into the caller's output
+            // before asking `first` for more — biggest possible chunks,
+            // invisible from outside a single call.
+            if self.drained < self.filled {
+                let (p, status) =
+                    self.second.process(&staging[self.drained..self.filled], &mut output[out_pos..])?;
+                self.drained += p.consumed;
+                out_pos += p.written;
+
+                if matches!(status, Status::StreamEnd) {
+                    return Ok((Progress { consumed: in_pos, written: out_pos }, Status::StreamEnd));
+                }
+                if self.drained == self.filled {
+                    self.drained = 0;
+                    self.filled = 0;
+                }
+                if matches!(status, Status::OutputFull) {
+                    return Ok((Progress { consumed: in_pos, written: out_pos }, Status::OutputFull));
+                }
+                // InputEmpty: staging is now fully drained (just reset
+                // above) — loop around to refill it.
+                continue;
+            }
+
+            // Staging is empty (guaranteed above whenever we get here).
+            // Return-clean (decision 3): don't withhold anything `second`
+            // could take — only stop when there's genuinely nothing left
+            // to feed `first`.
+            if self.first_ended || in_pos == input.len() {
+                return Ok((Progress { consumed: in_pos, written: out_pos }, Status::InputEmpty));
+            }
+
+            let (p, status) = self.first.process(&input[in_pos..], staging)?;
+            in_pos += p.consumed;
+            self.filled += p.written;
+            if matches!(status, Status::StreamEnd) {
+                self.first_ended = true;
+            }
+            // Loop around: drain what was just staged (or, if `first`
+            // buffered internally without emitting anything, go around
+            // for more input — bounded by `in_pos` advancing each turn,
+            // per the `Codec` contract `first` is trusted to uphold).
+        }
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        let _ = output;
-        Ok((Progress::default(), Status::InputEmpty))
+        let mut out_pos = 0;
+
+        loop {
+            let staging = self.staging.as_mut();
+
+            // Any leftover staged bytes (from a prior `process`/`finish`
+            // call that left the caller's output full) go first.
+            if self.drained < self.filled {
+                let (p, status) =
+                    self.second.process(&staging[self.drained..self.filled], &mut output[out_pos..])?;
+                self.drained += p.consumed;
+                out_pos += p.written;
+
+                if matches!(status, Status::StreamEnd) {
+                    return Ok((Progress { consumed: 0, written: out_pos }, Status::StreamEnd));
+                }
+                if self.drained == self.filled {
+                    self.drained = 0;
+                    self.filled = 0;
+                }
+                if matches!(status, Status::OutputFull) {
+                    return Ok((Progress { consumed: 0, written: out_pos }, Status::OutputFull));
+                }
+                continue;
+            }
+
+            if !self.first_ended {
+                let (p, status) = self.first.finish(&mut staging[self.filled..])?;
+                self.filled += p.written;
+                if matches!(status, Status::StreamEnd) {
+                    self.first_ended = true;
+                }
+                if matches!(status, Status::OutputFull) && p.written == 0 {
+                    // The staging buffer can't hold even one atomic unit
+                    // of `first`'s trailer — no caller-visible retry can
+                    // help, since `finish`'s output (here, `staging`) is
+                    // this same fixed size every time.
+                    return Err(Error::OutputTooSmall);
+                }
+                continue;
+            }
+
+            // `first` is fully drained through `second`; finish `second`.
+            let (p, status) = self.second.finish(&mut output[out_pos..])?;
+            out_pos += p.written;
+            return Ok((Progress { consumed: 0, written: out_pos }, status));
+        }
     }
 }
 
