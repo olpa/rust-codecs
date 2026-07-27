@@ -15,7 +15,7 @@
 //! [`CodecWriter`](super::CodecWriter), which drive the same `Codec`
 //! trait over `std::io::Read`/`Write` instead.
 
-use crate::Codec;
+use crate::{Codec, Status};
 
 /// Why [`copy`] stopped before the codec reached `StreamEnd`.
 #[derive(Debug)]
@@ -37,7 +37,11 @@ pub enum CopyError<E> {
 /// success. Every slot `copy` uses is filled completely except possibly
 /// the last one — the caller derives how many of its bytes are valid
 /// from the returned total and the sizes of the slots it handed out.
-pub fn copy<I, B, E, O, S, C>(input: I, codec: C, output: O) -> Result<usize, CopyError<E>>
+pub fn copy<I, B, E, O, S, C>(
+    mut input: I,
+    mut codec: C,
+    mut output: O,
+) -> Result<usize, CopyError<E>>
 where
     I: Iterator<Item = Result<B, E>>,
     B: AsRef<[u8]>,
@@ -45,11 +49,69 @@ where
     S: AsMut<[u8]>,
     C: Codec,
 {
-    let _ = (input, codec, output);
-    // Stub: not yet implemented. Deliberately wrong (rather than
-    // `todo!()`) so the tests below fail as real assertion mismatches,
-    // exercising their own logic instead of short-circuiting on a panic.
-    Ok(0)
+    let mut cur_in: Option<(B, usize)> = None;
+    let mut cur_out: Option<(S, usize)> = None;
+    let mut finishing = false;
+    let mut total = 0usize;
+
+    loop {
+        // The slice the codec can write into this turn: the unused tail
+        // of the current output slot, or empty if there is no current
+        // slot (or it's fully used) — a fresh slot is only pulled once
+        // the codec proves it can't make progress without one, so a
+        // codec that needs no more room (e.g. `finish` on a stateless
+        // codec) never forces a slot it doesn't need.
+        let out_buf: &mut [u8] = match &mut cur_out {
+            Some((s, pos)) => &mut s.as_mut()[*pos..],
+            None => &mut [],
+        };
+
+        let (progress, status) = if finishing {
+            codec.finish(out_buf).map_err(CopyError::Codec)?
+        } else {
+            let need_input = match &cur_in {
+                Some((b, pos)) => *pos >= b.as_ref().len(),
+                None => true,
+            };
+            if need_input {
+                match input.next() {
+                    Some(Ok(b)) => cur_in = Some((b, 0)),
+                    Some(Err(e)) => return Err(CopyError::Input(e)),
+                    None => {
+                        finishing = true;
+                        continue;
+                    }
+                }
+            }
+            let in_buf: &[u8] = match &cur_in {
+                Some((b, pos)) => &b.as_ref()[*pos..],
+                None => unreachable!("just ensured cur_in is populated"),
+            };
+            let (progress, status) = codec.process(in_buf, out_buf).map_err(CopyError::Codec)?;
+            if let Some((_, pos)) = cur_in.as_mut() {
+                *pos += progress.consumed;
+            }
+            (progress, status)
+        };
+
+        if let Some((_, pos)) = cur_out.as_mut() {
+            *pos += progress.written;
+        }
+        total += progress.written;
+
+        if matches!(status, Status::StreamEnd) {
+            return Ok(total);
+        }
+        if progress.written == 0 {
+            // The current slot (if any) couldn't take another byte —
+            // the codec made zero progress with the room it had, so
+            // only a fresh slot can move things forward.
+            match output.next() {
+                Some(s) => cur_out = Some((s, 0)),
+                None => return Err(CopyError::OutputExhausted),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
