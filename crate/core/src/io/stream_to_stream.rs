@@ -178,9 +178,20 @@ where
         if matches!(status, Status::StreamEnd) {
             done = true;
         }
-        // Zero-written, not-`StreamEnd` turns (ordinary internal
-        // buffering, e.g. a partial base64 quad) aren't an error here —
-        // loop around and let the top of the loop pull more input.
+        // Zero-*written*, not-`StreamEnd` turns (ordinary internal
+        // buffering, e.g. a partial base64 quad) aren't an error on
+        // their own — `p.consumed` moving is real progress, so loop
+        // around and let the top pull more input. But zero *and* zero
+        // — neither side moved, against a slot that was genuinely
+        // non-empty (checked above) — means the codec's next atomic
+        // output unit doesn't fit this slot at all. Unlike `finish`,
+        // `process` can't be retried mid-call with a fresh buffer, and
+        // silently moving on to the next slot would leave this one
+        // under-filled, breaking the "every slot but the last is
+        // filled completely" guarantee — so this is a hard stall.
+        if p.consumed == 0 && p.written == 0 && !done {
+            return Err(CopyError::Codec(Error::OutputTooSmall));
+        }
     }
 }
 
@@ -258,6 +269,50 @@ mod tests {
             let status = if self.done >= self.limit {
                 crate::Status::StreamEnd
             } else if n == input.len() {
+                crate::Status::InputEmpty
+            } else {
+                crate::Status::OutputFull
+            };
+            Ok((
+                crate::Progress {
+                    consumed: n,
+                    written: n,
+                },
+                status,
+            ))
+        }
+
+        fn finish(
+            &mut self,
+            _output: &mut [u8],
+        ) -> Result<(crate::Progress, crate::Status), crate::Error> {
+            Ok((crate::Progress::default(), crate::Status::StreamEnd))
+        }
+    }
+
+    /// A test-only codec with a minimum atomic output size: `process`
+    /// makes no progress at all — zero consumed, zero written — until
+    /// `output` has room for a whole 4-byte unit, mirroring how a real
+    /// format like base64 can't emit a partial group. Unlike
+    /// `base64.rs`, which self-guards this by returning
+    /// `Err(OutputTooSmall)` directly, this codec reports the naive
+    /// `Status::OutputFull` a less careful implementation might, so the
+    /// test below exercises `stream_to_stream`'s own backstop.
+    struct MinOutputUnit;
+
+    impl crate::Codec for MinOutputUnit {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [u8],
+        ) -> Result<(crate::Progress, crate::Status), crate::Error> {
+            const UNIT: usize = 4;
+            if output.len() < UNIT {
+                return Ok((crate::Progress::default(), crate::Status::OutputFull));
+            }
+            let n = input.len().min(output.len());
+            output[..n].copy_from_slice(&input[..n]);
+            let status = if n == input.len() {
                 crate::Status::InputEmpty
             } else {
                 crate::Status::OutputFull
@@ -388,6 +443,22 @@ mod tests {
         let result = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(truncated, 4),
             base64_dec(),
+            slot_iter(&mut out),
+        );
+        assert!(matches!(result, Err(CopyError::Codec(_))));
+    }
+
+    #[test]
+    fn process_stall_on_undersized_slot_errors_instead_of_looping() {
+        // `MinOutputUnit` needs 4 bytes of output room to write
+        // anything; every slot here is 1 byte, so an unguarded driver
+        // would call `process` forever, always getting zero consumed
+        // and zero written back. `stream_to_stream` must recognize
+        // that as a hard stall and error out rather than hang.
+        let mut out = slots(4, 1);
+        let result = stream_to_stream::<_, _, (), _, _, _, _>(
+            ok_chunks(INPUT, 4),
+            MinOutputUnit,
             slot_iter(&mut out),
         );
         assert!(matches!(result, Err(CopyError::Codec(_))));
