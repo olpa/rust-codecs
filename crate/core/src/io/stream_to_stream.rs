@@ -27,6 +27,22 @@
 //! needs the same shape, lift it back out then — this is deliberately
 //! the harder, more general case, kept concrete until a second
 //! consumer shows what's actually common.
+//!
+//! # Known limitation: codecs with a minimum atomic output size
+//!
+//! A codec that can only emit whole atomic units (base64: 4-byte
+//! encoded groups) cannot make progress into an output buffer smaller
+//! than one unit. Under the "every used slot is filled completely"
+//! accounting, this driver has no legal recovery: it can't leave a
+//! slot's too-small remainder unfilled and move on, because the caller
+//! reconstructs per-slot byte counts from the returned total. So such
+//! codecs fail with `OutputTooSmall` whenever a slot's size isn't a
+//! multiple of the unit (the leftover remainder blocks) or is smaller
+//! than the unit outright — even with plenty of slots remaining. The
+//! two `#[ignore]`d tests below reproduce both shapes. Planned fixes:
+//! per-slot accounting via an output-sink trait (fixes unaligned slot
+//! sizes), and an output-carry in the codecs themselves (fixes slots
+//! smaller than the unit).
 
 use crate::{Codec, Error, Status};
 
@@ -446,6 +462,43 @@ mod tests {
             slot_iter(&mut out),
         );
         assert!(matches!(result, Err(CopyError::Codec(_))));
+    }
+
+    #[test]
+    #[ignore = "known limitation: slot sizes not a multiple of base64's 4-byte encoded group fail with OutputTooSmall; needs per-slot accounting (output-sink trait)"]
+    fn base64_slots_not_multiple_of_encoded_group() {
+        // 6 slots of 10 bytes = 60 bytes of room for 24 bytes of
+        // output, yet after 8 bytes (two encoded groups) land in a
+        // slot, its 2-byte remainder can't fit a third group and the
+        // driver has no legal way to move past it. See the module-doc
+        // "Known limitation" section.
+        let expected = to_vec(base64_enc(), INPUT).unwrap();
+        let mut out = slots(6, 10);
+        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+            ok_chunks(INPUT, 5),
+            base64_enc(),
+            slot_iter(&mut out),
+        )
+        .unwrap();
+        assert_eq!(written, expected.len());
+    }
+
+    #[test]
+    #[ignore = "known limitation: slots smaller than base64's 4-byte encoded group fail with OutputTooSmall; needs an output-carry in the codec"]
+    fn base64_slots_smaller_than_encoded_group() {
+        // 1-byte slots are below the codec's atomic unit, so not even
+        // per-slot accounting can help — the codec itself must learn
+        // to dribble a unit across calls. See the module-doc "Known
+        // limitation" section.
+        let expected = to_vec(base64_enc(), INPUT).unwrap();
+        let mut out = slots(64, 1);
+        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+            ok_chunks(INPUT, 5),
+            base64_enc(),
+            slot_iter(&mut out),
+        )
+        .unwrap();
+        assert_eq!(written, expected.len());
     }
 
     #[test]
