@@ -4,8 +4,8 @@
 //!   the fly as the wrapped stream is used.
 //! - [`vec`]: run the transform once over an in-memory buffer and get a
 //!   `Vec<u8>` back.
-//! - [`stream_to_stream`]: drive a transform between two iterator-based
-//!   streams of byte buffers.
+//! - [`stream_to_stream`]: drive a transform from an iterator of input
+//!   chunks into an [`OutputSink`] of output buffer slots.
 //!
 //! A runtime-built chain of codecs (e.g. one assembled from a list of
 //! codec names) is a [`Chain`](crate::Chain), not a stack of nested
@@ -17,5 +17,5 @@ mod stream_to_stream;
 mod vec;
 
 pub use stream::{CodecReader, CodecWriter};
-pub use stream_to_stream::{stream_to_stream, CopyError};
+pub use stream_to_stream::{stream_to_stream, CopyError, IterSink, OutputSink};
 pub use vec::to_vec;
