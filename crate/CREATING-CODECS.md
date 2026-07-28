@@ -45,6 +45,23 @@ Notes on the trait contract:
 - `process` pushes input bytes and pulls output bytes; `Status` tells the
   caller which buffer ran out first (`InputEmpty`, `OutputFull`) or that
   the stream ended (`StreamEnd`).
+- **`process` must consume or make progress.** Given non-empty input and
+  non-empty output, a call must consume at least one input byte or write
+  at least one output byte — "I need more input before I can produce
+  anything" is *not* an excuse to return zero progress. Buffer the
+  available bytes internally and report `InputEmpty` (that status means
+  "all of `input` was consumed", so returning it with unconsumed input
+  is a contract violation); the drivers will feed the next chunk and,
+  at end of stream, call `finish` to drain what you buffered. Drivers
+  never coalesce input into a larger contiguous slice for you, and they
+  treat a zero-progress call as a stall — misdiagnosed as an
+  output-size problem (`CopyError::SlotTooSmall`), never as "waiting
+  for input". See `Base64Enc::pending_group` for the pattern: a partial
+  group is stashed across calls and topped up first thing on the next
+  one. The one legitimate zero-progress return is `Err(OutputTooSmall)`
+  when the output buffer can't fit your minimum atomic output unit —
+  and that must be a pure precondition check, returned before any state
+  change, because drivers retry the call with a fresh buffer.
 - `finish` signals "no more input is coming" — flush any buffered state
   and, for formats with one, write the trailer/checksum. Call it
   repeatedly with a fresh output buffer until it reports `StreamEnd`.
