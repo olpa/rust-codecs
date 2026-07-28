@@ -10,18 +10,22 @@
 //!   (`S: AsMut<[u8]>`) to fill — the same convention the rc7-streaming
 //!   plan uses for `Chain`'s staging buffer. [`stream_to_stream`] fills
 //!   each slot as full as the codec allows before moving to the next
-//!   one.
+//!   one. A slot handed back with zero capacity is a caller bug, not a
+//!   case to tolerate — see [`CopyError::EmptySlot`].
 //!
 //! This mirrors [`CodecReader`](super::CodecReader)/
 //! [`CodecWriter`](super::CodecWriter), which drive the same `Codec`
-//! trait over `std::io::Read`/`Write` instead — both are built on
-//! [`Engine`](crate::Engine). Unlike those two, an output slot here can
-//! legitimately be empty (a degenerate slot, or one just exhausted), so
-//! `stream_to_stream` relies on
-//! [`Step::NeedOutput`](crate::Step::NeedOutput) rather than treating
-//! every empty-output turn as "needs input."
+//! trait over `std::io::Read`/`Write` instead. Unlike those two,
+//! `stream_to_stream` does *not* go through
+//! [`Engine`](crate::Engine): its input can fail per-chunk and its
+//! output slots can run out entirely, neither of which the std
+//! adapters need to handle, so the process/finish/`StreamEnd`
+//! bookkeeping is inlined here rather than shared. If a future driver
+//! needs the same shape, lift it back out then — this is deliberately
+//! the harder, more general case, kept concrete until a second
+//! consumer shows what's actually common.
 
-use crate::{Codec, Engine, Step};
+use crate::{Codec, Error, Status};
 
 /// Why [`stream_to_stream`] stopped before the codec reached
 /// `StreamEnd`.
@@ -34,6 +38,10 @@ pub enum CopyError<E> {
     /// The output iterator ran out of buffer slots before the codec
     /// finished producing output.
     OutputExhausted,
+    /// The output iterator handed back a slot with zero capacity. A
+    /// pool that can't guarantee non-empty slots must filter them out
+    /// before handing its iterator to `stream_to_stream`.
+    EmptySlot,
 }
 
 /// Run `codec` over `input` (an iterator of ready-made input chunks),
@@ -47,7 +55,7 @@ pub enum CopyError<E> {
 /// it handed out.
 pub fn stream_to_stream<I, B, E, O, S, C>(
     mut input: I,
-    codec: C,
+    mut codec: C,
     mut output: O,
 ) -> Result<usize, CopyError<E>>
 where
@@ -57,22 +65,24 @@ where
     S: AsMut<[u8]>,
     C: Codec,
 {
-    let mut engine = Engine::new(codec);
     let mut cur_in: Option<(B, usize)> = None;
     let mut inner_eof = false;
-    let mut cur_out: Option<(S, usize)> = None;
+    // (slot, position already written, slot length) — length is cached
+    // at pull time since `S: AsMut` needs `&mut` to measure.
+    let mut cur_out: Option<(S, usize, usize)> = None;
+    let mut finishing = false;
+    let mut done = false;
     let mut total = 0usize;
 
     loop {
         // Checked first and before pulling anything: a call can both
         // deliver final bytes and reach `StreamEnd` in the same turn,
-        // so by the next turn `is_done` may already be true — return
+        // so by the next turn `done` may already be true — return
         // right away rather than pulling an input chunk (or an output
-        // slot) that will never be used. Unlike `CodecReader`, which
-        // documents that trailing unread bytes are simply lost, an
-        // unused pull here would silently drop a real item the caller
-        // handed over (or claim a slot never actually needed).
-        if engine.is_done() {
+        // slot) that will never be used. An unused pull here would
+        // silently drop a real item the caller handed over (or claim a
+        // slot never actually needed).
+        if done {
             return Ok(total);
         }
 
@@ -89,41 +99,107 @@ where
         }
 
         // The slice fed to the codec this turn: empty once the current
-        // chunk (or slot) is exhausted, or there is none yet — `Engine`
-        // tells us which side is the bottleneck instead of us guessing.
+        // chunk is exhausted, or there is none yet.
         let in_buf: &[u8] = match &cur_in {
             Some((b, pos)) if *pos < b.as_ref().len() => &b.as_ref()[*pos..],
             _ => &[],
         };
-        let out_buf: &mut [u8] = match &mut cur_out {
-            Some((s, pos)) => &mut s.as_mut()[*pos..],
-            None => &mut [],
+
+        if finishing || (in_buf.is_empty() && inner_eof) {
+            finishing = true;
+
+            let out_buf: &mut [u8] = match &mut cur_out {
+                Some((s, pos, len)) => &mut s.as_mut()[*pos..*len],
+                None => &mut [],
+            };
+            let output_was_empty = out_buf.is_empty();
+            let (p, status) = codec.finish(out_buf).map_err(CopyError::Codec)?;
+            if let Some((_, pos, _)) = cur_out.as_mut() {
+                *pos += p.written;
+            }
+            total += p.written;
+            if matches!(status, Status::StreamEnd) {
+                done = true;
+            }
+
+            if p.written > 0 {
+                // Loop around: re-check `done` before doing anything
+                // else, matching the "can finish and end in the same
+                // call" case above.
+                continue;
+            }
+            if done {
+                return Ok(total);
+            }
+            if output_was_empty {
+                pull_next_slot(&mut output, &mut cur_out)?;
+                continue;
+            }
+            // A real, non-empty buffer, and `finish` still made no
+            // progress: retrying the same fixed-size slot can never
+            // help — the codec's next atomic output unit doesn't fit.
+            return Err(CopyError::Codec(Error::OutputTooSmall));
+        }
+
+        if in_buf.is_empty() {
+            // Not at EOF: wait for more input. Loop around without
+            // touching the output side — pulling a slot here would
+            // claim one the codec doesn't need yet (e.g. a zero-length
+            // chunk sitting between two real ones).
+            continue;
+        }
+
+        let out_buf_empty = match &cur_out {
+            Some((_, pos, len)) => *pos >= *len,
+            None => true,
+        };
+        if out_buf_empty {
+            pull_next_slot(&mut output, &mut cur_out)?;
+            continue;
+        }
+        let out_buf = {
+            let (s, pos, len) = cur_out.as_mut().unwrap();
+            &mut s.as_mut()[*pos..*len]
         };
 
-        let (consumed, step) = engine
-            .step(in_buf, inner_eof, out_buf)
-            .map_err(CopyError::Codec)?;
+        let (p, status) = codec.process(in_buf, out_buf).map_err(CopyError::Codec)?;
         if let Some((_, pos)) = cur_in.as_mut() {
-            *pos += consumed;
+            *pos += p.consumed;
         }
+        if let Some((_, pos, _)) = cur_out.as_mut() {
+            *pos += p.written;
+        }
+        total += p.written;
+        if matches!(status, Status::StreamEnd) {
+            done = true;
+        }
+        // Zero-written, not-`StreamEnd` turns (ordinary internal
+        // buffering, e.g. a partial base64 quad) aren't an error here —
+        // loop around and let the top of the loop pull more input.
+    }
+}
 
-        match step {
-            Step::Wrote(n) => {
-                if let Some((_, pos)) = cur_out.as_mut() {
-                    *pos += n;
-                }
-                total += n;
+/// Pull the next output slot, rejecting a degenerate (zero-capacity)
+/// one outright rather than silently skipping it — a slot iterator that
+/// can't guarantee non-empty slots is a caller bug.
+fn pull_next_slot<O, S, E>(
+    output: &mut O,
+    cur_out: &mut Option<(S, usize, usize)>,
+) -> Result<(), CopyError<E>>
+where
+    O: Iterator<Item = S>,
+    S: AsMut<[u8]>,
+{
+    match output.next() {
+        Some(mut s) => {
+            let len = s.as_mut().len();
+            if len == 0 {
+                return Err(CopyError::EmptySlot);
             }
-            Step::Done => return Ok(total),
-            Step::NeedInput => {
-                // Loop around: `need_input` is recomputed from `cur_in`
-                // at the top, so the next chunk gets pulled then.
-            }
-            Step::NeedOutput => match output.next() {
-                Some(s) => cur_out = Some((s, 0)),
-                None => return Err(CopyError::OutputExhausted),
-            },
+            *cur_out = Some((s, 0, len));
+            Ok(())
         }
+        None => Err(CopyError::OutputExhausted),
     }
 }
 
@@ -361,20 +437,19 @@ mod tests {
     }
 
     #[test]
-    fn zero_length_output_slot_is_skipped() {
+    fn zero_length_output_slot_is_an_error() {
         // A degenerate slot (e.g. from a pool that handed back an
-        // empty buffer) has no room at all; `stream_to_stream` must move past it
-        // to the next slot rather than getting stuck reporting
-        // `OutputExhausted` or corrupting later slots.
+        // empty buffer) has no room at all. Unlike the earlier
+        // tolerant behavior, `stream_to_stream` now treats this as a
+        // caller bug rather than silently skipping past it — a pool
+        // that can hand out empty slots must filter them out itself.
         let mut out = vec![vec![0u8; 10], vec![], vec![0u8; 10]];
-        let expected = to_vec(rot13(), INPUT).unwrap();
-        let written = stream_to_stream::<_, _, (), _, _, _>(
+        let result = stream_to_stream::<_, _, (), _, _, _>(
             ok_chunks(INPUT, 5),
             rot13(),
             slot_iter(&mut out),
-        )
-        .unwrap();
-        assert_eq!(written, expected.len());
+        );
+        assert!(matches!(result, Err(CopyError::EmptySlot)));
     }
 
     #[test]
