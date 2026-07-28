@@ -6,12 +6,15 @@
 //! - The input stream is an iterator of ready-made input chunks, each
 //!   fallible (`Result<B, E>`) so a fallible source (file reads,
 //!   network) can report a failure per-chunk.
-//! - The output stream is an iterator of caller-provided buffer *slots*
-//!   (`S: AsMut<[u8]>`) to fill — the same convention the rc7-streaming
-//!   plan uses for `Chain`'s staging buffer. [`stream_to_stream`] fills
-//!   each slot as full as the codec allows before moving to the next
-//!   one. A slot handed back with zero capacity is a caller bug, not a
-//!   case to tolerate — see [`CopyError::EmptySlot`].
+//! - The output stream is likewise an iterator of fallible
+//!   caller-provided buffer *slots* (`Result<S, E2>`, `S: AsMut<[u8]>`)
+//!   — the same convention the rc7-streaming plan uses for `Chain`'s
+//!   staging buffer, made fallible because handing out a slot can fail
+//!   too (a pool that's out of buffers, a channel that's closed).
+//!   [`stream_to_stream`] fills each slot as full as the codec allows
+//!   before moving to the next one. A slot handed back with zero
+//!   capacity is a caller bug, not a case to tolerate — see
+//!   [`CopyError::EmptySlot`].
 //!
 //! This mirrors [`CodecReader`](super::CodecReader)/
 //! [`CodecWriter`](super::CodecWriter), which drive the same `Codec`
@@ -30,9 +33,11 @@ use crate::{Codec, Error, Status};
 /// Why [`stream_to_stream`] stopped before the codec reached
 /// `StreamEnd`.
 #[derive(Debug)]
-pub enum CopyError<E> {
+pub enum CopyError<E, E2> {
     /// The input iterator yielded an error.
     Input(E),
+    /// The output iterator yielded an error instead of a slot.
+    Output(E2),
     /// The codec reported an error.
     Codec(crate::Error),
     /// The output iterator ran out of buffer slots before the codec
@@ -53,15 +58,15 @@ pub enum CopyError<E> {
 /// except possibly the last one — the caller derives how many of its
 /// bytes are valid from the returned total and the sizes of the slots
 /// it handed out.
-pub fn stream_to_stream<I, B, E, O, S, C>(
+pub fn stream_to_stream<I, B, E, O, S, E2, C>(
     mut input: I,
     mut codec: C,
     mut output: O,
-) -> Result<usize, CopyError<E>>
+) -> Result<usize, CopyError<E, E2>>
 where
     I: Iterator<Item = Result<B, E>>,
     B: AsRef<[u8]>,
-    O: Iterator<Item = S>,
+    O: Iterator<Item = Result<S, E2>>,
     S: AsMut<[u8]>,
     C: Codec,
 {
@@ -182,16 +187,16 @@ where
 /// Pull the next output slot, rejecting a degenerate (zero-capacity)
 /// one outright rather than silently skipping it — a slot iterator that
 /// can't guarantee non-empty slots is a caller bug.
-fn pull_next_slot<O, S, E>(
+fn pull_next_slot<O, S, E, E2>(
     output: &mut O,
     cur_out: &mut Option<(S, usize, usize)>,
-) -> Result<(), CopyError<E>>
+) -> Result<(), CopyError<E, E2>>
 where
-    O: Iterator<Item = S>,
+    O: Iterator<Item = Result<S, E2>>,
     S: AsMut<[u8]>,
 {
     match output.next() {
-        Some(mut s) => {
+        Some(Ok(mut s)) => {
             let len = s.as_mut().len();
             if len == 0 {
                 return Err(CopyError::EmptySlot);
@@ -199,6 +204,7 @@ where
             *cur_out = Some((s, 0, len));
             Ok(())
         }
+        Some(Err(e)) => Err(CopyError::Output(e)),
         None => Err(CopyError::OutputExhausted),
     }
 }
@@ -220,8 +226,8 @@ mod tests {
         vec![vec![0u8; size]; count]
     }
 
-    fn slot_iter(slots: &mut [Vec<u8>]) -> impl Iterator<Item = &mut [u8]> {
-        slots.iter_mut().map(|s| s.as_mut_slice())
+    fn slot_iter(slots: &mut [Vec<u8>]) -> impl Iterator<Item = Result<&mut [u8], ()>> {
+        slots.iter_mut().map(|s| Ok(s.as_mut_slice()))
     }
 
     fn ok_chunks<E>(data: &[u8], chunk_size: usize) -> impl Iterator<Item = Result<&[u8], E>> {
@@ -277,7 +283,7 @@ mod tests {
     fn basic_round_trip() {
         let expected = to_vec(rot13(), INPUT).unwrap();
         let mut out = slots(4, 8);
-        let written = stream_to_stream::<_, _, (), _, _, _>(
+        let written = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
             rot13(),
             slot_iter(&mut out),
@@ -293,7 +299,7 @@ mod tests {
         // `reader_with_small_output_buffer` in rot13.rs.
         let expected = to_vec(rot13(), INPUT).unwrap();
         let mut out = slots(expected.len(), 1);
-        let written = stream_to_stream::<_, _, (), _, _, _>(
+        let written = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 4),
             rot13(),
             slot_iter(&mut out),
@@ -309,7 +315,7 @@ mod tests {
         // slot before it's exhausted.
         let expected = to_vec(rot13(), INPUT).unwrap();
         let mut out = slots(1, 64);
-        let written = stream_to_stream::<_, _, (), _, _, _>(
+        let written = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 1),
             rot13(),
             slot_iter(&mut out),
@@ -324,7 +330,7 @@ mod tests {
         let mut out = slots(1, 8);
         let empty: std::iter::Empty<Result<&[u8], ()>> = std::iter::empty();
         let written =
-            stream_to_stream::<_, _, (), _, _, _>(empty, identity(), slot_iter(&mut out)).unwrap();
+            stream_to_stream::<_, _, (), _, _, _, _>(empty, identity(), slot_iter(&mut out)).unwrap();
         assert_eq!(written, 0);
     }
 
@@ -334,7 +340,7 @@ mod tests {
         let chunks: Vec<Result<&[u8], &'static str>> =
             vec![Ok(&INPUT[..4]), Err("source failed"), Ok(&INPUT[4..])];
         let result =
-            stream_to_stream::<_, _, _, _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out));
+            stream_to_stream::<_, _, _, _, _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out));
         assert!(matches!(result, Err(CopyError::Input("source failed"))));
     }
 
@@ -342,12 +348,33 @@ mod tests {
     fn output_exhausted() {
         // Nowhere near enough slots to hold the transformed bytes.
         let mut out = slots(1, 1);
-        let result = stream_to_stream::<_, _, (), _, _, _>(
+        let result = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 4),
             rot13(),
             slot_iter(&mut out),
         );
         assert!(matches!(result, Err(CopyError::OutputExhausted)));
+    }
+
+    #[test]
+    fn output_error_propagates() {
+        // The output iterator can fail to hand out a slot at all (a
+        // pool that's out of buffers, a channel that's closed) —
+        // distinct from `OutputExhausted`, which means the iterator
+        // ran dry, not that it errored.
+        let mut first = vec![0u8; 2];
+        let mut second = vec![0u8; 8];
+        let slots: Vec<Result<&mut [u8], &'static str>> = vec![
+            Ok(first.as_mut_slice()),
+            Err("pool exhausted"),
+            Ok(second.as_mut_slice()),
+        ];
+        let result = stream_to_stream::<_, _, (), _, _, _, _>(
+            ok_chunks(INPUT, 4),
+            rot13(),
+            slots.into_iter(),
+        );
+        assert!(matches!(result, Err(CopyError::Output("pool exhausted"))));
     }
 
     #[test]
@@ -358,7 +385,7 @@ mod tests {
         let encoded = to_vec(base64_enc(), INPUT).unwrap();
         let truncated = &encoded[..encoded.len() - 2];
         let mut out = slots(4, 8);
-        let result = stream_to_stream::<_, _, (), _, _, _>(
+        let result = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(truncated, 4),
             base64_dec(),
             slot_iter(&mut out),
@@ -380,7 +407,7 @@ mod tests {
         let chunks: Vec<Result<&[u8], ()>> = vec![Ok(&INPUT[..4]), Ok(&[]), Ok(&INPUT[4..8])];
         let mut out = slots(1, 100);
         let written =
-            stream_to_stream::<_, _, (), _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out))
+            stream_to_stream::<_, _, (), _, _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out))
                 .unwrap();
         assert_eq!(written, 8);
     }
@@ -393,7 +420,7 @@ mod tests {
         // rest of the input.
         let chunks: Vec<Result<&[u8], ()>> = vec![Ok(b"Hello"), Ok(b"World")];
         let mut out = slots(4, 8);
-        let written = stream_to_stream::<_, _, (), _, _, _>(
+        let written = stream_to_stream::<_, _, (), _, _, _, _>(
             chunks.into_iter(),
             EarlyEnd { limit: 3, done: 0 },
             slot_iter(&mut out),
@@ -426,7 +453,7 @@ mod tests {
             Some(Ok::<_, ()>(chunk))
         });
         let mut out = slots(4, 8);
-        let written = stream_to_stream::<_, _, (), _, _, _>(
+        let written = stream_to_stream::<_, _, (), _, _, _, _>(
             input,
             EarlyEnd { limit: 5, done: 0 },
             slot_iter(&mut out),
@@ -444,7 +471,7 @@ mod tests {
         // caller bug rather than silently skipping past it — a pool
         // that can hand out empty slots must filter them out itself.
         let mut out = vec![vec![0u8; 10], vec![], vec![0u8; 10]];
-        let result = stream_to_stream::<_, _, (), _, _, _>(
+        let result = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
             rot13(),
             slot_iter(&mut out),
@@ -459,7 +486,7 @@ mod tests {
         let mut out = slots(4, 8);
         let chunks: Vec<Result<&[u8], &'static str>> = vec![Err("boom")];
         let result =
-            stream_to_stream::<_, _, _, _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out));
+            stream_to_stream::<_, _, _, _, _, _, _>(chunks.into_iter(), rot13(), slot_iter(&mut out));
         assert!(matches!(result, Err(CopyError::Input("boom"))));
     }
 }
