@@ -1,21 +1,26 @@
 //! Example [`Codec`]: passes bytes through unchanged.
 
-use crate::{Codec, Error, Progress, Status};
+use crate::{Codec, Drain, Error, Outcome};
 
 /// A no-op codec: output is identical to input.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Identity;
 
 impl Codec for Identity {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
         let n = input.len().min(output.len());
         output[..n].copy_from_slice(&input[..n]);
-        let status = if n == input.len() { Status::InputEmpty } else { Status::OutputFull };
-        Ok((Progress { consumed: n, written: n }, status))
+        // A 1:1 codec satisfies the fully-consume-or-fully-fill
+        // contract for free: `n` exhausts whichever side is shorter.
+        if n == input.len() {
+            Ok(Outcome::InputConsumed { written: n })
+        } else {
+            Ok(Outcome::OutputFilled { consumed: n })
+        }
     }
 
-    fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        Ok((Progress::default(), Status::StreamEnd))
+    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
     }
 }
 
@@ -41,7 +46,7 @@ mod tests {
 
     #[test]
     fn reader_with_small_output_buffer() {
-        let mut reader = CodecReader::new(Cursor::new(INPUT), identity(), vec![0u8; 3]).unwrap();
+        let mut reader = CodecReader::new(Cursor::new(INPUT), identity(), vec![0u8; 3]);
         let mut out = Vec::new();
         let mut buf = [0u8; 3];
         loop {
@@ -55,8 +60,8 @@ mod tests {
     }
 
     #[test]
-    fn writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), identity(), vec![0u8; 64]).unwrap();
+    fn writer_finish_reaches_done() {
+        let mut writer = CodecWriter::new(Vec::new(), identity(), vec![0u8; 64]);
         for chunk in INPUT.chunks(3) {
             writer.write_all(chunk).unwrap();
         }

@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-compcol = { version = "0.6", default-features = false, features = ["std"] }
 base64 = { version = "0.22", optional = true }
 json-escape = { git = "https://github.com/olpa/json-escape", branch = "feat/escape-bytes-try2", optional = true }
 

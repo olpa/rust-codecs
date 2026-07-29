@@ -14,7 +14,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::{Codec, Engine, Error, Status, Step};
+use crate::{Codec, Drain, Engine, Error, Step};
 
 fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
@@ -31,14 +31,16 @@ pub struct CodecReader<R, C: Codec, S> {
 }
 
 impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
-    /// Build a `CodecReader`. Rejects an empty `inbuf`: it could never
-    /// hold a byte read from `inner`, so the codec could never see any
-    /// input.
-    pub fn new(inner: R, codec: C, mut inbuf: S) -> Result<Self, Error> {
-        if inbuf.as_mut().is_empty() {
-            return Err(Error::OutputTooSmall);
-        }
-        Ok(Self { inner, engine: Engine::new(codec), inbuf, inpos: 0, inlen: 0, inner_eof: false })
+    /// Build a `CodecReader`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `inbuf`: it could never hold a byte read
+    /// from `inner`, so the codec could never see any input — a caller
+    /// bug, not a runtime condition.
+    pub fn new(inner: R, codec: C, mut inbuf: S) -> Self {
+        assert!(!inbuf.as_mut().is_empty(), "CodecReader buffer must be non-empty");
+        Self { inner, engine: Engine::new(codec), inbuf, inpos: 0, inlen: 0, inner_eof: false }
     }
 
     /// Unwrap this reader, discarding the codec, and return the wrapped
@@ -94,14 +96,16 @@ pub struct CodecWriter<W, C: Codec, S> {
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
-    /// Build a `CodecWriter`. Rejects an empty `outbuf`, for the same
-    /// reason [`CodecReader::new`] does: it could never hold a byte for
+    /// Build a `CodecWriter`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `outbuf`, for the same reason
+    /// [`CodecReader::new`] does: it could never hold a byte for
     /// `inner` to receive.
-    pub fn new(inner: W, codec: C, mut outbuf: S) -> Result<Self, Error> {
-        if outbuf.as_mut().is_empty() {
-            return Err(Error::OutputTooSmall);
-        }
-        Ok(Self { inner, engine: Engine::new(codec), outbuf })
+    pub fn new(inner: W, codec: C, mut outbuf: S) -> Self {
+        assert!(!outbuf.as_mut().is_empty(), "CodecWriter buffer must be non-empty");
+        Self { inner, engine: Engine::new(codec), outbuf }
     }
 
     /// Flush any bytes the codec was still holding, finalize the stream
@@ -144,12 +148,12 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn flush(&mut self) -> io::Result<()> {
         loop {
             let outbuf = self.outbuf.as_mut();
-            let (progress, status) = self.engine.flush(outbuf).map_err(to_io_error)?;
-            if progress.written > 0 {
-                self.inner.write_all(&outbuf[..progress.written])?;
-            }
-            if progress.written == 0 || matches!(status, Status::InputEmpty) {
-                break;
+            match self.engine.flush(outbuf).map_err(to_io_error)? {
+                Drain::OutputFilled => self.inner.write_all(&outbuf[..])?,
+                Drain::Done { written } => {
+                    self.inner.write_all(&outbuf[..written])?;
+                    break;
+                }
             }
         }
         self.inner.flush()
@@ -162,17 +166,16 @@ mod tests {
 
     use super::{CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::Error;
 
     #[test]
+    #[should_panic(expected = "buffer must be non-empty")]
     fn codec_reader_rejects_empty_buffer() {
-        let result = CodecReader::new(Cursor::new(b"hi".as_slice()), rot13(), Vec::<u8>::new());
-        assert!(matches!(result, Err(Error::OutputTooSmall)));
+        let _ = CodecReader::new(Cursor::new(b"hi".as_slice()), rot13(), Vec::<u8>::new());
     }
 
     #[test]
+    #[should_panic(expected = "buffer must be non-empty")]
     fn codec_writer_rejects_empty_buffer() {
-        let result = CodecWriter::new(Vec::<u8>::new(), rot13(), Vec::<u8>::new());
-        assert!(matches!(result, Err(Error::OutputTooSmall)));
+        let _ = CodecWriter::new(Vec::<u8>::new(), rot13(), Vec::<u8>::new());
     }
 }

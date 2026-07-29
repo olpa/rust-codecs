@@ -1,9 +1,17 @@
 //! Example [`Codec`]s: base64 encode/decode, built on the `base64`
 //! crate (<https://docs.rs/base64/>).
 //!
-//! Both codecs carry a `pending_group` of at most one incomplete group
-//! between `process` calls: up to 2 leftover bytes for the encoder, up
-//! to 3 leftover base64 characters for the decoder.
+//! Both codecs buffer at most one incomplete group on each side of the
+//! transform:
+//!
+//! - `pending_group` (input side): up to 2 leftover raw bytes for the
+//!   encoder, up to 3 leftover base64 characters for the decoder,
+//!   topped up from the next call's input.
+//! - a [`Carry`] (output side): the tail of an emitted group that
+//!   didn't fit the caller's output buffer, delivered first on the
+//!   next call. This is what upholds the fully-consume-or-fully-fill
+//!   contract even though base64 can only ever emit whole groups —
+//!   any non-empty output buffer works, including a 1-byte one.
 //!
 //! [`base64_enc`]/[`base64_dec`] build the standard base64 alphabet with
 //! padding. To use a different alphabet or padding behavior (e.g.
@@ -13,7 +21,7 @@
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
-use crate::{Codec, Error, Progress, Status};
+use crate::{Carry, Codec, Drain, Error, ErrorKind, Outcome};
 
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
 // of the base64 algorithm itself, not a detail of any one alphabet or
@@ -57,43 +65,54 @@ pub struct Base64Enc<E: Engine = GeneralPurpose> {
     engine: E,
     pending_group: [u8; GROUP],
     len: usize,
+    carry: Carry<ENCODED_GROUP>,
 }
 
 impl<E: Engine> Base64Enc<E> {
     /// Build a [`Base64Enc`] that encodes with a caller-supplied `Engine`
     /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
     pub fn with_engine(engine: E) -> Self {
-        Self { engine, pending_group: [0; GROUP], len: 0 }
+        Self { engine, pending_group: [0; GROUP], len: 0, carry: Carry::new() }
+    }
+
+    /// Encode one whole group into a scratch array — `encode_slice` is
+    /// all-or-nothing on whatever slice it's given, so partial groups
+    /// and partial outputs are both handled by the caller (padding for
+    /// a final short group is the engine's own doing in `finish`).
+    fn encode_group(&self, group: &[u8], consumed: usize, written: usize) -> Result<([u8; ENCODED_GROUP], usize), Error> {
+        let mut scratch = [0u8; ENCODED_GROUP];
+        let n = self
+            .engine
+            .encode_slice(group, &mut scratch)
+            .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
+        Ok((scratch, n))
     }
 }
 
 impl<E: Engine> Codec for Base64Enc<E> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
         let mut in_pos = 0;
-        let mut out_pos = 0;
 
-        // Top up a pending partial group with fresh input.
+        // Deliver the tail of a group from a previous call first.
+        let mut out_pos = self.carry.drain(output);
+        if !self.carry.is_empty() {
+            return Ok(Outcome::OutputFilled { consumed: 0 });
+        }
+
+        // Top up a pending partial group with fresh input; emit it
+        // through the carry once complete.
         if self.len > 0 {
             in_pos += append_to_pending(&mut self.pending_group, &mut self.len, input);
-
             if self.len < GROUP {
-                return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
+                // The top-up took everything `input` had.
+                return Ok(Outcome::InputConsumed { written: out_pos });
             }
-            if output.len() < ENCODED_GROUP {
-                if in_pos == 0 {
-                    // Buffer was already full on entry (a previous call
-                    // topped it up but couldn't fit the output) and this
-                    // call took no new input either — no progress at
-                    // all, so retrying with the same buffer would spin
-                    // forever.
-                    return Err(Error::OutputTooSmall);
-                }
-                return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
-            }
-            out_pos += self.engine
-                .encode_slice(&self.pending_group[..], &mut output[..ENCODED_GROUP])
-                .map_err(|_| Error::Corrupt)?;
+            let (scratch, n) = self.encode_group(&self.pending_group, in_pos, out_pos)?;
             self.len = 0;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+            if !self.carry.is_empty() {
+                return Ok(Outcome::OutputFilled { consumed: in_pos });
+            }
         }
 
         // Bulk-encode as many whole groups as fit both remaining
@@ -113,51 +132,59 @@ impl<E: Engine> Codec for Base64Enc<E> {
         if groups > 0 {
             let in_bytes = groups * GROUP;
             let out_bytes = groups * ENCODED_GROUP;
-            out_pos += self.engine
+            out_pos += self
+                .engine
                 .encode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
-                .map_err(|_| Error::Corrupt)?;
+                .map_err(|_| Error::new(ErrorKind::Corrupt, in_pos, out_pos))?;
             in_pos += in_bytes;
         }
 
-        // A full group's worth of unconsumed input means the output
-        // buffer ran out before a bulk group could be encoded — leave
-        // it for the caller to retry with more output space, rather
-        // than overflowing the leftover buffer (which only ever holds
-        // < GROUP bytes).
-        let remaining = input.len() - in_pos;
-        if remaining >= GROUP {
-            if out_pos == 0 {
-                // Nothing was written this call and the output buffer
-                // is smaller than one encoded group (4 bytes) — this
-                // codec has a minimum atomic output size, so retrying
-                // with the same buffer would spin forever.
-                return Err(Error::OutputTooSmall);
-            }
-            return Ok((Progress { consumed: in_pos, written: out_pos }, Status::OutputFull));
+        // After bulk, at most one of these holds: a whole input group
+        // remains (the output's remainder is under one encoded group —
+        // emit through the carry to fill it completely), or the input
+        // remainder is under one group (buffer it and report the input
+        // consumed).
+        if input.len() - in_pos >= GROUP && out_pos < output.len() {
+            let (scratch, n) = self.encode_group(&input[in_pos..in_pos + GROUP], in_pos, out_pos)?;
+            in_pos += GROUP;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+        }
+        if input.len() - in_pos >= GROUP {
+            debug_assert_eq!(out_pos, output.len());
+            return Ok(Outcome::OutputFilled { consumed: in_pos });
         }
 
         // Buffer any leftover < GROUP bytes for the next call.
-        if remaining > 0 {
+        if in_pos < input.len() {
             buffer_leftover(&mut self.pending_group, &mut self.len, &input[in_pos..]);
-            in_pos = input.len();
         }
-
-        let status = if in_pos == input.len() { Status::InputEmpty } else { Status::OutputFull };
-        Ok((Progress { consumed: in_pos, written: out_pos }, status))
+        Ok(Outcome::InputConsumed { written: out_pos })
     }
 
-    fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        if self.len == 0 {
-            return Ok((Progress::default(), Status::StreamEnd));
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        let mut out_pos = self.carry.drain(output);
+        if !self.carry.is_empty() {
+            return Ok(Drain::OutputFilled);
         }
-        if output.len() < ENCODED_GROUP {
-            return Ok((Progress::default(), Status::OutputFull));
+        if self.len > 0 {
+            // The engine pads a final short group itself — that's why
+            // partial groups are deferred to finish and never encoded
+            // in process.
+            let (scratch, n) = {
+                let mut scratch = [0u8; ENCODED_GROUP];
+                let n = self
+                    .engine
+                    .encode_slice(&self.pending_group[..self.len], &mut scratch)
+                    .map_err(|_| Error::new(ErrorKind::Corrupt, 0, out_pos))?;
+                (scratch, n)
+            };
+            self.len = 0;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+            if !self.carry.is_empty() {
+                return Ok(Drain::OutputFilled);
+            }
         }
-        let written = self.engine
-            .encode_slice(&self.pending_group[..self.len], &mut output[..ENCODED_GROUP])
-            .map_err(|_| Error::Corrupt)?;
-        self.len = 0;
-        Ok((Progress { consumed: 0, written }, Status::StreamEnd))
+        Ok(Drain::Done { written: out_pos })
     }
 }
 
@@ -179,27 +206,41 @@ pub struct Base64Dec<E: Engine = GeneralPurpose> {
     engine: E,
     pending_group: [u8; ENCODED_GROUP],
     len: usize,
+    carry: Carry<GROUP>,
 }
 
 impl<E: Engine> Base64Dec<E> {
     /// Build a [`Base64Dec`] that decodes with a caller-supplied `Engine`
     /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
     pub fn with_engine(engine: E) -> Self {
-        Self { engine, pending_group: [0; ENCODED_GROUP], len: 0 }
+        Self { engine, pending_group: [0; ENCODED_GROUP], len: 0, carry: Carry::new() }
+    }
+
+    fn decode_group(&self, group: &[u8], consumed: usize, written: usize) -> Result<([u8; GROUP], usize), Error> {
+        let mut scratch = [0u8; GROUP];
+        let n = self
+            .engine
+            .decode_slice(group, &mut scratch)
+            .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
+        Ok((scratch, n))
     }
 }
 
 impl<E: Engine> Codec for Base64Dec<E> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
         let mut in_pos = 0;
-        let mut out_pos = 0;
+
+        // Deliver the tail of a group from a previous call first.
+        let mut out_pos = self.carry.drain(output);
+        if !self.carry.is_empty() {
+            return Ok(Outcome::OutputFilled { consumed: 0 });
+        }
 
         // Top up a pending partial group with fresh input.
         if self.len > 0 {
             in_pos += append_to_pending(&mut self.pending_group, &mut self.len, input);
-
             if self.len < ENCODED_GROUP {
-                return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
+                return Ok(Outcome::InputConsumed { written: out_pos });
             }
             if self.pending_group.contains(&b'=') {
                 // Padding is only valid in the true last group of the
@@ -210,20 +251,16 @@ impl<E: Engine> Codec for Base64Dec<E> {
                 // ENCODED_GROUP), that proves this wasn't the last
                 // group after all.
                 if in_pos < input.len() {
-                    return Err(Error::Corrupt);
+                    return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
                 }
-                return Ok((Progress { consumed: in_pos, written: 0 }, Status::InputEmpty));
+                return Ok(Outcome::InputConsumed { written: out_pos });
             }
-            if output.len() < GROUP {
-                if in_pos == 0 {
-                    return Err(Error::OutputTooSmall);
-                }
-                return Ok((Progress { consumed: in_pos, written: 0 }, Status::OutputFull));
-            }
-            out_pos += self.engine
-                .decode_slice(&self.pending_group[..], &mut output[..GROUP])
-                .map_err(|_| Error::Corrupt)?;
+            let (scratch, n) = self.decode_group(&self.pending_group, in_pos, out_pos)?;
             self.len = 0;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+            if !self.carry.is_empty() {
+                return Ok(Outcome::OutputFilled { consumed: in_pos });
+            }
         }
 
         // Bulk-decode as many whole groups as fit both remaining
@@ -254,61 +291,74 @@ impl<E: Engine> Codec for Base64Dec<E> {
         if groups > 0 {
             let in_bytes = groups * ENCODED_GROUP;
             let out_bytes = groups * GROUP;
-            out_pos += self.engine
+            out_pos += self
+                .engine
                 .decode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
-                .map_err(|_| Error::Corrupt)?;
+                .map_err(|_| Error::new(ErrorKind::Corrupt, in_pos, out_pos))?;
             in_pos += in_bytes;
         }
 
-        // A full group's worth of unconsumed input means either the
-        // next group contains padding (deferred until `finish` confirms
-        // it's truly the last group) or the output buffer ran out
-        // before a bulk group could be decoded.
-        let remaining = input.len() - in_pos;
-        if remaining >= ENCODED_GROUP {
-            let next_group = &input[in_pos..in_pos + ENCODED_GROUP];
+        // After bulk, whole input groups may remain because the next
+        // one contains padding (defer it: buffer and stop, `finish`
+        // will confirm it's truly last) or because the output's
+        // remainder is under one decoded group (decode through the
+        // carry to fill it completely).
+        while input.len() - in_pos >= ENCODED_GROUP {
+            let next_group: [u8; ENCODED_GROUP] =
+                input[in_pos..in_pos + ENCODED_GROUP].try_into().unwrap();
             if next_group.contains(&b'=') {
-                buffer_leftover(&mut self.pending_group, &mut self.len, next_group);
+                buffer_leftover(&mut self.pending_group, &mut self.len, &next_group);
                 in_pos += ENCODED_GROUP;
                 if in_pos < input.len() {
-                    return Err(Error::Corrupt);
+                    return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
                 }
-                return Ok((Progress { consumed: in_pos, written: out_pos }, Status::InputEmpty));
+                return Ok(Outcome::InputConsumed { written: out_pos });
             }
-            if out_pos == 0 {
-                return Err(Error::OutputTooSmall);
+            if out_pos == output.len() {
+                return Ok(Outcome::OutputFilled { consumed: in_pos });
             }
-            return Ok((Progress { consumed: in_pos, written: out_pos }, Status::OutputFull));
+            let (scratch, n) = self.decode_group(&next_group, in_pos, out_pos)?;
+            in_pos += ENCODED_GROUP;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+            if !self.carry.is_empty() {
+                return Ok(Outcome::OutputFilled { consumed: in_pos });
+            }
         }
 
         // Buffer any leftover < ENCODED_GROUP characters for the next
         // call.
-        if remaining > 0 {
+        if in_pos < input.len() {
             buffer_leftover(&mut self.pending_group, &mut self.len, &input[in_pos..]);
-            in_pos = input.len();
         }
-
-        let status = if in_pos == input.len() { Status::InputEmpty } else { Status::OutputFull };
-        Ok((Progress { consumed: in_pos, written: out_pos }, status))
+        Ok(Outcome::InputConsumed { written: out_pos })
     }
 
-    fn finish(&mut self, output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        if self.len == 0 {
-            return Ok((Progress::default(), Status::StreamEnd));
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        let mut out_pos = self.carry.drain(output);
+        if !self.carry.is_empty() {
+            return Ok(Drain::OutputFilled);
         }
-        if output.len() < GROUP {
-            return Ok((Progress::default(), Status::OutputFull));
+        if self.len > 0 {
+            // A short trailing group is only valid at true
+            // end-of-stream, and only for engines that don't require
+            // padding (e.g. URL_SAFE_NO_PAD); the engine itself
+            // enforces that — a padded engine like STANDARD rejects an
+            // unpadded partial group here.
+            let (scratch, n) = {
+                let mut scratch = [0u8; GROUP];
+                let n = self
+                    .engine
+                    .decode_slice(&self.pending_group[..self.len], &mut scratch)
+                    .map_err(|_| Error::new(ErrorKind::UnexpectedEnd, 0, out_pos))?;
+                (scratch, n)
+            };
+            self.len = 0;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+            if !self.carry.is_empty() {
+                return Ok(Drain::OutputFilled);
+            }
         }
-        // A short trailing group is only valid at true end-of-stream,
-        // and only for engines that don't require padding (e.g.
-        // URL_SAFE_NO_PAD); the engine itself enforces that — a padded
-        // engine like STANDARD rejects an unpadded partial group here.
-        let written = self
-            .engine
-            .decode_slice(&self.pending_group[..self.len], &mut output[..GROUP])
-            .map_err(|_| Error::UnexpectedEnd)?;
-        self.len = 0;
-        Ok((Progress { consumed: 0, written }, Status::StreamEnd))
+        Ok(Drain::Done { written: out_pos })
     }
 }
 
@@ -327,7 +377,7 @@ mod tests {
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
     use crate::io::{to_vec, CodecReader, CodecWriter};
-    use crate::{Codec, Status};
+    use crate::{Codec, Drain, Outcome};
 
     const INPUT: &[u8] = b"Hello, World! 123";
     const ENCODED: &[u8] = b"SGVsbG8sIFdvcmxkISAxMjM=";
@@ -343,12 +393,13 @@ mod tests {
     }
 
     #[test]
-    fn encode_reader_with_small_output_buffer() {
-        // 4 bytes is base64's atomic output size (one encoded group);
-        // a smaller buffer can never receive a full group.
-        let mut reader = CodecReader::new(Cursor::new(INPUT), base64_enc(), vec![0u8; 4]).unwrap();
+    fn encode_reader_with_one_byte_buffers() {
+        // Buffers below the 4-byte encoded group size used to be
+        // impossible; the output carry lets a group span calls, so
+        // even 1-byte reads work.
+        let mut reader = CodecReader::new(Cursor::new(INPUT), base64_enc(), vec![0u8; 1]);
         let mut out = Vec::new();
-        let mut buf = [0u8; 4];
+        let mut buf = [0u8; 1];
         loop {
             let n = reader.read(&mut buf).unwrap();
             if n == 0 {
@@ -361,9 +412,9 @@ mod tests {
 
     #[test]
     fn decode_reader_with_small_output_buffer() {
-        let mut reader = CodecReader::new(Cursor::new(ENCODED), base64_dec(), vec![0u8; 3]).unwrap();
+        let mut reader = CodecReader::new(Cursor::new(ENCODED), base64_dec(), vec![0u8; 3]);
         let mut out = Vec::new();
-        let mut buf = [0u8; 3];
+        let mut buf = [0u8; 2];
         loop {
             let n = reader.read(&mut buf).unwrap();
             if n == 0 {
@@ -375,8 +426,8 @@ mod tests {
     }
 
     #[test]
-    fn encode_writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 64]).unwrap();
+    fn encode_writer_finish_reaches_done() {
+        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 64]);
         for chunk in INPUT.chunks(3) {
             writer.write_all(chunk).unwrap();
         }
@@ -385,8 +436,8 @@ mod tests {
     }
 
     #[test]
-    fn decode_writer_finish_reaches_stream_end() {
-        let mut writer = CodecWriter::new(Vec::new(), base64_dec(), vec![0u8; 64]).unwrap();
+    fn decode_writer_finish_reaches_done() {
+        let mut writer = CodecWriter::new(Vec::new(), base64_dec(), vec![0u8; 64]);
         for chunk in ENCODED.chunks(3) {
             writer.write_all(chunk).unwrap();
         }
@@ -395,15 +446,15 @@ mod tests {
     }
 
     #[test]
-    fn writer_finish_surfaces_output_too_small() {
-        // A 2-byte outbuf is never exercised for real output during
-        // write() — one leftover byte just gets buffered, no group to
-        // emit yet — but base64's padded trailer needs 4 bytes.
-        // finish() must surface that as an error rather than looping
-        // forever retrying the same undersized fixed buffer.
-        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 2]).unwrap();
+    fn writer_finish_with_buffer_below_group_size_works() {
+        // A 2-byte scratch buffer is smaller than the 4-byte padded
+        // trailer group; the carry spreads the group across two
+        // finish calls instead of erroring (this exact case was
+        // `Error::OutputTooSmall` before the carry existed).
+        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 2]);
         writer.write_all(b"A").unwrap();
-        assert!(writer.finish().is_err());
+        let out = writer.finish().unwrap();
+        assert_eq!(out, b"QQ==");
     }
 
     #[test]
@@ -451,8 +502,8 @@ mod tests {
         // "AA" instead of being rejected.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
-        let (p1, _) = dec.process(b"QQ==", &mut out).unwrap();
-        assert!(dec.process(b"QQ==", &mut out[p1.written..]).is_err());
+        dec.process(b"QQ==", &mut out).unwrap();
+        assert!(dec.process(b"QQ==", &mut out).is_err());
     }
 
     #[test]
@@ -462,11 +513,45 @@ mod tests {
         // still decode successfully once finish() confirms it's last.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
-        let (p, status) = dec.process(b"QQ==", &mut out).unwrap();
-        assert_eq!(status, Status::InputEmpty);
-        assert_eq!(p.written, 0);
-        let (fp, fstatus) = dec.finish(&mut out).unwrap();
-        assert_eq!(fstatus, Status::StreamEnd);
-        assert_eq!(&out[..fp.written], b"A");
+        let outcome = dec.process(b"QQ==", &mut out).unwrap();
+        assert_eq!(outcome, Outcome::InputConsumed { written: 0 });
+        let drain = dec.finish(&mut out).unwrap();
+        assert_eq!(drain, Drain::Done { written: 1 });
+        assert_eq!(&out[..1], b"A");
+    }
+
+    #[test]
+    fn encode_into_one_byte_outputs() {
+        // Drive process/finish by hand with a 1-byte output each call:
+        // the carry must dribble every 4-byte group out one byte at a
+        // time, upholding fully-consume-or-fully-fill throughout.
+        let mut enc = base64_enc();
+        let mut collected = Vec::new();
+        let mut in_pos = 0;
+        while in_pos < INPUT.len() {
+            let mut out = [0u8; 1];
+            match enc.process(&INPUT[in_pos..], &mut out).unwrap() {
+                Outcome::InputConsumed { written } => {
+                    collected.extend_from_slice(&out[..written]);
+                    in_pos = INPUT.len();
+                }
+                Outcome::OutputFilled { consumed } => {
+                    collected.extend_from_slice(&out);
+                    in_pos += consumed;
+                }
+                Outcome::StreamEnd { .. } => unreachable!("base64 never self-terminates"),
+            }
+        }
+        loop {
+            let mut out = [0u8; 1];
+            match enc.finish(&mut out).unwrap() {
+                Drain::OutputFilled => collected.extend_from_slice(&out),
+                Drain::Done { written } => {
+                    collected.extend_from_slice(&out[..written]);
+                    break;
+                }
+            }
+        }
+        assert_eq!(collected, ENCODED);
     }
 }

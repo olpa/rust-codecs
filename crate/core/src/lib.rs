@@ -1,18 +1,21 @@
-//! Core crate for RustCodecs: re-exports the shared vocabulary and stream
-//! adapters a codec crate and its clients build on, so neither ever has to
-//! `use compcol` directly — `compcol` is an implementation detail behind
-//! this crate's boundary.
+//! Core crate for RustCodecs: the [`Codec`] trait, its vocabulary, and
+//! the stream adapters a codec crate and its clients build on.
 //!
 //! - [`Codec`]: implement this to add a codec.
-//! - [`Error`], [`Progress`], [`Status`]: the shared vocabulary [`Codec`]'s
-//!   methods speak in.
+//! - [`Outcome`], [`Drain`], [`Error`], [`ErrorKind`]: the vocabulary
+//!   [`Codec`]'s methods speak in. The contract in one sentence: every
+//!   call fully consumes its input, fully fills its output, or ends
+//!   the stream.
+//! - [`Carry`]: helper for codecs with a minimum atomic output unit,
+//!   letting an emitted unit span output buffers.
 //! - [`io`]: stream adapters (`std::io::Read`/`Write`) and one-shot
 //!   `Vec<u8>` helpers built on top of [`Codec`].
 
-pub use compcol::{Error, Progress, Status};
-
 mod codec;
-pub use codec::Codec;
+pub use codec::{Codec, Drain, Error, ErrorKind, Outcome};
+
+mod carry;
+pub use carry::Carry;
 
 mod chain;
 pub use chain::Chain;
