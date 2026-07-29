@@ -20,9 +20,6 @@ pub use carry::Carry;
 mod chain;
 pub use chain::Chain;
 
-mod engine;
-pub use engine::{Engine, Step};
-
 pub mod io;
 
 #[cfg(feature = "identity")]

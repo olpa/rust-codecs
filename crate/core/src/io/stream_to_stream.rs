@@ -23,12 +23,10 @@
 //!
 //! This mirrors [`CodecReader`](super::CodecReader)/
 //! [`CodecWriter`](super::CodecWriter), which drive the same `Codec`
-//! trait over `std::io::Read`/`Write` instead. Unlike those two,
-//! `stream_to_stream` does *not* go through
-//! [`Engine`](crate::Engine): its input can fail per-chunk and its
-//! output slots can run out entirely, neither of which the std
-//! adapters need to handle, so the process/finish selection is inlined
-//! here rather than shared.
+//! trait over `std::io::Read`/`Write` instead. Every driver carries
+//! its own small drive loop — under the fully-consume-or-fully-fill
+//! contract each `Outcome` maps to exactly one driver move, so there
+//! is nothing left worth sharing.
 
 use crate::{Codec, Drain, Outcome};
 
