@@ -32,6 +32,20 @@
 
 use crate::{Codec, Drain, Outcome};
 
+/// How much moved through [`stream_to_stream`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Totals {
+    /// Bytes consumed from the input chunks. Less than the input
+    /// stream offered when the codec ended its stream in-band — this
+    /// is where in the input the stream ended, so the caller can
+    /// resume reading the source past it.
+    pub consumed: usize,
+    /// Bytes written across all output slots. Every slot is filled
+    /// completely except the last, so per-slot counts follow from
+    /// this total and the slot sizes.
+    pub written: usize,
+}
+
 /// Why [`stream_to_stream`] stopped before the codec finished its
 /// stream.
 #[derive(Debug)]
@@ -55,15 +69,15 @@ pub enum CopyError<EI, EO> {
 /// writing the transformed bytes into `output` (an iterator of
 /// caller-provided buffer slots to fill).
 ///
-/// Returns the total number of bytes written across all slots on
-/// success. Every slot is filled completely except the last — the
-/// `Codec` contract guarantees any non-empty slot can be filled, so
-/// slot sizes need no relation to the codec's internals.
+/// Returns the [`Totals`] of bytes consumed and written on success.
+/// Every slot is filled completely except the last — the `Codec`
+/// contract guarantees any non-empty slot can be filled, so slot
+/// sizes need no relation to the codec's internals.
 pub fn stream_to_stream<I, B, EI, O, S, EO, C>(
     mut input: I,
     mut codec: C,
     mut output: O,
-) -> Result<usize, CopyError<EI, EO>>
+) -> Result<Totals, CopyError<EI, EO>>
 where
     I: Iterator<Item = Result<B, EI>>,
     B: AsRef<[u8]>,
@@ -77,7 +91,7 @@ where
     // pull time since `S: AsMut` needs `&mut` to measure.
     let mut cur_out: Option<(S, usize, usize)> = None;
     let mut finishing = false;
-    let mut total = 0usize;
+    let mut totals = Totals { consumed: 0, written: 0 };
 
     loop {
         let need_input = match &cur_in {
@@ -115,14 +129,15 @@ where
                     if let Some((_, pos, _)) = cur_out.as_mut() {
                         *pos += out_len;
                     }
-                    total += out_len;
+                    totals.written += out_len;
                     if out_len == 0 {
                         // Owed bytes but had nowhere to put them.
                         next_slot(&mut output, &mut cur_out)?;
                     }
                 }
                 Drain::Done { written } => {
-                    return Ok(total + written);
+                    totals.written += written;
+                    return Ok(totals);
                 }
             }
             continue;
@@ -146,6 +161,7 @@ where
             &mut s.as_mut()[*pos..*len]
         };
         let out_len = out_buf.len();
+        let in_len = in_buf.len();
         match codec.process(in_buf, out_buf).map_err(CopyError::Codec)? {
             Outcome::InputConsumed { written } => {
                 if let Some((b, pos)) = cur_in.as_mut() {
@@ -154,7 +170,8 @@ where
                 if let Some((_, pos, _)) = cur_out.as_mut() {
                     *pos += written;
                 }
-                total += written;
+                totals.consumed += in_len;
+                totals.written += written;
             }
             Outcome::OutputFilled { consumed } => {
                 if let Some((_, pos)) = cur_in.as_mut() {
@@ -163,13 +180,17 @@ where
                 if let Some((_, pos, _)) = cur_out.as_mut() {
                     *pos += out_len;
                 }
-                total += out_len;
+                totals.consumed += consumed;
+                totals.written += out_len;
             }
-            Outcome::StreamEnd { consumed: _, written } => {
+            Outcome::StreamEnd { consumed, written } => {
                 // The stream ended in-band; input past its end (the
                 // rest of this chunk, and any unpulled chunks) is
-                // simply not this stream's to read.
-                return Ok(total + written);
+                // simply not this stream's to read — `totals.consumed`
+                // tells the caller where in the input that end is.
+                totals.consumed += consumed;
+                totals.written += written;
+                return Ok(totals);
             }
         }
     }
@@ -261,13 +282,14 @@ mod tests {
     fn basic_round_trip() {
         let expected = to_vec(rot13(), INPUT).unwrap();
         let mut out = slots(4, 8);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
             rot13(),
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, expected.len());
+        assert_eq!(totals.written, expected.len());
+        assert_eq!(totals.consumed, INPUT.len());
     }
 
     #[test]
@@ -277,13 +299,13 @@ mod tests {
         // `reader_with_small_output_buffer` in rot13.rs.
         let expected = to_vec(rot13(), INPUT).unwrap();
         let mut out = slots(expected.len(), 1);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 4),
             rot13(),
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, expected.len());
+        assert_eq!(totals.written, expected.len());
     }
 
     #[test]
@@ -293,13 +315,13 @@ mod tests {
         // slot before it's exhausted.
         let expected = to_vec(rot13(), INPUT).unwrap();
         let mut out = slots(1, 64);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 1),
             rot13(),
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, expected.len());
+        assert_eq!(totals.written, expected.len());
     }
 
     #[test]
@@ -307,10 +329,11 @@ mod tests {
         // No chunks at all: `finish` still has to run to completion.
         let mut out = slots(1, 8);
         let empty: std::iter::Empty<Result<&[u8], ()>> = std::iter::empty();
-        let written =
+        let totals =
             stream_to_stream::<_, _, (), _, _, _, _>(empty, identity(), slot_iter(&mut out))
                 .unwrap();
-        assert_eq!(written, 0);
+        assert_eq!(totals.written, 0);
+        assert_eq!(totals.consumed, 0);
     }
 
     #[test]
@@ -383,13 +406,13 @@ mod tests {
         let expected = to_vec(base64_enc(), INPUT).unwrap();
         assert_eq!(expected.len(), 24);
         let mut out = slots(3, 10);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
             base64_enc(),
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, expected.len());
+        assert_eq!(totals.written, expected.len());
         assert_eq!(&out[0][..], &expected[..10]);
         assert_eq!(&out[1][..], &expected[10..20]);
         assert_eq!(&out[2][..4], &expected[20..]);
@@ -403,13 +426,14 @@ mod tests {
         // hard error before the fully-consume-or-fully-fill contract.
         let expected = to_vec(base64_enc(), INPUT).unwrap();
         let mut out = slots(expected.len(), 1);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
             base64_enc(),
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, expected.len());
+        assert_eq!(totals.written, expected.len());
+        assert_eq!(totals.consumed, INPUT.len());
         let collected: Vec<u8> = out.iter().map(|s| s[0]).collect();
         assert_eq!(collected, expected);
     }
@@ -423,13 +447,13 @@ mod tests {
         // boundary mid-finish.
         let expected = to_vec(base64_enc(), INPUT).unwrap();
         let mut out = slots(2, 22);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
             base64_enc(),
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, expected.len());
+        assert_eq!(totals.written, expected.len());
         assert_eq!(&out[0][..], &expected[..22]);
         assert_eq!(&out[1][..2], &expected[22..]);
     }
@@ -443,13 +467,13 @@ mod tests {
         // actually needs later.
         let chunks: Vec<Result<&[u8], ()>> = vec![Ok(&INPUT[..4]), Ok(&[]), Ok(&INPUT[4..8])];
         let mut out = slots(1, 100);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             chunks.into_iter(),
             rot13(),
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, 8);
+        assert_eq!(totals.written, 8);
     }
 
     #[test]
@@ -460,13 +484,14 @@ mod tests {
         // rest of the input.
         let chunks: Vec<Result<&[u8], ()>> = vec![Ok(b"Hello"), Ok(b"World")];
         let mut out = slots(4, 8);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             chunks.into_iter(),
             EarlyEnd { limit: 3, done: 0 },
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, 3);
+        assert_eq!(totals.written, 3);
+        assert_eq!(totals.consumed, 3);
     }
 
     #[test]
@@ -489,13 +514,14 @@ mod tests {
             Some(Ok::<_, ()>(chunk))
         });
         let mut out = slots(4, 8);
-        let written = stream_to_stream::<_, _, (), _, _, _, _>(
+        let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             input,
             EarlyEnd { limit: 5, done: 0 },
             slot_iter(&mut out),
         )
         .unwrap();
-        assert_eq!(written, 5);
+        assert_eq!(totals.written, 5);
+        assert_eq!(totals.consumed, 5);
         assert_eq!(pulls.get(), 1);
     }
 

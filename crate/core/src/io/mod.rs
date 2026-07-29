@@ -17,5 +17,5 @@ mod stream_to_stream;
 mod vec;
 
 pub use stream::{CodecReader, CodecWriter};
-pub use stream_to_stream::{stream_to_stream, CopyError};
+pub use stream_to_stream::{stream_to_stream, CopyError, Totals};
 pub use vec::to_vec;
