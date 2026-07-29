@@ -4,14 +4,10 @@ This document covers how to **create** a codec crate on top of
 `rust-codecs-core`. See [`README.md`](./README.md) for how to **use**
 one.
 
-A codec crate depends on `rust-codecs-core`, never on `compcol`
-directly — the whole point of this crate is to be the only place that
-name appears.
-
 ## 1. Implement `Codec`
 
 ```rust
-use rust_codecs_core::{Codec, Error, Progress, Status};
+use rust_codecs_core::{Codec, Drain, Error, Outcome};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Rot13;
@@ -25,52 +21,76 @@ fn rot13_byte(b: u8) -> u8 {
 }
 
 impl Codec for Rot13 {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
         let n = input.len().min(output.len());
         for (out, &inp) in output[..n].iter_mut().zip(&input[..n]) {
             *out = rot13_byte(inp);
         }
-        let status = if n == input.len() { Status::InputEmpty } else { Status::OutputFull };
-        Ok((Progress { consumed: n, written: n }, status))
+        if n == input.len() {
+            Ok(Outcome::InputConsumed { written: n })
+        } else {
+            Ok(Outcome::OutputFilled { consumed: n })
+        }
     }
 
-    fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        Ok((Progress::default(), Status::StreamEnd))
+    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
     }
 }
 ```
 
-Notes on the trait contract:
+## The contract
 
-- `process` pushes input bytes and pulls output bytes; `Status` tells the
-  caller which buffer ran out first (`InputEmpty`, `OutputFull`) or that
-  the stream ended (`StreamEnd`).
-- **`process` must consume or make progress.** Given non-empty input and
-  non-empty output, a call must consume at least one input byte or write
-  at least one output byte — "I need more input before I can produce
-  anything" is *not* an excuse to return zero progress. Buffer the
-  available bytes internally and report `InputEmpty` (that status means
-  "all of `input` was consumed", so returning it with unconsumed input
-  is a contract violation); the drivers will feed the next chunk and,
-  at end of stream, call `finish` to drain what you buffered. Drivers
-  never coalesce input into a larger contiguous slice for you, and they
-  treat a zero-progress call as a stall — misdiagnosed as an
-  output-size problem (`CopyError::SlotTooSmall`), never as "waiting
-  for input". See `Base64Enc::pending_group` for the pattern: a partial
-  group is stashed across calls and topped up first thing on the next
-  one. The one legitimate zero-progress return is `Err(OutputTooSmall)`
-  when the output buffer can't fit your minimum atomic output unit —
-  and that must be a pure precondition check, returned before any state
-  change, because drivers retry the call with a fresh buffer.
-- `finish` signals "no more input is coming" — flush any buffered state
-  and, for formats with one, write the trailer/checksum. Call it
-  repeatedly with a fresh output buffer until it reports `StreamEnd`.
-  A stateless, self-inverse codec like ROT13 has nothing to flush, so
-  `finish` returns `StreamEnd` immediately.
-- `Codec` also has `flush` (drain pending state to a sync boundary
-  *without* ending the stream — unlike `finish`, it never reports
-  `StreamEnd`). It has a no-op default; only override it if your format
-  defines an in-band sync marker (deflate/zlib/gzip do, ROT13 doesn't).
+**Every call fully consumes its input, fully fills its output, or ends
+the stream.** That's the whole contract, and the return types make any
+other outcome unrepresentable:
+
+- `process` returns an [`Outcome`]:
+  - `InputConsumed { written }` — all of `input` was taken (some
+    possibly into internal buffering, so `written` may be less than
+    what will eventually come out, even zero).
+  - `OutputFilled { consumed }` — every byte of `output` was written;
+    `consumed` says how much of `input` that took (possibly zero, when
+    output held over from an earlier call filled the buffer by
+    itself).
+  - `StreamEnd { consumed, written }` — the format is self-terminating
+    and just ended; input past the stream's end stays unconsumed, and
+    neither side needs to be "full".
+- `finish` (and `flush`) return a [`Drain`]: `OutputFilled` (all of
+  `output` written, more to come — the driver will call again) or
+  `Done { written }` (everything owed was delivered).
+- Errors carry `kind` plus the `consumed`/`written` progress the call
+  made before failing, so no bytes become unaccounted for.
+
+Two consequences worth spelling out:
+
+- **"I need more input before I can produce anything" is expressed by
+  consuming.** Buffer the partial unit internally (see
+  `pending_group` in `core/src/base64.rs`) and return
+  `InputConsumed { written: 0 }`; the driver feeds the next chunk,
+  and at end of stream `finish` drains what you buffered. Drivers
+  never coalesce input into a larger contiguous slice for you.
+- **"This output buffer is too small for my atomic unit" does not
+  exist.** A codec that can only emit whole units (base64: 4-byte
+  encoded groups) uses a [`Carry`]: render the unit into a scratch
+  array, `carry.emit(&scratch, output)` writes what fits and holds the
+  tail, and `carry.drain(output)` delivers the tail first thing on the
+  next call. Size the carry to your largest atomic unit — it's a
+  compile-time constant of the format. This is what makes every buffer
+  size legal everywhere: 1-byte staging in a `Chain`, 1-byte slots in
+  `stream_to_stream`, 1-byte reads from a `CodecReader`.
+
+Degenerate buffers: with empty `input`, `process` drains pending
+output (if any) and reports `InputConsumed`; drivers avoid calling
+with empty `output`, where `OutputFilled` would be trivially true.
+`finish` with an empty buffer is meaningful and expected: `Done` says
+the codec owes nothing, `OutputFilled` says it owes bytes and needs
+room.
+
+`Codec` also has `flush` (drain pending state to a sync boundary
+*without* ending the stream — the stream continues afterward). It has
+a default that owes nothing; only override it if your format defines
+an in-band sync marker (deflate/zlib/gzip do, ROT13 doesn't).
 
 A codec that reverses another one (e.g. a compressor and its matching
 decompressor) is a separate, independent value with its own `Codec`
@@ -105,9 +125,12 @@ At minimum, exercise:
 - One-shot round-trip via `rust_codecs_core::io::to_vec`.
 - The streaming adapters (`CodecReader`/`CodecWriter`) over a
   `Cursor`/`Vec<u8>`, including a case where the output buffer is
-  smaller than the input, to confirm `Status::OutputFull` is handled and
-  the call resumes correctly.
-- `finish()` reaching `Status::StreamEnd`.
+  smaller than the input, to confirm `OutputFilled` is handled and the
+  call resumes correctly.
+- If the codec has an atomic output unit: buffers *smaller than the
+  unit* on both sides (a 1-byte output is the strongest version), to
+  prove the carry spans buffers correctly.
+- `finish()` reaching `Drain::Done`.
 
 That's the whole surface: implement `Codec`, expose constructor
 function(s), and the rest of RustCodecs (stream adapters, `Vec<u8>`

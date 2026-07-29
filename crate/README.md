@@ -1,9 +1,8 @@
 # rust-codecs-core
 
-The foundation crate of RustCodecs. It re-exports the trait surface and
-stream adapters that every codec crate and its clients build on, so
-neither ever has to `use compcol` directly — `compcol` is an
-implementation detail behind this crate's boundary.
+The foundation crate of RustCodecs: the `Codec` trait, its vocabulary,
+and the stream adapters that every codec crate and its clients build
+on.
 
 This document covers **using** an existing codec. See
 [`CREATING-CODECS.md`](./CREATING-CODECS.md) for how to **create** one.
@@ -11,11 +10,18 @@ This document covers **using** an existing codec. See
 ## What's exposed
 
 ```rust
-pub use compcol::{Error, Progress, Status};
-
 pub trait Codec { /* ... */ } // implement this to add a codec
 
-pub mod io; // CodecReader, CodecWriter, to_vec
+// The vocabulary Codec's methods speak in. The contract in one
+// sentence: every call fully consumes its input, fully fills its
+// output, or ends the stream.
+pub enum Outcome { /* InputConsumed, OutputFilled, StreamEnd */ }
+pub enum Drain { /* OutputFilled, Done */ }
+pub struct Error { /* kind + consumed/written progress */ }
+
+pub struct Carry<const N: usize>; // helper for atomic-output codecs
+
+pub mod io; // CodecReader, CodecWriter, to_vec, stream_to_stream
 ```
 
 Deliberately **not** exposed: any `Algorithm`-style pairing trait. A codec
@@ -42,7 +48,7 @@ use rust_codecs_rot13::rot13_dec;
 
 fn main() -> std::io::Result<()> {
     let raw = File::open("encoded-hello.txt")?;
-    let mut reader = CodecReader::new(raw, rot13_dec());
+    let mut reader = CodecReader::new(raw, rot13_dec(), vec![0u8; 4096]);
     io::copy(&mut reader, &mut io::stdout())?;
     Ok(())
 }
@@ -63,7 +69,7 @@ use rust_codecs_rot13::rot13_enc;
 
 fn main() -> std::io::Result<()> {
     let plain = std::fs::read("input-hello.txt")?;
-    let mut writer = CodecWriter::new(std::io::stdout().lock(), rot13_enc());
+    let mut writer = CodecWriter::new(std::io::stdout().lock(), rot13_enc(), vec![0u8; 4096]);
     writer.write_all(&plain)?;
     let _stdout = writer.finish()?;
     Ok(())
@@ -101,9 +107,9 @@ let decoded = to_vec(rot13_dec(), &encoded)?;
 assert_eq!(decoded, b"Hello, world!\n");
 ```
 
-Unlike `compcol::vec::compress_to_vec`/`decompress_to_vec`, this takes an
-already-constructed codec value (built via the codec crate's own
-constructor function) rather than being generic over `Algorithm`.
+This takes an already-constructed codec value (built via the codec
+crate's own constructor function) rather than being generic over any
+`Algorithm`-style pairing trait.
 
 ## Trying it from the command line
 
