@@ -124,7 +124,11 @@ where
             };
             let out_buf = &mut slot.as_mut()[pos..len];
             let out_len = out_buf.len();
-            match codec.process(&chunk[in_pos..], out_buf).map_err(CopyError::Codec)? {
+            match codec
+                .process(&chunk[in_pos..], out_buf)
+                .and_then(|o| o.validated(chunk.len() - in_pos, out_len))
+                .map_err(CopyError::Codec)?
+            {
                 Outcome::InputConsumed { written } => {
                     if pos + written < len {
                         cur_out = Some((slot, pos + written, len));
@@ -164,7 +168,11 @@ where
             None => &mut [],
         };
         let out_len = out_buf.len();
-        match codec.finish(out_buf).map_err(CopyError::Codec)? {
+        match codec
+            .finish(out_buf)
+            .and_then(|d| d.validated(out_len))
+            .map_err(CopyError::Codec)?
+        {
             Drain::OutputFilled => {
                 totals.written += out_len;
                 // More bytes are owed and this slot (if any) is spent
@@ -301,6 +309,35 @@ mod tests {
                 .unwrap();
         assert_eq!(totals.written, 0);
         assert_eq!(totals.consumed, 0);
+    }
+
+    /// Claims more bytes written than the slot remainder could hold.
+    struct Overclaimer;
+
+    impl Codec for Overclaimer {
+        fn process(&mut self, _input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+            Ok(Outcome::InputConsumed { written: output.len() + 1 })
+        }
+
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    #[test]
+    fn lying_codec_is_an_error_not_totals_corruption() {
+        // Unchecked, the overclaimed written-count would inflate
+        // `Totals` past the bytes that actually exist in the slots.
+        // The trust-boundary validation turns it into a
+        // ContractViolation error.
+        use crate::ErrorKind;
+        let mut out = slots(2, 8);
+        let result =
+            stream_to_stream::<_, _, (), _, _, _, _>(ok_chunks(INPUT, 4), Overclaimer, slot_iter(&mut out));
+        assert!(matches!(
+            result,
+            Err(CopyError::Codec(Error { kind: ErrorKind::ContractViolation, .. }))
+        ));
     }
 
     #[test]

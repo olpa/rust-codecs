@@ -64,6 +64,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 let outcome = self
                     .second
                     .process(&staging[self.drained..self.filled], &mut output[out_pos..])
+                    .and_then(|o| o.validated(self.filled - self.drained, output.len() - out_pos))
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
                 match outcome {
                     Outcome::InputConsumed { written } => {
@@ -100,6 +101,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 return match self
                     .second
                     .finish(&mut output[out_pos..])
+                    .and_then(|d| d.validated(output.len() - out_pos))
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?
                 {
                     Drain::OutputFilled => Ok(Outcome::OutputFilled { consumed: in_pos }),
@@ -123,6 +125,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             let outcome = self
                 .first
                 .process(&input[in_pos..], &mut staging[self.filled..])
+                .and_then(|o| o.validated(input.len() - in_pos, staging.len() - self.filled))
                 .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
             match outcome {
                 Outcome::InputConsumed { written } => {
@@ -160,6 +163,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 let outcome = self
                     .second
                     .process(&staging[self.drained..self.filled], &mut output[out_pos..])
+                    .and_then(|o| o.validated(self.filled - self.drained, output.len() - out_pos))
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
                 match outcome {
                     Outcome::InputConsumed { written } => {
@@ -184,6 +188,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 match self
                     .first
                     .finish(&mut staging[self.filled..])
+                    .and_then(|d| d.validated(staging.len() - self.filled))
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
                 {
                     Drain::OutputFilled => {
@@ -201,6 +206,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             return match self
                 .second
                 .finish(&mut output[out_pos..])
+                .and_then(|d| d.validated(output.len() - out_pos))
                 .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
             {
                 Drain::OutputFilled => Ok(Drain::OutputFilled),
@@ -412,5 +418,29 @@ mod tests {
     #[should_panic(expected = "staging buffer must be non-empty")]
     fn empty_staging_buffer_panics() {
         let _ = Chain::new(rot13(), rot13(), Vec::<u8>::new());
+    }
+
+    /// Claims to have consumed more input than it was given.
+    struct Overclaimer;
+
+    impl Codec for Overclaimer {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Outcome, Error> {
+            Ok(Outcome::OutputFilled { consumed: input.len() + 1 })
+        }
+
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    #[test]
+    fn lying_inner_codec_is_an_error_not_index_corruption() {
+        // Unchecked, the overclaimed consumed-count would push
+        // `drained` past `filled` and corrupt the staging indices
+        // (panicking on a later slice at best). The trust-boundary
+        // validation turns it into a ContractViolation error.
+        let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
+        let result = to_vec(chain, INPUT);
+        assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ContractViolation);
     }
 }

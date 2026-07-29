@@ -77,7 +77,7 @@ impl<C: Codec> Engine<C> {
 
         if self.finishing || (input.is_empty() && at_eof) {
             self.finishing = true;
-            return match self.codec.finish(output)? {
+            return match self.codec.finish(output).and_then(|d| d.validated(output.len()))? {
                 Drain::OutputFilled => {
                     if output.is_empty() {
                         // Trivially "filled" a zero-length buffer — the
@@ -106,7 +106,7 @@ impl<C: Codec> Engine<C> {
             return Ok((0, Step::NeedOutput));
         }
 
-        match self.codec.process(input, output)? {
+        match self.codec.process(input, output).and_then(|o| o.validated(input.len(), output.len()))? {
             Outcome::InputConsumed { written } => {
                 let step = if written > 0 { Step::Wrote(written) } else { Step::NeedInput };
                 Ok((input.len(), step))
@@ -125,7 +125,7 @@ impl<C: Codec> Engine<C> {
     /// and orthogonal to the process/finish state this engine tracks —
     /// it never ends the stream, so there's no latching to do.
     pub fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        self.codec.flush(output)
+        self.codec.flush(output).and_then(|d| d.validated(output.len()))
     }
 }
 
@@ -323,6 +323,34 @@ mod tests {
         assert_eq!(consumed, 2);
         assert_eq!(step, Step::Wrote(2));
         assert!(engine.is_done());
+    }
+
+    /// A codec that lies: claims more bytes written than the buffer
+    /// it was given could hold. Models the kind of poorly written
+    /// codec a library must contain rather than trust.
+    struct Overclaimer;
+
+    impl Codec for Overclaimer {
+        fn process(&mut self, _input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+            Ok(Outcome::InputConsumed { written: output.len() + 1 })
+        }
+
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    #[test]
+    fn lying_codec_is_an_error_not_a_panic() {
+        // Unchecked, the overclaimed count would make to_vec slice out
+        // of range (and make CodecReader break std::io::Read's
+        // contract). The trust-boundary validation must turn it into
+        // a ContractViolation error instead.
+        let result = to_vec(Overclaimer, b"hi");
+        assert_eq!(
+            result.unwrap_err(),
+            Error { kind: crate::ErrorKind::ContractViolation, consumed: 0, written: 0 }
+        );
     }
 
     #[test]

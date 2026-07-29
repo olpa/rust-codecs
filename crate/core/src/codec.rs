@@ -46,6 +46,15 @@ pub enum ErrorKind {
     /// output unit — a codec bug (the carry is sized statically to the
     /// codec's largest unit), or a format whose units are unbounded.
     BufferOverrun,
+    /// The codec reported byte counts exceeding the buffers it was
+    /// given — a codec bug, caught at the driver's trust boundary (see
+    /// [`Outcome::validated`]/[`Drain::validated`]) before it can
+    /// corrupt positions, panic on a later slice, or make an adapter
+    /// break its host contract (`std::io::Read` must never report more
+    /// bytes than the buffer holds). The error's `consumed`/`written`
+    /// are zero: the reported counts are exactly what can't be
+    /// trusted.
+    ContractViolation,
 }
 
 /// A codec failure, carrying how far the call got before failing so
@@ -62,6 +71,41 @@ pub struct Error {
 impl Error {
     pub fn new(kind: ErrorKind, consumed: usize, written: usize) -> Self {
         Self { kind, consumed, written }
+    }
+}
+
+impl Outcome {
+    /// Check the reported byte counts against the buffer sizes the
+    /// call was actually given, turning a lying codec into
+    /// [`ErrorKind::ContractViolation`] instead of letting bogus
+    /// counts corrupt driver state. Every driver in this crate applies
+    /// this at its codec trust boundary; a driver of your own should
+    /// too.
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Outcome, Error> {
+        let honest = match self {
+            Outcome::InputConsumed { written } => written <= output_len,
+            Outcome::OutputFilled { consumed } => consumed <= input_len,
+            Outcome::StreamEnd { consumed, written } => {
+                consumed <= input_len && written <= output_len
+            }
+        };
+        if honest {
+            Ok(self)
+        } else {
+            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+        }
+    }
+}
+
+impl Drain {
+    /// The [`Outcome::validated`] counterpart for `finish`/`flush`.
+    pub fn validated(self, output_len: usize) -> Result<Drain, Error> {
+        match self {
+            Drain::Done { written } if written > output_len => {
+                Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+            }
+            honest => Ok(honest),
+        }
     }
 }
 
@@ -96,6 +140,31 @@ pub trait Codec {
     /// (deflate/zlib/gzip do); the default owes nothing.
     fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Drain, Error, ErrorKind, Outcome};
+
+    const CV: Error = Error { kind: ErrorKind::ContractViolation, consumed: 0, written: 0 };
+
+    #[test]
+    fn validated_accepts_honest_counts() {
+        assert!(Outcome::InputConsumed { written: 4 }.validated(10, 4).is_ok());
+        assert!(Outcome::OutputFilled { consumed: 10 }.validated(10, 4).is_ok());
+        assert!(Outcome::StreamEnd { consumed: 0, written: 0 }.validated(0, 0).is_ok());
+        assert!(Drain::OutputFilled.validated(0).is_ok());
+        assert!(Drain::Done { written: 4 }.validated(4).is_ok());
+    }
+
+    #[test]
+    fn validated_rejects_overclaimed_counts() {
+        assert_eq!(Outcome::InputConsumed { written: 5 }.validated(10, 4), Err(CV));
+        assert_eq!(Outcome::OutputFilled { consumed: 11 }.validated(10, 4), Err(CV));
+        assert_eq!(Outcome::StreamEnd { consumed: 11, written: 0 }.validated(10, 4), Err(CV));
+        assert_eq!(Outcome::StreamEnd { consumed: 0, written: 5 }.validated(10, 4), Err(CV));
+        assert_eq!(Drain::Done { written: 5 }.validated(4), Err(CV));
     }
 }
 

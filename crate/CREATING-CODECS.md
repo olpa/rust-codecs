@@ -62,6 +62,13 @@ other outcome unrepresentable:
 - Errors carry `kind` plus the `consumed`/`written` progress the call
   made before failing, so no bytes become unaccounted for.
 
+The drivers do not take your word for it: every reported count is
+checked against the buffer sizes the call was given
+(`Outcome::validated`/`Drain::validated`), and an overclaimed count
+surfaces as an `ErrorKind::ContractViolation` error rather than
+corrupting driver state. If you build your own driver, apply the same
+check at your codec boundary.
+
 Two consequences worth spelling out:
 
 - **"I need more input before I can produce anything" is expressed by
