@@ -12,7 +12,75 @@ use crate::{Codec, Drain, Error, Outcome};
 ///
 /// `staging` is caller-provided, `S: AsMut<[u8]>` — same convention as
 /// the `io` adapters — so it can be a borrowed `&mut [u8]`, an inline
-/// `[u8; N]`, or a `Vec<u8>` depending on the environment.
+/// `[u8; N]`, or a `Vec<u8>` depending on the environment. `Chain` is
+/// itself a `Codec`, so chains of chains work.
+///
+/// # Corner cases
+///
+/// The interesting behavior of a chain lives in its corners. All of
+/// them are tested; this list is the contract.
+///
+/// **`first` ends its stream early.** Some formats can say "I am
+/// finished" in the middle of the input. When `first` does this, no
+/// more data can ever reach `second` — so `process` itself finishes
+/// `second` (its final bytes, e.g. base64 padding, come out right
+/// there) and then reports `StreamEnd` for the whole chain. The
+/// composed codec is self-terminating exactly when `first` is. The
+/// unread rest of the input stays unconsumed, and the `StreamEnd`
+/// counts say so — those bytes belong to whatever comes after the
+/// stream, not to this codec. If the output buffer fills while
+/// `second` is being finished, the call reports `OutputFilled` and the
+/// next `process` call continues from that point.
+///
+/// **`second` ends its stream early.** The chain ends too. Bytes that
+/// `first` had already produced but `second` never read — waiting in
+/// the staging buffer, or still inside `first` — are dropped. This is
+/// the same policy as for unread input: bytes past the end of a
+/// stream are not the stream's to deliver. Note one honest wrinkle:
+/// the reported `consumed` counts what `first` took from your input,
+/// even if some of the resulting bytes died on the way to the output.
+///
+/// **`second` ends during `finish` or `flush`.** Both simply report
+/// `Done`: nothing more can ever come out, so the operation is
+/// complete by definition.
+///
+/// **Calling again after the end.** Once the chain has reported
+/// `StreamEnd`, a later `process` call consumes nothing and reports
+/// `StreamEnd` with zero counts (it re-runs `second.finish`, which a
+/// well-behaved codec answers with "done, zero bytes").
+///
+/// **Interrupted `flush`.** A flush that returns `OutputFilled` is
+/// resumed by calling `flush` again with fresh output room. The
+/// resume continues where it stopped: once `first.flush` has
+/// completed, it is not started a second time — a deflate-style codec
+/// would emit a second sync marker. But if you call `process` between
+/// the two flush calls, the half-done flush is forgotten and the next
+/// flush starts from `first` again: new input opens a new sync
+/// boundary.
+///
+/// **Return-clean.** When `process` returns, the staging buffer holds
+/// only bytes that `second` refused because your output was full. The
+/// chain never keeps back bytes it could have delivered — an
+/// interactive caller sees a typed line travel the whole chain in the
+/// same call. (A codec may still hold a partial unit *inside itself*,
+/// as its format requires; that is what `flush` and `finish` drain.)
+///
+/// **Staging size is a performance knob, not a correctness knob.**
+/// Any non-empty staging buffer works, even a single byte — the
+/// `Codec` contract guarantees progress into any non-empty buffer.
+/// An empty staging buffer can never work, so `new` panics on it.
+///
+/// **Empty output buffer.** `process` with zero-length output reports
+/// `OutputFilled` without progress when data is waiting. It is not an
+/// error, but a driver looping on that call gets nowhere — give it
+/// room instead.
+///
+/// **Misbehaving codecs.** The byte counts reported by both inner
+/// codecs are checked on every call; an overclaimed count surfaces as
+/// [`ErrorKind::ContractViolation`](crate::ErrorKind::ContractViolation)
+/// instead of corrupting the staging indices. Error counts are always
+/// chain-level — bytes consumed from *your* input and written to
+/// *your* output in this call — never the inner codec's own numbers.
 pub struct Chain<A, B, S> {
     first: A,
     second: B,
