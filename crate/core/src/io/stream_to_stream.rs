@@ -88,7 +88,9 @@ where
     // (slot, bytes written so far, slot length) — length is cached at
     // pull time since `S: AsMut` needs `&mut` to measure. Outlives the
     // phases below: a slot's remainder carries from one chunk to the
-    // next, and from the last chunk into `finish`.
+    // next, and from the last chunk into `finish`. Invariant: `Some`
+    // always has writable remainder — an exhausted slot is dropped on
+    // the spot, never carried.
     let mut cur_out: Option<(S, usize, usize)> = None;
     let mut totals = Totals { consumed: 0, written: 0 };
 
@@ -100,32 +102,42 @@ where
         let chunk: &[u8] = chunk.as_ref();
         let mut in_pos = 0;
         while in_pos < chunk.len() {
-            let out_empty = match &cur_out {
-                Some((_, pos, len)) => *pos >= *len,
-                None => true,
+            // Take the carried slot, or pull a fresh one — inside this
+            // iteration the slot is a plain (slot, position, length),
+            // no Option. A slot with zero capacity is a caller bug — a
+            // pool that can't guarantee non-empty slots must filter
+            // them out itself.
+            let (mut slot, pos, len) = match cur_out.take() {
+                Some(t) => t,
+                None => {
+                    let mut slot = match output.next() {
+                        Some(Ok(s)) => s,
+                        Some(Err(e)) => return Err(CopyError::Output(e)),
+                        None => return Err(CopyError::OutputExhausted),
+                    };
+                    let len = slot.as_mut().len();
+                    if len == 0 {
+                        return Err(CopyError::EmptySlot);
+                    }
+                    (slot, 0, len)
+                }
             };
-            if out_empty {
-                next_slot(&mut output, &mut cur_out)?;
-            }
-            let out_buf = {
-                let (s, pos, len) = cur_out.as_mut().unwrap();
-                &mut s.as_mut()[*pos..*len]
-            };
+            let out_buf = &mut slot.as_mut()[pos..len];
             let out_len = out_buf.len();
             match codec.process(&chunk[in_pos..], out_buf).map_err(CopyError::Codec)? {
                 Outcome::InputConsumed { written } => {
-                    if let Some((_, pos, _)) = cur_out.as_mut() {
-                        *pos += written;
+                    if pos + written < len {
+                        cur_out = Some((slot, pos + written, len));
                     }
                     totals.consumed += chunk.len() - in_pos;
                     totals.written += written;
                     break;
                 }
                 Outcome::OutputFilled { consumed } => {
+                    // The slot is spent; dropping it (rather than
+                    // putting it back) is what upholds the `cur_out`
+                    // invariant.
                     in_pos += consumed;
-                    if let Some((_, pos, _)) = cur_out.as_mut() {
-                        *pos += out_len;
-                    }
                     totals.consumed += consumed;
                     totals.written += out_len;
                 }
@@ -142,8 +154,8 @@ where
         }
     }
 
-    // Phase 2: no more input — drain `finish`. Called even with a zero
-    // remainder (or no slot at all): `Done` vs `OutputFilled` on an
+    // Phase 2: no more input — drain `finish`. Called even with no
+    // slot at all (the empty buffer): `Done` vs `OutputFilled` on an
     // empty buffer is exactly how a codec that owes nothing finishes
     // without claiming a slot it has no use for.
     loop {
@@ -154,45 +166,25 @@ where
         let out_len = out_buf.len();
         match codec.finish(out_buf).map_err(CopyError::Codec)? {
             Drain::OutputFilled => {
-                if let Some((_, pos, _)) = cur_out.as_mut() {
-                    *pos += out_len;
-                }
                 totals.written += out_len;
-                if out_len == 0 {
-                    // Owed bytes but had nowhere to put them.
-                    next_slot(&mut output, &mut cur_out)?;
+                // More bytes are owed and this slot (if any) is spent
+                // — a fresh one is needed either way.
+                let mut slot = match output.next() {
+                    Some(Ok(s)) => s,
+                    Some(Err(e)) => return Err(CopyError::Output(e)),
+                    None => return Err(CopyError::OutputExhausted),
+                };
+                let len = slot.as_mut().len();
+                if len == 0 {
+                    return Err(CopyError::EmptySlot);
                 }
+                cur_out = Some((slot, 0, len));
             }
             Drain::Done { written } => {
                 totals.written += written;
                 return Ok(totals);
             }
         }
-    }
-}
-
-/// Pull the next output slot, rejecting a degenerate (zero-capacity)
-/// one — a slot iterator that can't guarantee non-empty slots is a
-/// caller bug.
-fn next_slot<O, S, EI, EO>(
-    output: &mut O,
-    cur_out: &mut Option<(S, usize, usize)>,
-) -> Result<(), CopyError<EI, EO>>
-where
-    O: Iterator<Item = Result<S, EO>>,
-    S: AsMut<[u8]>,
-{
-    match output.next() {
-        Some(Ok(mut s)) => {
-            let len = s.as_mut().len();
-            if len == 0 {
-                return Err(CopyError::EmptySlot);
-            }
-            *cur_out = Some((s, 0, len));
-            Ok(())
-        }
-        Some(Err(e)) => Err(CopyError::Output(e)),
-        None => Err(CopyError::OutputExhausted),
     }
 }
 
@@ -307,6 +299,23 @@ mod tests {
         let totals =
             stream_to_stream::<_, _, (), _, _, _, _>(empty, identity(), slot_iter(&mut out))
                 .unwrap();
+        assert_eq!(totals.written, 0);
+        assert_eq!(totals.consumed, 0);
+    }
+
+    #[test]
+    fn zero_output_stream_needs_no_slots() {
+        // Empty input through a codec that owes nothing on finish: the
+        // driver completes without ever pulling a slot, so a caller
+        // that knows the stream produces zero bytes may hand in zero
+        // slots. This is what keeps `cur_out` an Option — "no slot
+        // was ever needed" is a real, reachable final state, and an
+        // eager first pull would turn this case into a spurious
+        // `OutputExhausted`.
+        let empty_in: std::iter::Empty<Result<&[u8], ()>> = std::iter::empty();
+        let no_slots: std::iter::Empty<Result<&mut [u8], ()>> = std::iter::empty();
+        let totals =
+            stream_to_stream::<_, _, _, _, _, _, _>(empty_in, identity(), no_slots).unwrap();
         assert_eq!(totals.written, 0);
         assert_eq!(totals.consumed, 0);
     }
