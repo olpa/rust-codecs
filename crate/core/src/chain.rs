@@ -88,14 +88,25 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // take — only stop when there's genuinely nothing left to
             // feed `first`.
             if self.first_ended {
-                // `first` will never consume another byte (self-terminating
-                // format, already past its end) — the rest of `input` is
-                // simply not this stream's to read. `InputConsumed` means
-                // all of it per the `Codec` contract, so that has to
-                // include whatever's left here too, or a caller driving
-                // off consumed-counts alone would spin forever
-                // re-offering the same unconsumed tail.
-                return Ok(Outcome::InputConsumed { written: out_pos });
+                // `first`'s stream ended in-band, so no more input
+                // will ever reach `second` — exactly what `finish`
+                // expresses. Drive it here so the composed codec is
+                // self-terminating exactly when `first` is: once
+                // `second` is done, report `StreamEnd`, which (unlike
+                // the `InputConsumed` this branch used to return)
+                // leaves the rest of `input` unconsumed and reported —
+                // it's simply not this stream's to read.
+                debug_assert!(self.drained == self.filled, "staging must be drained before finishing second");
+                return match self
+                    .second
+                    .finish(&mut output[out_pos..])
+                    .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?
+                {
+                    Drain::OutputFilled => Ok(Outcome::OutputFilled { consumed: in_pos }),
+                    Drain::Done { written } => {
+                        Ok(Outcome::StreamEnd { consumed: in_pos, written: out_pos + written })
+                    }
+                };
             }
             if in_pos == input.len() {
                 return Ok(Outcome::InputConsumed { written: out_pos });
@@ -351,6 +362,33 @@ mod tests {
         // finish cleanly through `second` (here, identity).
         let chain = Chain::new(EarlyEnd { limit: 3, done: 0 }, identity(), vec![0u8; 64]);
         assert_eq!(to_vec(chain, b"Hello World").unwrap(), b"Hel");
+    }
+
+    #[test]
+    fn first_ending_ends_the_chain_and_leaves_input_unconsumed() {
+        // The composed codec is self-terminating exactly when `first`
+        // is: `first`'s in-band end surfaces as the chain's own
+        // `StreamEnd`, with the unread tail of the input reported as
+        // unconsumed rather than silently swallowed.
+        let mut chain = Chain::new(EarlyEnd { limit: 3, done: 0 }, identity(), vec![0u8; 64]);
+        let mut out = [0u8; 64];
+        let outcome = chain.process(b"Hello World", &mut out).unwrap();
+        assert_eq!(outcome, Outcome::StreamEnd { consumed: 3, written: 3 });
+        assert_eq!(&out[..3], b"Hel");
+    }
+
+    #[test]
+    fn first_ending_finishes_second_inside_process() {
+        // `first`'s end means no input will ever reach `second` again,
+        // so `process` itself drives `second.finish`: base64_enc holds
+        // one leftover byte internally, and its padded trailer group
+        // must arrive without the caller ever calling finish().
+        let expected = to_vec(base64_enc(), b"Hell").unwrap();
+        let mut chain = Chain::new(EarlyEnd { limit: 4, done: 0 }, base64_enc(), vec![0u8; 64]);
+        let mut out = [0u8; 64];
+        let outcome = chain.process(b"Hello World", &mut out).unwrap();
+        assert_eq!(outcome, Outcome::StreamEnd { consumed: 4, written: expected.len() });
+        assert_eq!(&out[..expected.len()], expected.as_slice());
     }
 
     #[test]
