@@ -74,7 +74,7 @@ pub enum CopyError<EI, EO> {
 /// contract guarantees any non-empty slot can be filled, so slot
 /// sizes need no relation to the codec's internals.
 pub fn stream_to_stream<I, B, EI, O, S, EO, C>(
-    mut input: I,
+    input: I,
     mut codec: C,
     mut output: O,
 ) -> Result<Totals, CopyError<EI, EO>>
@@ -85,110 +85,85 @@ where
     S: AsMut<[u8]>,
     C: Codec,
 {
-    let mut cur_in: Option<(B, usize)> = None;
-    let mut inner_eof = false;
     // (slot, bytes written so far, slot length) — length is cached at
-    // pull time since `S: AsMut` needs `&mut` to measure.
+    // pull time since `S: AsMut` needs `&mut` to measure. Outlives the
+    // phases below: a slot's remainder carries from one chunk to the
+    // next, and from the last chunk into `finish`.
     let mut cur_out: Option<(S, usize, usize)> = None;
-    let mut finishing = false;
     let mut totals = Totals { consumed: 0, written: 0 };
 
-    loop {
-        let need_input = match &cur_in {
-            Some((b, pos)) => *pos >= b.as_ref().len(),
-            None => true,
-        };
-        if need_input && !inner_eof && !finishing {
-            match input.next() {
-                Some(Ok(b)) => cur_in = Some((b, 0)),
-                Some(Err(e)) => return Err(CopyError::Input(e)),
-                None => inner_eof = true,
+    // Phase 1: pump input chunks through `process`. Each chunk is an
+    // immutable local of the outer loop; only the position within it
+    // advances. An empty chunk falls straight through the inner loop.
+    for item in input {
+        let chunk = item.map_err(CopyError::Input)?;
+        let chunk: &[u8] = chunk.as_ref();
+        let mut in_pos = 0;
+        while in_pos < chunk.len() {
+            let out_empty = match &cur_out {
+                Some((_, pos, len)) => *pos >= *len,
+                None => true,
+            };
+            if out_empty {
+                next_slot(&mut output, &mut cur_out)?;
             }
-        }
-
-        // The slice fed to the codec this turn: empty once the current
-        // chunk is exhausted, or there is none yet.
-        let in_buf: &[u8] = match &cur_in {
-            Some((b, pos)) if *pos < b.as_ref().len() => &b.as_ref()[*pos..],
-            _ => &[],
-        };
-
-        if finishing || (in_buf.is_empty() && inner_eof) {
-            finishing = true;
-            // Called even with a zero remainder (or no slot at all):
-            // `Done` vs `OutputFilled` on an empty buffer is exactly
-            // how a codec that owes nothing finishes without claiming
-            // a slot it has no use for.
-            let out_buf: &mut [u8] = match &mut cur_out {
-                Some((s, pos, len)) => &mut s.as_mut()[*pos..*len],
-                None => &mut [],
+            let out_buf = {
+                let (s, pos, len) = cur_out.as_mut().unwrap();
+                &mut s.as_mut()[*pos..*len]
             };
             let out_len = out_buf.len();
-            match codec.finish(out_buf).map_err(CopyError::Codec)? {
-                Drain::OutputFilled => {
+            match codec.process(&chunk[in_pos..], out_buf).map_err(CopyError::Codec)? {
+                Outcome::InputConsumed { written } => {
+                    if let Some((_, pos, _)) = cur_out.as_mut() {
+                        *pos += written;
+                    }
+                    totals.consumed += chunk.len() - in_pos;
+                    totals.written += written;
+                    break;
+                }
+                Outcome::OutputFilled { consumed } => {
+                    in_pos += consumed;
                     if let Some((_, pos, _)) = cur_out.as_mut() {
                         *pos += out_len;
                     }
+                    totals.consumed += consumed;
                     totals.written += out_len;
-                    if out_len == 0 {
-                        // Owed bytes but had nowhere to put them.
-                        next_slot(&mut output, &mut cur_out)?;
-                    }
                 }
-                Drain::Done { written } => {
+                Outcome::StreamEnd { consumed, written } => {
+                    // The stream ended in-band; input past its end (the
+                    // rest of this chunk, and any unpulled chunks) is
+                    // simply not this stream's to read — `totals.consumed`
+                    // tells the caller where in the input that end is.
+                    totals.consumed += consumed;
                     totals.written += written;
                     return Ok(totals);
                 }
             }
-            continue;
         }
+    }
 
-        if in_buf.is_empty() {
-            // Not at EOF: an empty chunk (or none yet) — loop around
-            // and pull the next one without touching the output side.
-            continue;
-        }
-
-        let out_empty = match &cur_out {
-            Some((_, pos, len)) => *pos >= *len,
-            None => true,
-        };
-        if out_empty {
-            next_slot(&mut output, &mut cur_out)?;
-        }
-        let out_buf = {
-            let (s, pos, len) = cur_out.as_mut().unwrap();
-            &mut s.as_mut()[*pos..*len]
+    // Phase 2: no more input — drain `finish`. Called even with a zero
+    // remainder (or no slot at all): `Done` vs `OutputFilled` on an
+    // empty buffer is exactly how a codec that owes nothing finishes
+    // without claiming a slot it has no use for.
+    loop {
+        let out_buf: &mut [u8] = match &mut cur_out {
+            Some((s, pos, len)) => &mut s.as_mut()[*pos..*len],
+            None => &mut [],
         };
         let out_len = out_buf.len();
-        let in_len = in_buf.len();
-        match codec.process(in_buf, out_buf).map_err(CopyError::Codec)? {
-            Outcome::InputConsumed { written } => {
-                if let Some((b, pos)) = cur_in.as_mut() {
-                    *pos = b.as_ref().len();
-                }
-                if let Some((_, pos, _)) = cur_out.as_mut() {
-                    *pos += written;
-                }
-                totals.consumed += in_len;
-                totals.written += written;
-            }
-            Outcome::OutputFilled { consumed } => {
-                if let Some((_, pos)) = cur_in.as_mut() {
-                    *pos += consumed;
-                }
+        match codec.finish(out_buf).map_err(CopyError::Codec)? {
+            Drain::OutputFilled => {
                 if let Some((_, pos, _)) = cur_out.as_mut() {
                     *pos += out_len;
                 }
-                totals.consumed += consumed;
                 totals.written += out_len;
+                if out_len == 0 {
+                    // Owed bytes but had nowhere to put them.
+                    next_slot(&mut output, &mut cur_out)?;
+                }
             }
-            Outcome::StreamEnd { consumed, written } => {
-                // The stream ended in-band; input past its end (the
-                // rest of this chunk, and any unpulled chunks) is
-                // simply not this stream's to read — `totals.consumed`
-                // tells the caller where in the input that end is.
-                totals.consumed += consumed;
+            Drain::Done { written } => {
                 totals.written += written;
                 return Ok(totals);
             }
