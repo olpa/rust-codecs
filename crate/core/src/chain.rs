@@ -19,7 +19,10 @@ pub struct Chain<A, B, S> {
     staging: S,
     /// Bytes in `staging` written by `first`, not yet all drained by `second`.
     filled: usize,
-    /// Of `filled`, how many `second` has already consumed.
+    /// Of `filled`, how many `second` has already consumed. The pair is
+    /// normalized (both zero once equal) at the top of every
+    /// `process`/`finish` turn, not at each mutation site — between
+    /// turns `drained == filled` may linger un-reset.
     drained: usize,
     /// `first` reported `StreamEnd` (or was finished) — stop feeding it.
     first_ended: bool,
@@ -37,14 +40,6 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         assert!(!staging.as_mut().is_empty(), "Chain staging buffer must be non-empty");
         Self { first, second, staging, filled: 0, drained: 0, first_ended: false }
     }
-
-    /// Reset staging indices once `second` has taken everything.
-    fn reset_staging_if_drained(&mut self) {
-        if self.drained >= self.filled {
-            self.drained = 0;
-            self.filled = 0;
-        }
-    }
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
@@ -53,6 +48,14 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
         let mut out_pos = 0;
 
         loop {
+            // Normalized once per turn: everything staged has been
+            // drained, so refills start from the top of the buffer.
+            // The arms below only advance counts; none of them resets.
+            if self.drained == self.filled {
+                self.drained = 0;
+                self.filled = 0;
+            }
+
             // Drain whatever's already staged into the caller's output
             // before asking `first` for more — biggest possible chunks,
             // invisible from outside a single call.
@@ -66,17 +69,15 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     Outcome::InputConsumed { written } => {
                         self.drained = self.filled;
                         out_pos += written;
-                        self.reset_staging_if_drained();
+                        continue;
                     }
                     Outcome::OutputFilled { consumed } => {
                         self.drained += consumed;
-                        self.reset_staging_if_drained();
                         return Ok(Outcome::OutputFilled { consumed: in_pos });
                     }
                     Outcome::StreamEnd { consumed, written } => {
                         self.drained += consumed;
                         out_pos += written;
-                        self.reset_staging_if_drained();
                         return Ok(Outcome::StreamEnd { consumed: in_pos, written: out_pos });
                     }
                 }
@@ -135,6 +136,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
         let mut out_pos = 0;
 
         loop {
+            // Same per-turn normalization as `process`.
+            if self.drained == self.filled {
+                self.drained = 0;
+                self.filled = 0;
+            }
+
             // Any leftover staged bytes (from a prior `process`/`finish`
             // call that left the caller's output full) go first.
             if self.drained < self.filled {
@@ -147,29 +154,25 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     Outcome::InputConsumed { written } => {
                         self.drained = self.filled;
                         out_pos += written;
-                        self.reset_staging_if_drained();
+                        continue;
                     }
                     Outcome::OutputFilled { consumed } => {
                         self.drained += consumed;
-                        self.reset_staging_if_drained();
                         return Ok(Drain::OutputFilled);
                     }
                     Outcome::StreamEnd { consumed, written } => {
                         self.drained += consumed;
                         out_pos += written;
-                        self.reset_staging_if_drained();
                         return Ok(Drain::Done { written: out_pos });
                     }
                 }
-                continue;
             }
 
             if !self.first_ended {
                 let staging = self.staging.as_mut();
-                let filled = self.filled;
                 match self
                     .first
-                    .finish(&mut staging[filled..])
+                    .finish(&mut staging[self.filled..])
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
                 {
                     Drain::OutputFilled => {
@@ -289,6 +292,45 @@ mod tests {
         let outcome = chain.process(INPUT, &mut out).unwrap();
         assert_eq!(outcome, Outcome::InputConsumed { written: INPUT.len() });
         assert_eq!(&out[..INPUT.len()], INPUT);
+    }
+
+    #[test]
+    fn repeated_one_byte_output_calls_drive_to_completion() {
+        // Chain state must survive un-normalized across call
+        // boundaries: with 4-byte staging (exactly one base64 encoded
+        // group) and a 1-byte caller output, calls routinely return
+        // with staging exactly drained (`drained == filled`, not
+        // reset) — the next call's entry normalization is what makes
+        // the following refill start at the top of the buffer.
+        let expected = to_vec(rot13(), &to_vec(base64_enc(), INPUT).unwrap()).unwrap();
+        let mut chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]);
+        let mut collected = Vec::new();
+        let mut in_pos = 0;
+        while in_pos < INPUT.len() {
+            let mut out = [0u8; 1];
+            match chain.process(&INPUT[in_pos..], &mut out).unwrap() {
+                Outcome::InputConsumed { written } => {
+                    collected.extend_from_slice(&out[..written]);
+                    in_pos = INPUT.len();
+                }
+                Outcome::OutputFilled { consumed } => {
+                    collected.extend_from_slice(&out);
+                    in_pos += consumed;
+                }
+                Outcome::StreamEnd { .. } => unreachable!("base64∘rot13 never self-terminates"),
+            }
+        }
+        loop {
+            let mut out = [0u8; 1];
+            match chain.finish(&mut out).unwrap() {
+                Drain::OutputFilled => collected.extend_from_slice(&out),
+                Drain::Done { written } => {
+                    collected.extend_from_slice(&out[..written]);
+                    break;
+                }
+            }
+        }
+        assert_eq!(collected, expected);
     }
 
     #[test]
