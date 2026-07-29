@@ -26,6 +26,12 @@ pub struct Chain<A, B, S> {
     drained: usize,
     /// `first` reported `StreamEnd` (or was finished) — stop feeding it.
     first_ended: bool,
+    /// A `flush` interrupted by `OutputFilled` resumes where it left
+    /// off: once `first.flush` has reported done, later `flush` calls
+    /// skip straight to `second` — re-flushing `first` would make a
+    /// deflate-style codec emit a second sync marker. Cleared when new
+    /// input arrives (`process`) or the flush completes.
+    flushing_second: bool,
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
@@ -38,7 +44,15 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// a caller bug, not a runtime condition.
     pub fn new(first: A, second: B, mut staging: S) -> Self {
         assert!(!staging.as_mut().is_empty(), "Chain staging buffer must be non-empty");
-        Self { first, second, staging, filled: 0, drained: 0, first_ended: false }
+        Self {
+            first,
+            second,
+            staging,
+            filled: 0,
+            drained: 0,
+            first_ended: false,
+            flushing_second: false,
+        }
     }
 }
 
@@ -46,6 +60,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
+        // New input invalidates a half-completed flush's phase
+        // tracking; the next flush starts from `first` again.
+        self.flushing_second = false;
 
         loop {
             // Normalized once per turn: everything staged has been
@@ -211,6 +228,91 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             {
                 Drain::OutputFilled => Ok(Drain::OutputFilled),
                 Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
+            };
+        }
+    }
+
+    fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        let mut out_pos = 0;
+
+        loop {
+            // Same per-turn normalization as `process`/`finish`.
+            if self.drained == self.filled {
+                self.drained = 0;
+                self.filled = 0;
+            }
+
+            // Staged bytes (leftovers, or what `first.flush` below just
+            // produced) go through `second` first — `second.flush` may
+            // only run once everything staged has passed through its
+            // `process`.
+            if self.drained < self.filled {
+                let staging = self.staging.as_mut();
+                let outcome = self
+                    .second
+                    .process(&staging[self.drained..self.filled], &mut output[out_pos..])
+                    .and_then(|o| o.validated(self.filled - self.drained, output.len() - out_pos))
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                match outcome {
+                    Outcome::InputConsumed { written } => {
+                        self.drained = self.filled;
+                        out_pos += written;
+                        continue;
+                    }
+                    Outcome::OutputFilled { consumed } => {
+                        self.drained += consumed;
+                        return Ok(Drain::OutputFilled);
+                    }
+                    Outcome::StreamEnd { consumed, written } => {
+                        // `second` ended in-band mid-flush: nothing
+                        // more can ever come out, so the flush is
+                        // trivially complete.
+                        self.drained += consumed;
+                        out_pos += written;
+                        return Ok(Drain::Done { written: out_pos });
+                    }
+                }
+            }
+
+            if !self.flushing_second {
+                if self.first_ended {
+                    // Nothing left in `first` to flush.
+                    self.flushing_second = true;
+                    continue;
+                }
+                let staging = self.staging.as_mut();
+                match self
+                    .first
+                    .flush(&mut staging[self.filled..])
+                    .and_then(|d| d.validated(staging.len() - self.filled))
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
+                {
+                    Drain::OutputFilled => {
+                        self.filled = staging.len();
+                    }
+                    Drain::Done { written } => {
+                        self.filled += written;
+                        self.flushing_second = true;
+                    }
+                }
+                continue;
+            }
+
+            // Everything `first` owed has passed through `second`; now
+            // `second`'s own flush.
+            return match self
+                .second
+                .flush(&mut output[out_pos..])
+                .and_then(|d| d.validated(output.len() - out_pos))
+                .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
+            {
+                // `flushing_second` stays set: an interrupted flush
+                // resumes here, not at `first`.
+                Drain::OutputFilled => Ok(Drain::OutputFilled),
+                Drain::Done { written } => {
+                    self.flushing_second = false;
+                    Ok(Drain::Done { written: out_pos + written })
+                }
             };
         }
     }
@@ -418,6 +520,103 @@ mod tests {
     #[should_panic(expected = "staging buffer must be non-empty")]
     fn empty_staging_buffer_panics() {
         let _ = Chain::new(rot13(), rot13(), Vec::<u8>::new());
+    }
+
+    /// A block-buffering codec: hoards all input internally and emits
+    /// it only on `flush`/`finish` — the codec class `Codec::flush`
+    /// exists for (deflate-style sync boundaries).
+    #[derive(Default)]
+    struct Hoarder {
+        buf: Vec<u8>,
+    }
+
+    impl Hoarder {
+        fn emit(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            let n = self.buf.len().min(output.len());
+            output[..n].copy_from_slice(&self.buf[..n]);
+            self.buf.drain(..n);
+            if self.buf.is_empty() {
+                Ok(Drain::Done { written: n })
+            } else {
+                Ok(Drain::OutputFilled)
+            }
+        }
+    }
+
+    impl Codec for Hoarder {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Outcome, Error> {
+            self.buf.extend_from_slice(input);
+            Ok(Outcome::InputConsumed { written: 0 })
+        }
+
+        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            self.emit(output)
+        }
+
+        fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            self.emit(output)
+        }
+    }
+
+    #[test]
+    fn flush_drains_a_hoarding_first_through_second() {
+        // `first` withholds everything until flushed; `Chain::flush`
+        // must pull it out *through* `second`, so the bytes arrive
+        // transformed — and the stream stays open for more input.
+        let expected = to_vec(rot13(), INPUT).unwrap();
+        let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
+        let mut out = [0u8; 64];
+        let outcome = chain.process(INPUT, &mut out).unwrap();
+        assert_eq!(outcome, Outcome::InputConsumed { written: 0 });
+        let drain = chain.flush(&mut out).unwrap();
+        assert_eq!(drain, Drain::Done { written: expected.len() });
+        assert_eq!(&out[..expected.len()], expected.as_slice());
+    }
+
+    #[test]
+    fn flush_drains_a_hoarding_second() {
+        // `second` withholds; `Chain::flush` must invoke `second`'s
+        // own flush after `first`'s.
+        let expected = to_vec(rot13(), INPUT).unwrap();
+        let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]);
+        let mut out = [0u8; 64];
+        let outcome = chain.process(INPUT, &mut out).unwrap();
+        assert_eq!(outcome, Outcome::InputConsumed { written: 0 });
+        let drain = chain.flush(&mut out).unwrap();
+        assert_eq!(drain, Drain::Done { written: expected.len() });
+        assert_eq!(&out[..expected.len()], expected.as_slice());
+    }
+
+    #[test]
+    fn interrupted_flush_resumes_and_the_stream_stays_open() {
+        // Drive a flush through 1-byte outputs: each OutputFilled
+        // return must resume where it left off (never re-flushing
+        // `first`), and after Done the chain must accept new input
+        // and flush it too — proving `flushing_second` resets.
+        let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
+        let mut big = [0u8; 64];
+        chain.process(INPUT, &mut big).unwrap();
+
+        let expected = to_vec(rot13(), INPUT).unwrap();
+        let mut collected = Vec::new();
+        loop {
+            let mut out = [0u8; 1];
+            match chain.flush(&mut out).unwrap() {
+                Drain::OutputFilled => collected.extend_from_slice(&out),
+                Drain::Done { written } => {
+                    collected.extend_from_slice(&out[..written]);
+                    break;
+                }
+            }
+        }
+        assert_eq!(collected, expected);
+
+        // Second round: new input after a completed flush.
+        chain.process(b"abc", &mut big).unwrap();
+        let expected2 = to_vec(rot13(), b"abc").unwrap();
+        let drain = chain.flush(&mut big).unwrap();
+        assert_eq!(drain, Drain::Done { written: expected2.len() });
+        assert_eq!(&big[..expected2.len()], expected2.as_slice());
     }
 
     /// Claims to have consumed more input than it was given.
