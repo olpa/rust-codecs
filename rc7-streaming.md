@@ -60,6 +60,10 @@ implies `alloc`; `alloc` enables vector conveniences and boxed codecs;
 without either, codecs, `Chain`, A, B, and `stream_to_stream` remain
 available.
 
+With the optional `embedded-io` feature, allocation-free native
+`EmbeddedCodecReader` and `EmbeddedCodecWriter` adapters are also
+available without `std`.
+
 The endpoint loops remain necessarily directional:
 
 - `stream_to_stream` drives iterators of chunks and slots;
@@ -359,12 +363,26 @@ cargo test --workspace --all-features
 CI, GitHub Actions, and target installation are intentionally outside
 the current development phase.
 
-### Step 5 — embedded adapters
+### Step 5 — embedded adapters — complete
 
 - Add native `embedded_io` reader/writer wrappers over B.
 - Use caller-provided buffers.
 - Preserve both endpoint and codec errors.
 - Test on host and at least one `no_std` target where practical.
+
+Implemented against `embedded-io` 0.7 as an optional dependency with
+default features disabled. The reader owns only input scratch and lends
+caller output directly; the writer lends caller input and owns only
+output scratch. `EmbeddedError<E>` preserves endpoint errors, codec
+errors, and the embedded trait's required `WriteZero` condition.
+
+Allocation-free host tests cover reading, writing/finalization,
+endpoint errors, and early codec termination:
+
+```text
+cargo test -p rust-codecs-core --no-default-features \
+  --features embedded-io,identity
+```
 
 ### Step 6 — asynchronous adapters
 

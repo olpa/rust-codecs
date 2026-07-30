@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 base64 = { version = "0.22", optional = true, default-features = false }
 json-escape = { git = "https://github.com/olpa/json-escape", branch = "feat/escape-bytes-try2", optional = true }
+embedded-io = { version = "0.7.1", optional = true, default-features = false }
 
 [features]
 default = ["std"]
@@ -15,6 +16,7 @@ identity = []
 rot13 = []
 base64 = ["dep:base64"]
 json = ["dep:json-escape"]
+embedded-io = ["dep:embedded-io"]
 
 [lib]
 name = "rust_codecs_core"
