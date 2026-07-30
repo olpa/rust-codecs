@@ -18,6 +18,9 @@ mod carry;
 pub use carry::Carry;
 
 mod transfer;
+// Private step-B prototype; frontends begin using it in the next step.
+#[allow(dead_code)]
+mod driver;
 
 mod chain;
 pub use chain::Chain;

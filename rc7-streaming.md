@@ -48,6 +48,14 @@ caller-provided staging (`S: AsMut<[u8]>`) and is itself a `Codec`. It
 implements early-end, finish, flush, return-clean, and validation
 semantics.
 
+Checkpoint A is implemented as the private validated window-transfer
+primitive used by `stream_to_stream` and every `Chain` process transfer.
+
+Checkpoint B now has a private prototype, `StreamDriver<C, I, O>`, over
+stable caller-provided input and output buffers. It is deliberately not
+wired into public frontends yet; step 3 will test whether those rewrites
+are actually simpler and preserve their native contracts.
+
 The drivers remain fragmented:
 
 - `stream_to_stream` drives iterators of chunks and slots;
@@ -129,19 +137,26 @@ for replacing input or output windows.
 ### B — Sans-I/O resumable stream driver
 
 Build a domain-neutral driver which owns stream scheduling state but
-does not perform I/O. Advancing it conceptually produces an externally
-actionable state:
+does not perform I/O. The prototype exposes these externally actionable
+states:
 
 ```rust
 enum DriverState {
+    Runnable,
     NeedInput,
     HaveOutput,
+    Flushed,
     Finished,
+    Failed,
 }
 ```
 
-The final API may need explicit `Runnable`, `Finishing`, or
-`CodecEnded` states; these names are illustrative.
+`Runnable` keeps endpoint action separate from internal codec work.
+`Flushed` is an explicit sync point: an output adapter may flush its
+endpoint before acknowledging it and reopening the codec stream.
+`Failed` means the latched codec error has been delivered and the driver
+cannot resume. Finishing remains an internal phase rather than an
+endpoint action.
 
 The driver owns:
 
@@ -168,7 +183,7 @@ supplies input bytes and consumes pending output while the driver keeps
 cursors and lifecycle state. Storage remains caller-provided where
 practical, using `S: AsMut<[u8]>`.
 
-Before fixing the API, compare two storage models:
+Two storage models were considered:
 
 1. **Stable scratch buffers.** The driver owns caller-provided generic
    buffer values which adapters fill and drain. Suspension across async
@@ -177,9 +192,18 @@ Before fixing the API, compare two storage models:
    avoid copies, but lifetimes become harder, especially across async
    suspension and wrapper calls.
 
-The expected design is hybrid: correctness uses stable caller-provided
-storage; direct-window paths are optional optimizations where clearly
-safe and useful.
+The prototype validates the stable-storage model. It retains all cursors
+across suspension without borrowing endpoint-owned memory. Direct-window
+paths remain possible later as optional optimizations, but correctness
+and the initial frontend rewrites will use stable caller-provided
+storage.
+
+The prototype also establishes error ordering. When a codec reports an
+error after writing bytes, the driver latches the error, exposes and
+drains those valid bytes first, then returns the error. Reported error
+progress is checked against the active windows; an overclaim becomes a
+contract violation. Unconsumed buffered input remains inspectable after
+an in-band end or failure.
 
 ### I/O-domain adapters
 
@@ -306,7 +330,7 @@ traits, or lifetime machinery which merely hides the same loops.
 
 ## Implementation plan
 
-### Step 1 — specify and test A
+### Step 1 — specify and test A — complete
 
 - Choose the internal `Transfer` API.
 - Centralize validation and exact count derivation.
@@ -315,13 +339,24 @@ traits, or lifetime machinery which merely hides the same loops.
 - Replace the three transfer sites in `stream_to_stream` and `Chain`.
 - Later migrate direct transfer logic in existing std/vector adapters.
 
-### Step 2 — prototype B privately
+Implemented in `core/src/transfer.rs` and reused by
+`stream_to_stream`/`Chain`.
+
+### Step 2 — prototype B privately — complete
 
 - Implement B over caller-provided buffers.
 - Define input submission, EOF declaration, output exposure and
   consumption, and advancement.
 - Test suspension at every state boundary.
 - Make finish and no-progress behavior explicit and uniform.
+
+Implemented in `core/src/driver.rs`. Tests cover independent input and
+output suspension, partial output consumption, a zero-output process
+turn, multi-buffer finish, resumable flush, early stream end, one-byte
+storage, output-before-error delivery, and overclaimed error progress.
+
+The prototype is private and temporarily allowed as dead code until
+step 3 connects frontends to it.
 
 ### Step 3 — rewrite current frontends over B
 
