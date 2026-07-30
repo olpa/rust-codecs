@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 //! Core crate for RustCodecs: the [`Codec`] trait, its vocabulary, and
 //! the stream adapters a codec crate and its clients build on.
 //!
@@ -10,6 +11,9 @@
 //!   letting an emitted unit span output buffers.
 //! - [`io`]: stream adapters (`std::io::Read`/`Write`) and one-shot
 //!   `Vec<u8>` helpers built on top of [`Codec`].
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 mod codec;
 pub use codec::{Codec, Drain, Error, ErrorKind, Outcome};

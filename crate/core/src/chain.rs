@@ -372,8 +372,16 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "identity",
+    feature = "rot13",
+    feature = "base64"
+))]
 mod tests {
+    use alloc::{boxed::Box, vec, vec::Vec};
+
     use super::Chain;
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;

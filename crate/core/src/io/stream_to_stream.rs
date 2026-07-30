@@ -180,8 +180,17 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "identity",
+    feature = "rot13",
+    feature = "base64"
+))]
 mod tests {
+    use alloc::{vec, vec::Vec};
+    use core::{cell::Cell, iter};
+
     use super::{stream_to_stream, CopyError};
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
@@ -287,7 +296,7 @@ mod tests {
     fn empty_input() {
         // No chunks at all: `finish` still has to run to completion.
         let mut out = slots(1, 8);
-        let empty: std::iter::Empty<Result<&[u8], ()>> = std::iter::empty();
+        let empty: iter::Empty<Result<&[u8], ()>> = iter::empty();
         let totals =
             stream_to_stream::<_, _, (), _, _, _, _>(empty, identity(), slot_iter(&mut out))
                 .unwrap();
@@ -333,8 +342,8 @@ mod tests {
         // was ever needed" is a real, reachable final state, and an
         // eager first pull would turn this case into a spurious
         // `OutputExhausted`.
-        let empty_in: std::iter::Empty<Result<&[u8], ()>> = std::iter::empty();
-        let no_slots: std::iter::Empty<Result<&mut [u8], ()>> = std::iter::empty();
+        let empty_in: iter::Empty<Result<&[u8], ()>> = iter::empty();
+        let no_slots: iter::Empty<Result<&mut [u8], ()>> = iter::empty();
         let totals =
             stream_to_stream::<_, _, _, _, _, _, _>(empty_in, identity(), no_slots).unwrap();
         assert_eq!(totals.written, 0);
@@ -505,11 +514,10 @@ mod tests {
         // length, so `StreamEnd` arrives in the same call that
         // finishes consuming "Hello" — the driver returns right there,
         // so the input iterator's second item stays untouched.
-        use std::cell::Cell;
         let pulls = Cell::new(0);
         let chunks: [&[u8]; 2] = [b"Hello", b"World"];
         let mut idx = 0;
-        let input = std::iter::from_fn(|| {
+        let input = iter::from_fn(|| {
             if idx >= chunks.len() {
                 return None;
             }

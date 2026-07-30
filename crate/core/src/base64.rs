@@ -369,7 +369,7 @@ pub fn base64_dec() -> Base64Dec {
     Base64Dec::with_engine(STANDARD)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use std::io::{Cursor, Read, Write};
 

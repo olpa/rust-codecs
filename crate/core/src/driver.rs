@@ -33,6 +33,7 @@ impl<C: Codec> Driver<C> {
         Self { codec, done: false }
     }
 
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     pub(crate) fn is_done(&self) -> bool {
         self.done
     }
@@ -67,6 +68,7 @@ impl<C: Codec> Driver<C> {
         Ok(moved)
     }
 
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     pub(crate) fn flush(&mut self, output: &mut [u8]) -> Result<DrainTransfer, Error> {
         if self.done {
             return Ok(DrainTransfer {

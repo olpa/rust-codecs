@@ -30,7 +30,7 @@ pub fn identity() -> Identity {
     Identity
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use std::io::{Cursor, Read, Write};
 

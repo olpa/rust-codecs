@@ -55,6 +55,11 @@ Checkpoint B is implemented as a private, bufferless `Driver<C>`. It
 owns codec lifecycle and normalization while each directional frontend
 retains only the buffers and cursors its endpoint contract requires.
 
+The core is now feature-layered for portability: `std` (default)
+implies `alloc`; `alloc` enables vector conveniences and boxed codecs;
+without either, codecs, `Chain`, A, B, and `stream_to_stream` remain
+available.
+
 The endpoint loops remain necessarily directional:
 
 - `stream_to_stream` drives iterators of chunks and slots;
@@ -332,13 +337,27 @@ buffer ownership. The migration removes more code than it adds and the
 approved `stream_to_stream` behavior remains covered by its existing
 tests.
 
-### Step 4 — establish portability
+### Step 4 — establish portability — complete
 
 - Make core `no_std`, with `alloc` and `std` feature layers.
 - Gate `std::io` behind `std`; gate vectors and boxed codecs behind
   `alloc`.
 - Keep `Codec`, `Chain`, A, and B available without either.
-- Add host and embedded-target checks to CI.
+- Defer CI and target-specific setup until pre-production work begins.
+
+Implemented with `std` and `alloc` features and a no-default-features
+core. `base64` has default features disabled. The current verification
+matrix is:
+
+```text
+cargo test -p rust-codecs-core --no-default-features
+cargo test -p rust-codecs-core --no-default-features \
+  --features alloc,identity,rot13,base64
+cargo test --workspace --all-features
+```
+
+CI, GitHub Actions, and target installation are intentionally outside
+the current development phase.
 
 ### Step 5 — embedded adapters
 

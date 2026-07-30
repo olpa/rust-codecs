@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.22", optional = true, default-features = false }
 json-escape = { git = "https://github.com/olpa/json-escape", branch = "feat/escape-bytes-try2", optional = true }
 
 [features]
+default = ["std"]
+alloc = []
+std = ["alloc"]
 identity = []
 rot13 = []
 base64 = ["dep:base64"]

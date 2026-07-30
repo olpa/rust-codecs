@@ -78,8 +78,10 @@ impl<const N: usize> Default for Carry<N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::Carry;
 
     #[test]

@@ -40,7 +40,7 @@ pub fn rot13() -> Rot13 {
     Rot13
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use std::io::{Cursor, Read, Write};
 

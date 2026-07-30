@@ -12,10 +12,14 @@
 //! adapters — fold the codecs into one `Chain` first, then wrap that
 //! single codec in one [`CodecReader`]/[`CodecWriter`].
 
+#[cfg(feature = "std")]
 mod stream;
 mod stream_to_stream;
+#[cfg(feature = "alloc")]
 mod vec;
 
+#[cfg(feature = "std")]
 pub use stream::{CodecReader, CodecWriter};
 pub use stream_to_stream::{stream_to_stream, CopyError, Totals};
+#[cfg(feature = "alloc")]
 pub use vec::to_vec;

@@ -1,6 +1,8 @@
 //! One-shot `Vec<u8>` helper over a caller-supplied [`Codec`](crate::Codec)
 //! instance.
 
+use alloc::{vec, vec::Vec};
+
 use crate::driver::{DrainEnd, Driver};
 use crate::transfer::TransferEnd;
 use crate::{Codec, Error};

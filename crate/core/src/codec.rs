@@ -143,6 +143,27 @@ pub trait Codec {
     }
 }
 
+// Mirrors std's `impl<R: Read + ?Sized> Read for Box<R>`: lets a `Box<dyn
+// Codec>` (or a boxed concrete codec) stand in anywhere a `Codec` is
+// expected, e.g. to build a runtime-determined chain of codecs.
+#[cfg(feature = "alloc")]
+use alloc::boxed::Box;
+
+#[cfg(feature = "alloc")]
+impl<C: Codec + ?Sized> Codec for Box<C> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+        (**self).process(input, output)
+    }
+
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        (**self).finish(output)
+    }
+
+    fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        (**self).flush(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Drain, Error, ErrorKind, Outcome};
@@ -165,22 +186,5 @@ mod tests {
         assert_eq!(Outcome::StreamEnd { consumed: 11, written: 0 }.validated(10, 4), Err(CV));
         assert_eq!(Outcome::StreamEnd { consumed: 0, written: 5 }.validated(10, 4), Err(CV));
         assert_eq!(Drain::Done { written: 5 }.validated(4), Err(CV));
-    }
-}
-
-// Mirrors std's `impl<R: Read + ?Sized> Read for Box<R>`: lets a `Box<dyn
-// Codec>` (or a boxed concrete codec) stand in anywhere a `Codec` is
-// expected, e.g. to build a runtime-determined chain of codecs.
-impl<C: Codec + ?Sized> Codec for Box<C> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
-        (**self).process(input, output)
-    }
-
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        (**self).finish(output)
-    }
-
-    fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        (**self).flush(output)
     }
 }
