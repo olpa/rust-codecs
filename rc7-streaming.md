@@ -51,12 +51,11 @@ semantics.
 Checkpoint A is implemented as the private validated window-transfer
 primitive used by `stream_to_stream` and every `Chain` process transfer.
 
-Checkpoint B now has a private prototype, `StreamDriver<C, I, O>`, over
-stable caller-provided input and output buffers. It is deliberately not
-wired into public frontends yet; step 3 will test whether those rewrites
-are actually simpler and preserve their native contracts.
+Checkpoint B is implemented as a private, bufferless `Driver<C>`. It
+owns codec lifecycle and normalization while each directional frontend
+retains only the buffers and cursors its endpoint contract requires.
 
-The drivers remain fragmented:
+The endpoint loops remain necessarily directional:
 
 - `stream_to_stream` drives iterators of chunks and slots;
 - `CodecReader` and `CodecWriter` drive `std::io`;
@@ -74,9 +73,9 @@ The same non-trivial operation appears repeatedly:
 6. distinguish input exhaustion, output exhaustion, and in-band stream
    termination.
 
-Stream adapters additionally repeat scheduling policy: acquiring new
-input, draining output, detecting endpoint EOF, entering `finish`, and
-retaining state across partial operations.
+They no longer repeat codec trust-boundary or lifecycle interpretation.
+They still acquire and drain native endpoints themselves, because those
+operations have different ownership, readiness, and error contracts.
 
 ## Architecture
 
@@ -85,7 +84,7 @@ Use three layers:
 ```text
 I/O-domain adapters
         |
-Sans-I/O resumable stream driver
+bufferless Sans-I/O lifecycle driver
         |
 Codec (possibly a Chain)
         |
@@ -134,40 +133,24 @@ reaches one of the three boundaries, there is no meaningful multi-call
 loop over one fixed pair of windows. Reuse above A requires a mechanism
 for replacing input or output windows.
 
-### B — Sans-I/O resumable stream driver
+### B — bufferless Sans-I/O lifecycle driver
 
-Build a domain-neutral driver which owns stream scheduling state but
-does not perform I/O. The prototype exposes these externally actionable
-states:
+`Driver<C>` owns the codec and its ended state. It accepts input and
+output windows lent by a frontend and provides three normalized
+operations:
 
-```rust
-enum DriverState {
-    Runnable,
-    NeedInput,
-    HaveOutput,
-    Flushed,
-    Finished,
-    Failed,
-}
-```
+- `process` uses A and latches in-band `StreamEnd`;
+- `finish` validates exact drain progress and latches completion;
+- `flush` validates exact drain progress without ending the stream.
 
-`Runnable` keeps endpoint action separate from internal codec work.
-`Flushed` is an explicit sync point: an output adapter may flush its
-endpoint before acknowledging it and reopening the codec stream.
-`Failed` means the latched codec error has been delivered and the driver
-cannot resume. Finishing remains an internal phase rather than an
-endpoint action.
+The driver owns no byte storage and therefore cannot introduce a copy.
+Directional frontends retain cursor state according to their natural
+ownership model:
 
-The driver owns:
-
-- input and output cursor state;
-- repeated use of A across changing windows;
-- partial input and pending output;
-- explicit input EOF;
-- transition from `process` to `finish`;
-- in-band `StreamEnd` latching;
-- state across suspension;
-- consistent no-progress handling.
+- `CodecReader` owns input scratch and lends caller output directly;
+- `CodecWriter` lends caller input and owns output scratch;
+- `stream_to_stream` lends its current iterator chunk and slot;
+- `to_vec` lends its original input and existing output scratch.
 
 The driver does not:
 
@@ -175,47 +158,28 @@ The driver does not:
 - wait, poll, spawn, or select an executor;
 - choose whether blocking an async executor is acceptable;
 - convert endpoint errors;
-- allocate without an explicit convenience API;
+- allocate or copy bytes;
 - compose multiple codecs internally.
 
-The preferred interaction is Sans-I/O buffer exchange: an adapter
-supplies input bytes and consumes pending output while the driver keeps
-cursors and lifecycle state. Storage remains caller-provided where
-practical, using `S: AsMut<[u8]>`.
+The rejected prototype owned both input and output buffers. Applying it
+to the existing frontends would have required a second scratch buffer,
+copied caller input, copied generated output, and public constructor
+changes. Those costs were not incidental implementation details; they
+conflicted with the endpoint ownership models. Directional cursor loops
+are therefore intentional rather than failed deduplication.
 
-Two storage models were considered:
-
-1. **Stable scratch buffers.** The driver owns caller-provided generic
-   buffer values which adapters fill and drain. Suspension across async
-   `Pending` and partial writes is straightforward.
-2. **Lent endpoint windows.** Adapters lend slices directly. This can
-   avoid copies, but lifetimes become harder, especially across async
-   suspension and wrapper calls.
-
-The prototype validates the stable-storage model. It retains all cursors
-across suspension without borrowing endpoint-owned memory. Direct-window
-paths remain possible later as optional optimizations, but correctness
-and the initial frontend rewrites will use stable caller-provided
-storage.
-
-The prototype also establishes error ordering. When a codec reports an
-error after writing bytes, the driver latches the error, exposes and
-drains those valid bytes first, then returns the error. Reported error
-progress is checked against the active windows; an overclaim becomes a
-contract violation. Unconsumed buffered input remains inspectable after
-an in-band end or failure.
+An async adapter will own whichever stable scratch its native trait
+requires across `Pending`, just as the synchronous reader and writer do.
+The lifecycle core itself does not need to retain endpoint borrows.
 
 ### I/O-domain adapters
 
 Each ecosystem retains its native traits. Do not define a new public
 universal `Read`/`Write`, `Source`/`Sink`, or async trait family.
 
-Adapters translate between a native endpoint and B:
-
-- satisfy `NeedInput`;
-- drain `HaveOutput`;
-- map endpoint and codec errors;
-- suspend or return according to the native trait contract.
+Adapters lend their current windows to B, acquire or drain their native
+endpoint, map errors, and suspend or return according to the native
+trait contract.
 
 This shares scheduling without pretending all domains have identical
 readiness or error semantics.
@@ -342,7 +306,7 @@ traits, or lifetime machinery which merely hides the same loops.
 Implemented in `core/src/transfer.rs` and reused by
 `stream_to_stream`/`Chain`.
 
-### Step 2 — prototype B privately — complete
+### Step 2 — prototype B privately — complete, then revised
 
 - Implement B over caller-provided buffers.
 - Define input submission, EOF declaration, output exposure and
@@ -350,21 +314,23 @@ Implemented in `core/src/transfer.rs` and reused by
 - Test suspension at every state boundary.
 - Make finish and no-progress behavior explicit and uniform.
 
-Implemented in `core/src/driver.rs`. Tests cover independent input and
-output suspension, partial output consumption, a zero-output process
-turn, multi-buffer finish, resumable flush, early stream end, one-byte
-storage, output-before-error delivery, and overclaimed error progress.
+The first prototype owned stable buffers and proved that lifecycle state
+could survive suspension. Step 3 showed that using it universally would
+add copies and buffers, so it was replaced by the bufferless directional
+core described above.
 
-The prototype is private and temporarily allowed as dead code until
-step 3 connects frontends to it.
-
-### Step 3 — rewrite current frontends over B
+### Step 3 — rewrite current frontends over B — complete
 
 - Make `stream_to_stream` an iterator frontend over B.
 - Rewrite `CodecReader`, `CodecWriter`, and `to_vec`.
 - Preserve native short-read/write, EOF, `WriteZero`, partial sink,
   flush, and error behavior.
 - Compare code size and clarity with A-only before committing to B.
+
+All four frontends now use `Driver<C>` without changing public APIs or
+buffer ownership. The migration removes more code than it adds and the
+approved `stream_to_stream` behavior remains covered by its existing
+tests.
 
 ### Step 4 — establish portability
 

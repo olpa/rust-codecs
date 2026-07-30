@@ -25,8 +25,9 @@
 //! [`CodecWriter`](super::CodecWriter), which drive the same `Codec`
 //! trait over `std::io::Read`/`Write` instead.
 
-use crate::transfer::{transfer, TransferEnd};
-use crate::{Codec, Drain};
+use crate::driver::{DrainEnd, Driver};
+use crate::transfer::TransferEnd;
+use crate::Codec;
 
 /// How much moved through [`stream_to_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +72,7 @@ pub enum CopyError<EI, EO> {
 /// sizes need no relation to the codec's internals.
 pub fn stream_to_stream<I, B, EI, O, S, EO, C>(
     input: I,
-    mut codec: C,
+    codec: C,
     mut output: O,
 ) -> Result<Totals, CopyError<EI, EO>>
 where
@@ -81,6 +82,7 @@ where
     S: AsMut<[u8]>,
     C: Codec,
 {
+    let mut driver = Driver::new(codec);
     // (slot, bytes written so far, slot length) — length is cached at
     // pull time since `S: AsMut` needs `&mut` to measure. Outlives the
     // phases below: a slot's remainder carries from one chunk to the
@@ -119,8 +121,7 @@ where
                 }
             };
             let out_buf = &mut slot.as_mut()[pos..len];
-            let moved =
-                transfer(&mut codec, &chunk[in_pos..], out_buf).map_err(CopyError::Codec)?;
+            let moved = driver.process(&chunk[in_pos..], out_buf).map_err(CopyError::Codec)?;
             totals.consumed += moved.consumed;
             totals.written += moved.written;
 
@@ -157,14 +158,10 @@ where
             Some((s, pos, len)) => &mut s.as_mut()[*pos..*len],
             None => &mut [],
         };
-        let out_len = out_buf.len();
-        match codec
-            .finish(out_buf)
-            .and_then(|d| d.validated(out_len))
-            .map_err(CopyError::Codec)?
-        {
-            Drain::OutputFilled => {
-                totals.written += out_len;
+        let moved = driver.finish(out_buf).map_err(CopyError::Codec)?;
+        totals.written += moved.written;
+        match moved.end {
+            DrainEnd::OutputExhausted => {
                 // More bytes are owed and this slot (if any) is spent
                 // — a fresh one is needed either way.
                 let mut slot = match output.next() {
@@ -178,10 +175,7 @@ where
                 }
                 cur_out = Some((slot, 0, len));
             }
-            Drain::Done { written } => {
-                totals.written += written;
-                return Ok(totals);
-            }
+            DrainEnd::Done => return Ok(totals),
         }
     }
 }

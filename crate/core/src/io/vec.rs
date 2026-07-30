@@ -1,7 +1,9 @@
 //! One-shot `Vec<u8>` helper over a caller-supplied [`Codec`](crate::Codec)
 //! instance.
 
-use crate::{Codec, Drain, Error, Outcome};
+use crate::driver::{DrainEnd, Driver};
+use crate::transfer::TransferEnd;
+use crate::{Codec, Error};
 
 const SCRATCH: usize = 64 * 1024;
 
@@ -11,7 +13,8 @@ const SCRATCH: usize = 64 * 1024;
 ///
 /// This grows the output `Vec` with **no upper bound**. Do not call it on
 /// untrusted input without an external size cap.
-pub fn to_vec<C: Codec>(mut codec: C, input: &[u8]) -> Result<Vec<u8>, Error> {
+pub fn to_vec<C: Codec>(codec: C, input: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut driver = Driver::new(codec);
     let mut out = Vec::with_capacity(input.len());
     let mut scratch = vec![0u8; SCRATCH];
 
@@ -20,22 +23,15 @@ pub fn to_vec<C: Codec>(mut codec: C, input: &[u8]) -> Result<Vec<u8>, Error> {
     // "slot".
     let mut in_pos = 0;
     while in_pos < input.len() {
-        match codec
-            .process(&input[in_pos..], &mut scratch)
-            .and_then(|o| o.validated(input.len() - in_pos, SCRATCH))?
-        {
-            Outcome::InputConsumed { written } => {
-                out.extend_from_slice(&scratch[..written]);
-                in_pos = input.len();
-            }
-            Outcome::OutputFilled { consumed } => {
-                out.extend_from_slice(&scratch[..]);
-                in_pos += consumed;
-            }
-            Outcome::StreamEnd { consumed: _, written } => {
+        let moved = driver.process(&input[in_pos..], &mut scratch)?;
+        in_pos += moved.consumed;
+        out.extend_from_slice(&scratch[..moved.written]);
+        match moved.end {
+            TransferEnd::InputExhausted => {}
+            TransferEnd::OutputExhausted => {}
+            TransferEnd::StreamEnd => {
                 // Trailing input past the in-band end is simply not
                 // this stream's to read.
-                out.extend_from_slice(&scratch[..written]);
                 return Ok(out);
             }
         }
@@ -43,12 +39,11 @@ pub fn to_vec<C: Codec>(mut codec: C, input: &[u8]) -> Result<Vec<u8>, Error> {
 
     // Phase 2: drain `finish`.
     loop {
-        match codec.finish(&mut scratch).and_then(|d| d.validated(SCRATCH))? {
-            Drain::OutputFilled => out.extend_from_slice(&scratch[..]),
-            Drain::Done { written } => {
-                out.extend_from_slice(&scratch[..written]);
-                return Ok(out);
-            }
+        let moved = driver.finish(&mut scratch)?;
+        out.extend_from_slice(&scratch[..moved.written]);
+        match moved.end {
+            DrainEnd::OutputExhausted => {}
+            DrainEnd::Done => return Ok(out),
         }
     }
 }

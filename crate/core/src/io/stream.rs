@@ -5,10 +5,11 @@
 //! - [`CodecWriter`]: wraps a `Write`; bytes written to it are
 //!   transformed on the fly before reaching the wrapped writer.
 //!
-//! Both drive the codec directly — under the
-//! fully-consume-or-fully-fill contract, each [`Outcome`] maps to
-//! exactly one adapter move, so no shared drive-loop machinery is
-//! needed. Both take a caller-provided scratch buffer
+//! Both share the bufferless codec lifecycle driver while retaining
+//! only their direction-specific cursor loop. The reader owns input
+//! scratch and writes directly into its caller's output; the writer
+//! reads directly from its caller and owns output scratch. Both take a
+//! caller-provided scratch buffer
 //! (`S: AsMut<[u8]>` — same convention as [`Chain`](crate::Chain))
 //! rather than allocating one internally: batching policy already has
 //! a canonical, composable expression in `BufReader`/`BufWriter`
@@ -17,7 +18,9 @@
 
 use std::io::{self, Read, Write};
 
-use crate::{Codec, Drain, Error, Outcome};
+use crate::driver::{DrainEnd, Driver};
+use crate::transfer::TransferEnd;
+use crate::{Codec, Error};
 
 fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
@@ -33,13 +36,11 @@ fn to_io_error(err: Error) -> io::Error {
 /// are lost.
 pub struct CodecReader<R, C: Codec, S> {
     inner: R,
-    codec: C,
+    driver: Driver<C>,
     inbuf: S,
     inpos: usize,
     inlen: usize,
     inner_eof: bool,
-    finishing: bool,
-    done: bool,
 }
 
 impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
@@ -54,13 +55,11 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         assert!(!inbuf.as_mut().is_empty(), "CodecReader buffer must be non-empty");
         Self {
             inner,
-            codec,
+            driver: Driver::new(codec),
             inbuf,
             inpos: 0,
             inlen: 0,
             inner_eof: false,
-            finishing: false,
-            done: false,
         }
     }
 
@@ -79,24 +78,8 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
         }
 
         loop {
-            if self.done {
+            if self.driver.is_done() {
                 return Ok(0);
-            }
-
-            if self.finishing {
-                let out_len = buf.len();
-                match self
-                    .codec
-                    .finish(buf)
-                    .and_then(|d| d.validated(out_len))
-                    .map_err(to_io_error)?
-                {
-                    Drain::OutputFilled => return Ok(out_len),
-                    Drain::Done { written } => {
-                        self.done = true;
-                        return Ok(written);
-                    }
-                }
             }
 
             if self.inpos == self.inlen && !self.inner_eof {
@@ -109,34 +92,20 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
 
             let input = &self.inbuf.as_mut()[self.inpos..self.inlen];
             if input.is_empty() {
-                // Inner EOF and nothing buffered: switch to `finish`
-                // on the next turn of the loop.
-                self.finishing = true;
-                continue;
+                let moved = self.driver.finish(buf).map_err(to_io_error)?;
+                return Ok(moved.written);
             }
-            let in_len = input.len();
-            let out_len = buf.len();
-            match self
-                .codec
-                .process(input, buf)
-                .and_then(|o| o.validated(in_len, out_len))
-                .map_err(to_io_error)?
-            {
-                Outcome::InputConsumed { written } => {
-                    self.inpos = self.inlen;
-                    if written > 0 {
-                        return Ok(written);
+            let moved = self.driver.process(input, buf).map_err(to_io_error)?;
+            self.inpos += moved.consumed;
+            match moved.end {
+                TransferEnd::InputExhausted => {
+                    if moved.written > 0 {
+                        return Ok(moved.written);
                     }
                     // Codec buffered internally — feed it more input.
                 }
-                Outcome::OutputFilled { consumed } => {
-                    self.inpos += consumed;
-                    return Ok(out_len);
-                }
-                Outcome::StreamEnd { consumed, written } => {
-                    self.inpos += consumed;
-                    self.done = true;
-                    return Ok(written);
+                TransferEnd::OutputExhausted | TransferEnd::StreamEnd => {
+                    return Ok(moved.written);
                 }
             }
         }
@@ -147,9 +116,8 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
 /// before being written to the wrapped writer.
 pub struct CodecWriter<W, C: Codec, S> {
     inner: W,
-    codec: C,
+    driver: Driver<C>,
     outbuf: S,
-    done: bool,
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
@@ -162,28 +130,17 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// `inner` to receive.
     pub fn new(inner: W, codec: C, mut outbuf: S) -> Self {
         assert!(!outbuf.as_mut().is_empty(), "CodecWriter buffer must be non-empty");
-        Self { inner, codec, outbuf, done: false }
+        Self { inner, driver: Driver::new(codec), outbuf }
     }
 
     /// Flush any bytes the codec was still holding, finalize the stream
     /// (trailer, checksum, padding — for a stateful codec), and hand back
     /// ownership of the wrapped writer.
     pub fn finish(mut self) -> io::Result<W> {
-        while !self.done {
+        while !self.driver.is_done() {
             let outbuf = self.outbuf.as_mut();
-            let out_len = outbuf.len();
-            match self
-                .codec
-                .finish(outbuf)
-                .and_then(|d| d.validated(out_len))
-                .map_err(to_io_error)?
-            {
-                Drain::OutputFilled => self.inner.write_all(&outbuf[..])?,
-                Drain::Done { written } => {
-                    self.inner.write_all(&outbuf[..written])?;
-                    self.done = true;
-                }
-            }
+            let moved = self.driver.finish(outbuf).map_err(to_io_error)?;
+            self.inner.write_all(&outbuf[..moved.written])?;
         }
         self.inner.flush()?;
         Ok(self.inner)
@@ -196,29 +153,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
         // Once the codec has ended its stream in-band, no more bytes
         // are accepted; returning the short (possibly zero) count lets
         // a `write_all` caller surface it as `WriteZero`.
-        while consumed < buf.len() && !self.done {
+        while consumed < buf.len() && !self.driver.is_done() {
             let outbuf = self.outbuf.as_mut();
-            let out_len = outbuf.len();
-            match self
-                .codec
+            let moved = self
+                .driver
                 .process(&buf[consumed..], outbuf)
-                .and_then(|o| o.validated(buf.len() - consumed, out_len))
-                .map_err(to_io_error)?
-            {
-                Outcome::InputConsumed { written } => {
-                    self.inner.write_all(&outbuf[..written])?;
-                    consumed = buf.len();
-                }
-                Outcome::OutputFilled { consumed: n } => {
-                    self.inner.write_all(&outbuf[..])?;
-                    consumed += n;
-                }
-                Outcome::StreamEnd { consumed: n, written } => {
-                    self.inner.write_all(&outbuf[..written])?;
-                    consumed += n;
-                    self.done = true;
-                }
-            }
+                .map_err(to_io_error)?;
+            self.inner.write_all(&outbuf[..moved.written])?;
+            consumed += moved.consumed;
         }
         Ok(consumed)
     }
@@ -226,18 +168,10 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn flush(&mut self) -> io::Result<()> {
         loop {
             let outbuf = self.outbuf.as_mut();
-            let out_len = outbuf.len();
-            match self
-                .codec
-                .flush(outbuf)
-                .and_then(|d| d.validated(out_len))
-                .map_err(to_io_error)?
-            {
-                Drain::OutputFilled => self.inner.write_all(&outbuf[..])?,
-                Drain::Done { written } => {
-                    self.inner.write_all(&outbuf[..written])?;
-                    break;
-                }
+            let moved = self.driver.flush(outbuf).map_err(to_io_error)?;
+            self.inner.write_all(&outbuf[..moved.written])?;
+            if moved.end == DrainEnd::Done {
+                break;
             }
         }
         self.inner.flush()
