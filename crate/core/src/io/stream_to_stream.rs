@@ -23,12 +23,10 @@
 //!
 //! This mirrors [`CodecReader`](super::CodecReader)/
 //! [`CodecWriter`](super::CodecWriter), which drive the same `Codec`
-//! trait over `std::io::Read`/`Write` instead. Every driver carries
-//! its own small drive loop — under the fully-consume-or-fully-fill
-//! contract each `Outcome` maps to exactly one driver move, so there
-//! is nothing left worth sharing.
+//! trait over `std::io::Read`/`Write` instead.
 
-use crate::{Codec, Drain, Outcome};
+use crate::transfer::{transfer, TransferEnd};
+use crate::{Codec, Drain};
 
 /// How much moved through [`stream_to_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,35 +119,29 @@ where
                 }
             };
             let out_buf = &mut slot.as_mut()[pos..len];
-            let out_len = out_buf.len();
-            match codec
-                .process(&chunk[in_pos..], out_buf)
-                .and_then(|o| o.validated(chunk.len() - in_pos, out_len))
-                .map_err(CopyError::Codec)?
-            {
-                Outcome::InputConsumed { written } => {
-                    if pos + written < len {
-                        cur_out = Some((slot, pos + written, len));
+            let moved =
+                transfer(&mut codec, &chunk[in_pos..], out_buf).map_err(CopyError::Codec)?;
+            totals.consumed += moved.consumed;
+            totals.written += moved.written;
+
+            match moved.end {
+                TransferEnd::InputExhausted => {
+                    if pos + moved.written < len {
+                        cur_out = Some((slot, pos + moved.written, len));
                     }
-                    totals.consumed += chunk.len() - in_pos;
-                    totals.written += written;
                     break;
                 }
-                Outcome::OutputFilled { consumed } => {
+                TransferEnd::OutputExhausted => {
                     // The slot is spent; dropping it (rather than
                     // putting it back) is what upholds the `cur_out`
                     // invariant.
-                    in_pos += consumed;
-                    totals.consumed += consumed;
-                    totals.written += out_len;
+                    in_pos += moved.consumed;
                 }
-                Outcome::StreamEnd { consumed, written } => {
+                TransferEnd::StreamEnd => {
                     // The stream ended in-band; input past its end (the
                     // rest of this chunk, and any unpulled chunks) is
                     // simply not this stream's to read — `totals.consumed`
                     // tells the caller where in the input that end is.
-                    totals.consumed += consumed;
-                    totals.written += written;
                     return Ok(totals);
                 }
             }

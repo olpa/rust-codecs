@@ -5,6 +5,7 @@
 //! `io` (or a client's own) gets chaining for free without knowing
 //! anything about it.
 
+use crate::transfer::{transfer, TransferEnd};
 use crate::{Codec, Drain, Error, Outcome};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
@@ -146,24 +147,22 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // invisible from outside a single call.
             if self.drained < self.filled {
                 let staging = self.staging.as_mut();
-                let outcome = self
-                    .second
-                    .process(&staging[self.drained..self.filled], &mut output[out_pos..])
-                    .and_then(|o| o.validated(self.filled - self.drained, output.len() - out_pos))
+                let moved = transfer(
+                    &mut self.second,
+                    &staging[self.drained..self.filled],
+                    &mut output[out_pos..],
+                )
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-                match outcome {
-                    Outcome::InputConsumed { written } => {
-                        self.drained = self.filled;
-                        out_pos += written;
+                self.drained += moved.consumed;
+                out_pos += moved.written;
+                match moved.end {
+                    TransferEnd::InputExhausted => {
                         continue;
                     }
-                    Outcome::OutputFilled { consumed } => {
-                        self.drained += consumed;
+                    TransferEnd::OutputExhausted => {
                         return Ok(Outcome::OutputFilled { consumed: in_pos });
                     }
-                    Outcome::StreamEnd { consumed, written } => {
-                        self.drained += consumed;
-                        out_pos += written;
+                    TransferEnd::StreamEnd => {
                         return Ok(Outcome::StreamEnd { consumed: in_pos, written: out_pos });
                     }
                 }
@@ -207,25 +206,16 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             }
 
             let staging = self.staging.as_mut();
-            let outcome = self
-                .first
-                .process(&input[in_pos..], &mut staging[self.filled..])
-                .and_then(|o| o.validated(input.len() - in_pos, staging.len() - self.filled))
+            let moved = transfer(
+                &mut self.first,
+                &input[in_pos..],
+                &mut staging[self.filled..],
+            )
                 .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-            match outcome {
-                Outcome::InputConsumed { written } => {
-                    in_pos = input.len();
-                    self.filled += written;
-                }
-                Outcome::OutputFilled { consumed } => {
-                    in_pos += consumed;
-                    self.filled = staging.len();
-                }
-                Outcome::StreamEnd { consumed, written } => {
-                    in_pos += consumed;
-                    self.filled += written;
-                    self.first_ended = true;
-                }
+            in_pos += moved.consumed;
+            self.filled += moved.written;
+            if moved.end == TransferEnd::StreamEnd {
+                self.first_ended = true;
             }
             // Loop around: drain what was just staged.
         }
@@ -245,24 +235,22 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // call that left the caller's output full) go first.
             if self.drained < self.filled {
                 let staging = self.staging.as_mut();
-                let outcome = self
-                    .second
-                    .process(&staging[self.drained..self.filled], &mut output[out_pos..])
-                    .and_then(|o| o.validated(self.filled - self.drained, output.len() - out_pos))
+                let moved = transfer(
+                    &mut self.second,
+                    &staging[self.drained..self.filled],
+                    &mut output[out_pos..],
+                )
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                match outcome {
-                    Outcome::InputConsumed { written } => {
-                        self.drained = self.filled;
-                        out_pos += written;
+                self.drained += moved.consumed;
+                out_pos += moved.written;
+                match moved.end {
+                    TransferEnd::InputExhausted => {
                         continue;
                     }
-                    Outcome::OutputFilled { consumed } => {
-                        self.drained += consumed;
+                    TransferEnd::OutputExhausted => {
                         return Ok(Drain::OutputFilled);
                     }
-                    Outcome::StreamEnd { consumed, written } => {
-                        self.drained += consumed;
-                        out_pos += written;
+                    TransferEnd::StreamEnd => {
                         return Ok(Drain::Done { written: out_pos });
                     }
                 }
@@ -316,27 +304,25 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // `process`.
             if self.drained < self.filled {
                 let staging = self.staging.as_mut();
-                let outcome = self
-                    .second
-                    .process(&staging[self.drained..self.filled], &mut output[out_pos..])
-                    .and_then(|o| o.validated(self.filled - self.drained, output.len() - out_pos))
+                let moved = transfer(
+                    &mut self.second,
+                    &staging[self.drained..self.filled],
+                    &mut output[out_pos..],
+                )
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                match outcome {
-                    Outcome::InputConsumed { written } => {
-                        self.drained = self.filled;
-                        out_pos += written;
+                self.drained += moved.consumed;
+                out_pos += moved.written;
+                match moved.end {
+                    TransferEnd::InputExhausted => {
                         continue;
                     }
-                    Outcome::OutputFilled { consumed } => {
-                        self.drained += consumed;
+                    TransferEnd::OutputExhausted => {
                         return Ok(Drain::OutputFilled);
                     }
-                    Outcome::StreamEnd { consumed, written } => {
+                    TransferEnd::StreamEnd => {
                         // `second` ended in-band mid-flush: nothing
                         // more can ever come out, so the flush is
                         // trivially complete.
-                        self.drained += consumed;
-                        out_pos += written;
                         return Ok(Drain::Done { written: out_pos });
                     }
                 }
