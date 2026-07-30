@@ -45,15 +45,22 @@ mod tests {
     use std::io::{Cursor, Read, Write};
 
     use super::rot13;
-    use crate::io::{to_vec, CodecReader, CodecWriter};
+    use crate::io::{drive, CodecReader, CodecWriter, VecInput, VecOutput};
+
+    fn collect(codec: impl crate::Codec, bytes: &[u8]) -> Vec<u8> {
+        let mut input = VecInput::new(bytes.to_vec());
+        let mut output = VecOutput::default();
+        drive(&mut input, codec, &mut output).unwrap();
+        output.into_inner()
+    }
 
     const INPUT: &[u8] = b"Hello, World! 123";
     const ROT13D: &[u8] = b"Uryyb, Jbeyq! 123";
 
     #[test]
-    fn to_vec_round_trip() {
-        assert_eq!(to_vec(rot13(), INPUT).unwrap(), ROT13D);
-        assert_eq!(to_vec(rot13(), ROT13D).unwrap(), INPUT);
+    fn vec_adapter_round_trip() {
+        assert_eq!(collect(rot13(), INPUT), ROT13D);
+        assert_eq!(collect(rot13(), ROT13D), INPUT);
     }
 
     #[test]

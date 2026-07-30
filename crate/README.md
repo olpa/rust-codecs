@@ -21,7 +21,7 @@ pub struct Error { /* kind + consumed/written progress */ }
 
 pub struct Carry<const N: usize>; // helper for atomic-output codecs
 
-pub mod io; // CodecReader, CodecWriter, to_vec, stream_to_stream
+pub mod io; // drive, stream adapters, CodecReader, CodecWriter
 ```
 
 Deliberately **not** exposed: any `Algorithm`-style pairing trait. A codec
@@ -94,16 +94,23 @@ be nested directly inside a wrapper of the other — bridging a
 read-then-write (or write-then-read) boundary needs an explicit
 `std::io::copy` through an intermediate buffer.
 
-## One-shot `Vec<u8>` helper
+## In-memory stream endpoints
 
 For a payload you already have fully in memory:
 
 ```rust
-use rust_codecs_core::io::to_vec;
+use rust_codecs_core::io::{drive, VecInput, VecOutput};
 // rot13_enc()/rot13_dec() come from a codec crate, as above.
 
-let encoded = to_vec(rot13_enc(), b"Hello, world!\n")?;
-let decoded = to_vec(rot13_dec(), &encoded)?;
+let mut input = VecInput::new(b"Hello, world!\n".to_vec());
+let mut encoded = VecOutput::default();
+drive(&mut input, rot13_enc(), &mut encoded)?;
+let encoded = encoded.into_inner();
+
+let mut input = VecInput::new(encoded);
+let mut decoded = VecOutput::default();
+drive(&mut input, rot13_dec(), &mut decoded)?;
+let decoded = decoded.into_inner();
 assert_eq!(decoded, b"Hello, world!\n");
 ```
 

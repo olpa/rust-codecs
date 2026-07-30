@@ -376,20 +376,31 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
-    use crate::io::{to_vec, CodecReader, CodecWriter};
+    use crate::io::{drive, CodecReader, CodecWriter, CopyError, VecInput, VecOutput};
     use crate::{Codec, Drain, Outcome};
 
     const INPUT: &[u8] = b"Hello, World! 123";
     const ENCODED: &[u8] = b"SGVsbG8sIFdvcmxkISAxMjM=";
 
-    #[test]
-    fn encode_to_vec() {
-        assert_eq!(to_vec(base64_enc(), INPUT).unwrap(), ENCODED);
+    fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
+        let mut input = VecInput::new(bytes.to_vec());
+        let mut output = VecOutput::default();
+        drive(&mut input, codec, &mut output)
+            .map_err(|error| match error {
+                CopyError::Codec(error) => error,
+                _ => unreachable!("infallible Vec adapter"),
+            })?;
+        Ok(output.into_inner())
     }
 
     #[test]
-    fn decode_to_vec() {
-        assert_eq!(to_vec(base64_dec(), ENCODED).unwrap(), INPUT);
+    fn encode_with_vec_adapters() {
+        assert_eq!(collect(base64_enc(), INPUT).unwrap(), ENCODED);
+    }
+
+    #[test]
+    fn decode_with_vec_adapters() {
+        assert_eq!(collect(base64_dec(), ENCODED).unwrap(), INPUT);
     }
 
     #[test]
@@ -459,9 +470,9 @@ mod tests {
 
     #[test]
     fn round_trip_small_input_chunks() {
-        let encoded = to_vec(base64_enc(), INPUT).unwrap();
+        let encoded = collect(base64_enc(), INPUT).unwrap();
         assert_eq!(encoded, ENCODED);
-        let decoded = to_vec(base64_dec(), &encoded).unwrap();
+        let decoded = collect(base64_dec(), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
     }
 
@@ -472,7 +483,7 @@ mod tests {
         // but STANDARD requires padding and must still reject a
         // stream cut off mid-symbol.
         let truncated = &ENCODED[..ENCODED.len() - 2];
-        assert!(to_vec(base64_dec(), truncated).is_err());
+        assert!(collect(base64_dec(), truncated).is_err());
     }
 
     #[test]
@@ -480,9 +491,9 @@ mod tests {
         // URL_SAFE_NO_PAD drops the trailing '=' that STANDARD adds,
         // proving with_engine actually swaps the engine rather than
         // silently falling back to STANDARD.
-        let encoded = to_vec(Base64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
+        let encoded = collect(Base64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
         assert_eq!(encoded, ENCODED.strip_suffix(b"=").unwrap());
-        let decoded = to_vec(Base64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
+        let decoded = collect(Base64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
     }
 
@@ -490,7 +501,7 @@ mod tests {
     fn decode_rejects_padding_before_end_in_one_call() {
         // "QQ==" ("A") followed by more encoded data is corrupt: padding
         // is only valid in the true last group of the stream.
-        assert!(to_vec(base64_dec(), b"QQ==QQ==").is_err());
+        assert!(collect(base64_dec(), b"QQ==QQ==").is_err());
     }
 
     #[test]

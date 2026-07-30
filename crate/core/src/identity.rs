@@ -35,13 +35,20 @@ mod tests {
     use std::io::{Cursor, Read, Write};
 
     use super::identity;
-    use crate::io::{to_vec, CodecReader, CodecWriter};
+    use crate::io::{drive, CodecReader, CodecWriter, VecInput, VecOutput};
+
+    fn collect(codec: impl crate::Codec, bytes: &[u8]) -> Vec<u8> {
+        let mut input = VecInput::new(bytes.to_vec());
+        let mut output = VecOutput::default();
+        drive(&mut input, codec, &mut output).unwrap();
+        output.into_inner()
+    }
 
     const INPUT: &[u8] = b"Hello, world!";
 
     #[test]
-    fn to_vec_round_trip() {
-        assert_eq!(to_vec(identity(), INPUT).unwrap(), INPUT);
+    fn vec_adapter_round_trip() {
+        assert_eq!(collect(identity(), INPUT), INPUT);
     }
 
     #[test]

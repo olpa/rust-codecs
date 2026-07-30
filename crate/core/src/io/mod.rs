@@ -4,8 +4,7 @@
 //!   the fly as the wrapped stream is used.
 //! - `embedded`: native `embedded_io::Read`/`Write` wrappers, enabled by
 //!   the `embedded-io` feature.
-//! - [`vec`]: run the transform once over an in-memory buffer and get a
-//!   `Vec<u8>` back.
+//! - [`VecInput`]/[`VecOutput`]: use owned vectors as stream endpoints.
 //! - [`stream_to_stream`]: drive a transform between two iterator-based
 //!   streams of byte buffers.
 //!
@@ -19,13 +18,21 @@ mod embedded;
 #[cfg(feature = "std")]
 mod stream;
 mod stream_to_stream;
-#[cfg(feature = "alloc")]
-mod vec;
+mod adapters;
+#[cfg(feature = "std")]
+mod std_adapters;
+#[cfg(feature = "embedded-io")]
+mod embedded_adapters;
 
 #[cfg(feature = "embedded-io")]
 pub use embedded::{EmbeddedCodecReader, EmbeddedCodecWriter, EmbeddedError};
 #[cfg(feature = "std")]
 pub use stream::{CodecReader, CodecWriter};
-pub use stream_to_stream::{stream_to_stream, CopyError, Totals};
+pub use stream_to_stream::{drive, stream_to_stream, CopyError, Input, Output, Totals};
+pub use adapters::{IteratorInput, IteratorOutput};
 #[cfg(feature = "alloc")]
-pub use vec::to_vec;
+pub use adapters::{VecInput, VecOutput};
+#[cfg(feature = "std")]
+pub use std_adapters::{StdInput, StdOutput};
+#[cfg(feature = "embedded-io")]
+pub use embedded_adapters::{EmbeddedInput, EmbeddedOutput};

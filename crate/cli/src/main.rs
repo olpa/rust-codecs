@@ -143,10 +143,17 @@ mod tests {
     use std::io::{Cursor, Write};
     use std::rc::Rc;
 
-    use rust_codecs_core::io::to_vec;
+    use rust_codecs_core::io::{drive, VecInput, VecOutput};
     use rust_codecs_core::rot13::rot13;
 
     use super::{compose, run_io};
+
+    fn collect(codec: impl rust_codecs_core::Codec, bytes: &[u8]) -> Vec<u8> {
+        let mut input = VecInput::new(bytes.to_vec());
+        let mut output = VecOutput::default();
+        drive(&mut input, codec, &mut output).unwrap();
+        output.into_inner()
+    }
 
     fn names(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
@@ -165,7 +172,7 @@ mod tests {
         let output =
             run_io(&reader_names, &writer_names, Cursor::new(input.to_vec()), Vec::new()).unwrap();
 
-        let expected = to_vec(rot13(), input).unwrap();
+        let expected = collect(rot13(), input);
         assert_eq!(output, expected);
     }
 
@@ -200,7 +207,7 @@ mod tests {
         writer.write_all(b"hi\n").unwrap();
         writer.flush().unwrap();
 
-        let expected = to_vec(rot13(), b"hi\n").unwrap();
+        let expected = collect(rot13(), b"hi\n");
         assert_eq!(sink.0.borrow().as_slice(), expected.as_slice());
     }
 }

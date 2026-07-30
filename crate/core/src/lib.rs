@@ -9,8 +9,8 @@
 //!   the stream.
 //! - [`Carry`]: helper for codecs with a minimum atomic output unit,
 //!   letting an emitted unit span output buffers.
-//! - [`io`]: stream adapters (`std::io::Read`/`Write`) and one-shot
-//!   `Vec<u8>` helpers built on top of [`Codec`].
+//! - [`io`]: adapters for driving codecs between iterator, `Vec`,
+//!   `std::io`, and `embedded_io` streams.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

@@ -385,11 +385,22 @@ mod tests {
     use super::Chain;
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
-    use crate::io::to_vec;
+    use crate::io::{drive, CopyError, VecInput, VecOutput};
     use crate::rot13::rot13;
     use crate::{Codec, Drain, Error, Outcome};
 
     const INPUT: &[u8] = b"Hello, World! 123";
+
+    fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut input = VecInput::new(bytes.to_vec());
+        let mut output = VecOutput::default();
+        drive(&mut input, codec, &mut output)
+            .map_err(|error| match error {
+                CopyError::Codec(error) => error,
+                _ => unreachable!("infallible Vec adapter"),
+            })?;
+        Ok(output.into_inner())
+    }
 
     /// A test-only codec that copies bytes 1:1, like `Identity`, but
     /// self-terminates: once `limit` bytes have been written, `process`
@@ -424,13 +435,13 @@ mod tests {
     #[test]
     fn rot13_then_rot13_is_identity() {
         let chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
-        assert_eq!(to_vec(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
     fn base64_enc_then_base64_dec_round_trip() {
         let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 64]);
-        assert_eq!(to_vec(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -438,7 +449,7 @@ mod tests {
         // A 1-byte staging buffer forces `first` and `second` to hand
         // off one byte at a time internally.
         let chain = Chain::new(rot13(), rot13(), vec![0u8; 1]);
-        assert_eq!(to_vec(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -447,7 +458,7 @@ mod tests {
         // through a 1-byte staging buffer — impossible before, when a
         // buffer below the atomic unit was a hard error.
         let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 1]);
-        assert_eq!(to_vec(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -483,7 +494,7 @@ mod tests {
         // with staging exactly drained (`drained == filled`, not
         // reset) — the next call's entry normalization is what makes
         // the following refill start at the top of the buffer.
-        let expected = to_vec(rot13(), &to_vec(base64_enc(), INPUT).unwrap()).unwrap();
+        let expected = collect(rot13(), &collect(base64_enc(), INPUT).unwrap()).unwrap();
         let mut chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]);
         let mut collected = Vec::new();
         let mut in_pos = 0;
@@ -518,11 +529,11 @@ mod tests {
     fn finish_drains_first_through_second() {
         // base64_enc's finish() emits the padding `=`; chained into
         // rot13, that padding must come out rot13'd too (not appended
-        // raw after Chain's own finish), so a plain to_vec round trip
+        // raw after Chain's own finish), so an adapter-driven round trip
         // against the independently-computed expected bytes covers it.
-        let expected = to_vec(rot13(), &to_vec(base64_enc(), INPUT).unwrap()).unwrap();
+        let expected = collect(rot13(), &collect(base64_enc(), INPUT).unwrap()).unwrap();
         let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
-        assert_eq!(to_vec(chain, INPUT).unwrap(), expected);
+        assert_eq!(collect(chain, INPUT).unwrap(), expected);
     }
 
     #[test]
@@ -531,7 +542,7 @@ mod tests {
         // that, stop feeding `first` the rest of the input, and still
         // finish cleanly through `second` (here, identity).
         let chain = Chain::new(EarlyEnd { limit: 3, done: 0 }, identity(), vec![0u8; 64]);
-        assert_eq!(to_vec(chain, b"Hello World").unwrap(), b"Hel");
+        assert_eq!(collect(chain, b"Hello World").unwrap(), b"Hel");
     }
 
     #[test]
@@ -553,7 +564,7 @@ mod tests {
         // so `process` itself drives `second.finish`: base64_enc holds
         // one leftover byte internally, and its padded trailer group
         // must arrive without the caller ever calling finish().
-        let expected = to_vec(base64_enc(), b"Hell").unwrap();
+        let expected = collect(base64_enc(), b"Hell").unwrap();
         let mut chain = Chain::new(EarlyEnd { limit: 4, done: 0 }, base64_enc(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(b"Hello World", &mut out).unwrap();
@@ -567,7 +578,7 @@ mod tests {
         let second: Box<dyn Codec> = Box::new(rot13());
         let chain: Chain<Box<dyn Codec>, Box<dyn Codec>, Vec<u8>> =
             Chain::new(first, second, vec![0u8; 64]);
-        assert_eq!(to_vec(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -575,7 +586,7 @@ mod tests {
         // rot13 ∘ rot13 ∘ identity == identity, stacked three deep.
         let inner = Chain::new(rot13(), identity(), vec![0u8; 32]);
         let outer = Chain::new(rot13(), inner, vec![0u8; 32]);
-        assert_eq!(to_vec(outer, INPUT).unwrap(), INPUT);
+        assert_eq!(collect(outer, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -625,7 +636,7 @@ mod tests {
         // `first` withholds everything until flushed; `Chain::flush`
         // must pull it out *through* `second`, so the bytes arrive
         // transformed — and the stream stays open for more input.
-        let expected = to_vec(rot13(), INPUT).unwrap();
+        let expected = collect(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, &mut out).unwrap();
@@ -639,7 +650,7 @@ mod tests {
     fn flush_drains_a_hoarding_second() {
         // `second` withholds; `Chain::flush` must invoke `second`'s
         // own flush after `first`'s.
-        let expected = to_vec(rot13(), INPUT).unwrap();
+        let expected = collect(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, &mut out).unwrap();
@@ -659,7 +670,7 @@ mod tests {
         let mut big = [0u8; 64];
         chain.process(INPUT, &mut big).unwrap();
 
-        let expected = to_vec(rot13(), INPUT).unwrap();
+        let expected = collect(rot13(), INPUT).unwrap();
         let mut collected = Vec::new();
         loop {
             let mut out = [0u8; 1];
@@ -675,7 +686,7 @@ mod tests {
 
         // Second round: new input after a completed flush.
         chain.process(b"abc", &mut big).unwrap();
-        let expected2 = to_vec(rot13(), b"abc").unwrap();
+        let expected2 = collect(rot13(), b"abc").unwrap();
         let drain = chain.flush(&mut big).unwrap();
         assert_eq!(drain, Drain::Done { written: expected2.len() });
         assert_eq!(&big[..expected2.len()], expected2.as_slice());
@@ -701,7 +712,7 @@ mod tests {
         // (panicking on a later slice at best). The trust-boundary
         // validation turns it into a ContractViolation error.
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
-        let result = to_vec(chain, INPUT);
+        let result = collect(chain, INPUT);
         assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ContractViolation);
     }
 }

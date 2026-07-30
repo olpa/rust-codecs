@@ -29,6 +29,33 @@ use crate::driver::{DrainEnd, Driver};
 use crate::transfer::TransferEnd;
 use crate::Codec;
 
+/// A byte source which lends its current input chunk to the driver.
+pub trait Input {
+    type Error;
+
+    /// Return the current non-empty chunk, or `None` at end of input.
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
+
+    /// Release the first `amount` bytes of the current chunk.
+    fn consume(&mut self, amount: usize);
+}
+
+/// A byte destination which lends writable space to the driver.
+pub trait Output {
+    type Error;
+
+    /// Return writable space, or `None` when the destination is full.
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
+
+    /// Commit the first `amount` bytes of the space returned by `spare`.
+    fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
+
+    /// Complete the destination after the codec stream has ended.
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 /// How much moved through [`stream_to_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Totals {
@@ -62,6 +89,75 @@ pub enum CopyError<EI, EO> {
     EmptySlot,
 }
 
+/// Drive one codec between any pair of lending stream adapters.
+///
+/// This is the canonical transfer loop. Adapters for iterators, `Vec`,
+/// `std::io`, and `embedded_io` differ only in how they acquire a chunk
+/// or commit an output prefix.
+pub fn drive<I, O, C>(
+    input: &mut I,
+    codec: C,
+    output: &mut O,
+) -> Result<Totals, CopyError<I::Error, O::Error>>
+where
+    I: Input,
+    O: Output,
+    C: Codec,
+{
+    let mut driver = Driver::new(codec);
+    let mut totals = Totals { consumed: 0, written: 0 };
+
+    loop {
+        let moved = {
+            let Some(chunk) = input.chunk().map_err(CopyError::Input)? else {
+                break;
+            };
+            let spare = output
+                .spare()
+                .map_err(CopyError::Output)?
+                .ok_or(CopyError::OutputExhausted)?;
+            if spare.is_empty() {
+                return Err(CopyError::EmptySlot);
+            }
+            driver.process(chunk, spare).map_err(CopyError::Codec)?
+        };
+        input.consume(moved.consumed);
+        output.commit(moved.written).map_err(CopyError::Output)?;
+        totals.consumed += moved.consumed;
+        totals.written += moved.written;
+
+        if moved.end == TransferEnd::StreamEnd {
+            output.finish().map_err(CopyError::Output)?;
+            return Ok(totals);
+        }
+    }
+
+    let moved = driver.finish(&mut []).map_err(CopyError::Codec)?;
+    if moved.end == DrainEnd::Done {
+        output.finish().map_err(CopyError::Output)?;
+        return Ok(totals);
+    }
+
+    loop {
+        let moved = {
+            let spare = output
+                .spare()
+                .map_err(CopyError::Output)?
+                .ok_or(CopyError::OutputExhausted)?;
+            if spare.is_empty() {
+                return Err(CopyError::EmptySlot);
+            }
+            driver.finish(spare).map_err(CopyError::Codec)?
+        };
+        output.commit(moved.written).map_err(CopyError::Output)?;
+        totals.written += moved.written;
+        if moved.end == DrainEnd::Done {
+            output.finish().map_err(CopyError::Output)?;
+            return Ok(totals);
+        }
+    }
+}
+
 /// Run `codec` over `input` (an iterator of ready-made input chunks),
 /// writing the transformed bytes into `output` (an iterator of
 /// caller-provided buffer slots to fill).
@@ -73,7 +169,7 @@ pub enum CopyError<EI, EO> {
 pub fn stream_to_stream<I, B, EI, O, S, EO, C>(
     input: I,
     codec: C,
-    mut output: O,
+    output: O,
 ) -> Result<Totals, CopyError<EI, EO>>
 where
     I: Iterator<Item = Result<B, EI>>,
@@ -82,102 +178,9 @@ where
     S: AsMut<[u8]>,
     C: Codec,
 {
-    let mut driver = Driver::new(codec);
-    // (slot, bytes written so far, slot length) — length is cached at
-    // pull time since `S: AsMut` needs `&mut` to measure. Outlives the
-    // phases below: a slot's remainder carries from one chunk to the
-    // next, and from the last chunk into `finish`. Invariant: `Some`
-    // always has writable remainder — an exhausted slot is dropped on
-    // the spot, never carried.
-    let mut cur_out: Option<(S, usize, usize)> = None;
-    let mut totals = Totals { consumed: 0, written: 0 };
-
-    // Phase 1: pump input chunks through `process`. Each chunk is an
-    // immutable local of the outer loop; only the position within it
-    // advances. An empty chunk falls straight through the inner loop.
-    for item in input {
-        let chunk = item.map_err(CopyError::Input)?;
-        let chunk: &[u8] = chunk.as_ref();
-        let mut in_pos = 0;
-        while in_pos < chunk.len() {
-            // Take the carried slot, or pull a fresh one — inside this
-            // iteration the slot is a plain (slot, position, length),
-            // no Option. A slot with zero capacity is a caller bug — a
-            // pool that can't guarantee non-empty slots must filter
-            // them out itself.
-            let (mut slot, pos, len) = match cur_out.take() {
-                Some(t) => t,
-                None => {
-                    let mut slot = match output.next() {
-                        Some(Ok(s)) => s,
-                        Some(Err(e)) => return Err(CopyError::Output(e)),
-                        None => return Err(CopyError::OutputExhausted),
-                    };
-                    let len = slot.as_mut().len();
-                    if len == 0 {
-                        return Err(CopyError::EmptySlot);
-                    }
-                    (slot, 0, len)
-                }
-            };
-            let out_buf = &mut slot.as_mut()[pos..len];
-            let moved = driver.process(&chunk[in_pos..], out_buf).map_err(CopyError::Codec)?;
-            totals.consumed += moved.consumed;
-            totals.written += moved.written;
-
-            match moved.end {
-                TransferEnd::InputExhausted => {
-                    if pos + moved.written < len {
-                        cur_out = Some((slot, pos + moved.written, len));
-                    }
-                    break;
-                }
-                TransferEnd::OutputExhausted => {
-                    // The slot is spent; dropping it (rather than
-                    // putting it back) is what upholds the `cur_out`
-                    // invariant.
-                    in_pos += moved.consumed;
-                }
-                TransferEnd::StreamEnd => {
-                    // The stream ended in-band; input past its end (the
-                    // rest of this chunk, and any unpulled chunks) is
-                    // simply not this stream's to read — `totals.consumed`
-                    // tells the caller where in the input that end is.
-                    return Ok(totals);
-                }
-            }
-        }
-    }
-
-    // Phase 2: no more input — drain `finish`. Called even with no
-    // slot at all (the empty buffer): `Done` vs `OutputFilled` on an
-    // empty buffer is exactly how a codec that owes nothing finishes
-    // without claiming a slot it has no use for.
-    loop {
-        let out_buf: &mut [u8] = match &mut cur_out {
-            Some((s, pos, len)) => &mut s.as_mut()[*pos..*len],
-            None => &mut [],
-        };
-        let moved = driver.finish(out_buf).map_err(CopyError::Codec)?;
-        totals.written += moved.written;
-        match moved.end {
-            DrainEnd::OutputExhausted => {
-                // More bytes are owed and this slot (if any) is spent
-                // — a fresh one is needed either way.
-                let mut slot = match output.next() {
-                    Some(Ok(s)) => s,
-                    Some(Err(e)) => return Err(CopyError::Output(e)),
-                    None => return Err(CopyError::OutputExhausted),
-                };
-                let len = slot.as_mut().len();
-                if len == 0 {
-                    return Err(CopyError::EmptySlot);
-                }
-                cur_out = Some((slot, 0, len));
-            }
-            DrainEnd::Done => return Ok(totals),
-        }
-    }
+    let mut input = super::adapters::IteratorInput::new(input);
+    let mut output = super::adapters::IteratorOutput::new(output);
+    drive(&mut input, codec, &mut output)
 }
 
 #[cfg(all(
@@ -194,11 +197,18 @@ mod tests {
     use super::{stream_to_stream, CopyError};
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
-    use crate::io::to_vec;
+    use crate::io::{drive, VecInput, VecOutput};
     use crate::rot13::rot13;
     use crate::{Codec, Drain, Error, Outcome};
 
     const INPUT: &[u8] = b"Hello, World! 123";
+
+    fn collect(codec: impl Codec, bytes: &[u8]) -> Vec<u8> {
+        let mut input = VecInput::new(bytes.to_vec());
+        let mut output = VecOutput::default();
+        drive(&mut input, codec, &mut output).unwrap();
+        output.into_inner()
+    }
 
     /// `n`-byte buffer slots for the output iterator to hand out, each
     /// zero-initialized so leftover bytes beyond what's written are
@@ -248,7 +258,7 @@ mod tests {
 
     #[test]
     fn basic_round_trip() {
-        let expected = to_vec(rot13(), INPUT).unwrap();
+        let expected = collect(rot13(), INPUT);
         let mut out = slots(4, 8);
         let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
@@ -265,7 +275,7 @@ mod tests {
         // 1-byte slots force stream_to_stream to advance to the next
         // slot after every single byte written, mirroring
         // `reader_with_small_output_buffer` in rot13.rs.
-        let expected = to_vec(rot13(), INPUT).unwrap();
+        let expected = collect(rot13(), INPUT);
         let mut out = slots(expected.len(), 1);
         let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 4),
@@ -281,7 +291,7 @@ mod tests {
         // 1-byte input chunks feeding into a single large output slot,
         // exercising repeated `process` calls accumulating into one
         // slot before it's exhausted.
-        let expected = to_vec(rot13(), INPUT).unwrap();
+        let expected = collect(rot13(), INPUT);
         let mut out = slots(1, 64);
         let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 1),
@@ -401,7 +411,7 @@ mod tests {
         // Truncated padded base64 input: `Base64Dec::finish` errors
         // rather than completing (see
         // `decode_truncated_padded_stream_errors` in base64.rs).
-        let encoded = to_vec(base64_enc(), INPUT).unwrap();
+        let encoded = collect(base64_enc(), INPUT);
         let truncated = &encoded[..encoded.len() - 2];
         let mut out = slots(4, 8);
         let result = stream_to_stream::<_, _, (), _, _, _, _>(
@@ -417,7 +427,7 @@ mod tests {
         // 10-byte slots against base64's 4-byte encoded groups: the
         // codec's carry lets a group span slot boundaries, so every
         // slot is filled completely and the split is invisible.
-        let expected = to_vec(base64_enc(), INPUT).unwrap();
+        let expected = collect(base64_enc(), INPUT);
         assert_eq!(expected.len(), 24);
         let mut out = slots(3, 10);
         let totals = stream_to_stream::<_, _, (), _, _, _, _>(
@@ -438,7 +448,7 @@ mod tests {
         // 1-byte slots are below the codec's atomic unit; the carry
         // dribbles each group out byte by byte. This exact case was a
         // hard error before the fully-consume-or-fully-fill contract.
-        let expected = to_vec(base64_enc(), INPUT).unwrap();
+        let expected = collect(base64_enc(), INPUT);
         let mut out = slots(expected.len(), 1);
         let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
@@ -459,7 +469,7 @@ mod tests {
         // emit, as one final 4-byte padded group. The first slot has
         // room for 22, so the final group is split 2/2 across the slot
         // boundary mid-finish.
-        let expected = to_vec(base64_enc(), INPUT).unwrap();
+        let expected = collect(base64_enc(), INPUT);
         let mut out = slots(2, 22);
         let totals = stream_to_stream::<_, _, (), _, _, _, _>(
             ok_chunks(INPUT, 5),
