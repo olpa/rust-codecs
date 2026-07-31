@@ -1,7 +1,6 @@
 //! The shared driver for lending input and output stream adapters.
 
-use crate::driver::{DrainEnd, Driver};
-use crate::transfer::TransferEnd;
+use crate::driver::{DrainEnd, Driver, PumpEnd};
 use crate::Codec;
 
 /// A byte source which lends its current input chunk to the driver.
@@ -62,53 +61,31 @@ where
     let mut driver = Driver::new(codec);
     let mut totals = Totals { consumed: 0, written: 0 };
 
-    loop {
-        let moved = {
-            let Some(chunk) = input.chunk().map_err(CopyError::Input)? else {
-                break;
-            };
-            let spare = output
-                .spare()
-                .map_err(CopyError::Output)?
-                .ok_or(CopyError::OutputExhausted)?;
-            if spare.is_empty() {
-                return Err(CopyError::EmptySlot);
-            }
-            driver.process(chunk, spare).map_err(CopyError::Codec)?
-        };
-        input.consume(moved.consumed);
-        output.commit(moved.written).map_err(CopyError::Output)?;
-        totals.consumed += moved.consumed;
-        totals.written += moved.written;
-
-        if moved.end == TransferEnd::StreamEnd {
+    let moved = driver.transfer_from(input, output)?;
+    totals.consumed += moved.consumed;
+    totals.written += moved.written;
+    match moved.end {
+        PumpEnd::StreamEnd => {
             output.finish().map_err(CopyError::Output)?;
             return Ok(totals);
         }
+        PumpEnd::OutputExhausted => return Err(CopyError::OutputExhausted),
+        PumpEnd::InputExhausted => {}
     }
 
-    let moved = driver.finish(&mut []).map_err(CopyError::Codec)?;
-    if moved.end == DrainEnd::Done {
-        output.finish().map_err(CopyError::Output)?;
-        return Ok(totals);
-    }
-
-    loop {
-        let moved = {
-            let spare = output
-                .spare()
-                .map_err(CopyError::Output)?
-                .ok_or(CopyError::OutputExhausted)?;
-            if spare.is_empty() {
-                return Err(CopyError::EmptySlot);
-            }
-            driver.finish(spare).map_err(CopyError::Codec)?
-        };
-        output.commit(moved.written).map_err(CopyError::Output)?;
-        totals.written += moved.written;
-        if moved.end == DrainEnd::Done {
+    let drained = driver.finish_to(output).map_err(|error| match error {
+        CopyError::Input(never) => match never {},
+        CopyError::Output(error) => CopyError::Output(error),
+        CopyError::Codec(error) => CopyError::Codec(error),
+        CopyError::OutputExhausted => CopyError::OutputExhausted,
+        CopyError::EmptySlot => CopyError::EmptySlot,
+    })?;
+    totals.written += drained.written;
+    match drained.end {
+        DrainEnd::Done => {
             output.finish().map_err(CopyError::Output)?;
-            return Ok(totals);
+            Ok(totals)
         }
+        DrainEnd::OutputExhausted => Err(CopyError::OutputExhausted),
     }
 }

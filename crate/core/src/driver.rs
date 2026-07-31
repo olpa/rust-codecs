@@ -6,6 +6,7 @@
 //! lifecycle, so using it never introduces a byte copy.
 
 use crate::transfer::{transfer, Transfer};
+use crate::io::{CopyError, Input, Output};
 use crate::{Codec, Drain, Error};
 
 /// Exact progress and boundary of one validated `finish` or `flush`
@@ -20,6 +21,26 @@ pub(crate) struct DrainTransfer {
 pub(crate) enum DrainEnd {
     OutputExhausted,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PumpTransfer {
+    pub(crate) consumed: usize,
+    pub(crate) written: usize,
+    pub(crate) end: PumpEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PumpEnd {
+    InputExhausted,
+    OutputExhausted,
+    StreamEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PumpDrain {
+    pub(crate) written: usize,
+    pub(crate) end: DrainEnd,
 }
 
 /// A bufferless lifecycle wrapper around a codec.
@@ -51,6 +72,121 @@ impl<C: Codec> Driver<C> {
             self.done = true;
         }
         Ok(moved)
+    }
+
+    pub(crate) fn transfer_from<I: Input, O: Output>(
+        &mut self,
+        input: &mut I,
+        output: &mut O,
+    ) -> Result<PumpTransfer, CopyError<I::Error, O::Error>> {
+        let mut consumed = 0;
+        let mut written = 0;
+        let mut output_first = false;
+        loop {
+            let (moved, offered) = if output_first {
+                let Some(spare) = output.spare().map_err(CopyError::Output)? else {
+                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::OutputExhausted });
+                };
+                if spare.is_empty() {
+                    return Err(CopyError::EmptySlot);
+                }
+                let offered = spare.len();
+                let Some(chunk) = input.chunk().map_err(CopyError::Input)? else {
+                    output.commit(0).map_err(CopyError::Output)?;
+                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::InputExhausted });
+                };
+                let moved = match self.process(chunk, spare) {
+                    Ok(moved) => moved,
+                    Err(error) => {
+                        output.commit(0).map_err(CopyError::Output)?;
+                        return Err(CopyError::Codec(error));
+                    }
+                };
+                (moved, offered)
+            } else {
+                let Some(chunk) = input.chunk().map_err(CopyError::Input)? else {
+                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::InputExhausted });
+                };
+                let Some(spare) = output.spare().map_err(CopyError::Output)? else {
+                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::OutputExhausted });
+                };
+                if spare.is_empty() {
+                    return Err(CopyError::EmptySlot);
+                }
+                let offered = spare.len();
+                let moved = match self.process(chunk, spare) {
+                    Ok(moved) => moved,
+                    Err(error) => {
+                        output.commit(0).map_err(CopyError::Output)?;
+                        return Err(CopyError::Codec(error));
+                    }
+                };
+                (moved, offered)
+            };
+            input.consume(moved.consumed);
+            output.commit(moved.written).map_err(CopyError::Output)?;
+            consumed += moved.consumed;
+            written += moved.written;
+            if moved.end == crate::transfer::TransferEnd::StreamEnd {
+                return Ok(PumpTransfer { consumed, written, end: PumpEnd::StreamEnd });
+            }
+            output_first = moved.written == offered;
+        }
+    }
+
+    pub(crate) fn finish_to<O: Output>(
+        &mut self,
+        output: &mut O,
+    ) -> Result<PumpDrain, CopyError<core::convert::Infallible, O::Error>> {
+        self.drain_to(output, true)
+    }
+
+    #[cfg_attr(not(any(feature = "std", feature = "embedded-io")), allow(dead_code))]
+    pub(crate) fn flush_to<O: Output>(
+        &mut self,
+        output: &mut O,
+    ) -> Result<PumpDrain, CopyError<core::convert::Infallible, O::Error>> {
+        self.drain_to(output, false)
+    }
+
+    fn drain_to<O: Output>(
+        &mut self,
+        output: &mut O,
+        finishing: bool,
+    ) -> Result<PumpDrain, CopyError<core::convert::Infallible, O::Error>> {
+        let mut written = 0;
+        loop {
+            let moved = match output.spare().map_err(CopyError::Output)? {
+                Some(spare) => {
+                    if spare.is_empty() {
+                        return Err(CopyError::EmptySlot);
+                    }
+                    let result = if finishing { self.finish(spare) } else { self.flush(spare) };
+                    match result {
+                        Ok(moved) => Ok(moved),
+                        Err(error) => {
+                            output.commit(0).map_err(CopyError::Output)?;
+                            return Err(CopyError::Codec(error));
+                        }
+                    }
+                }
+                None => {
+                    let moved = if finishing { self.finish(&mut []) } else { self.flush(&mut []) }
+                        .map_err(CopyError::Codec)?;
+                    return Ok(PumpDrain { written, end: if moved.end == DrainEnd::Done {
+                        DrainEnd::Done
+                    } else {
+                        DrainEnd::OutputExhausted
+                    }});
+                }
+            }
+            .map_err(CopyError::Codec)?;
+            output.commit(moved.written).map_err(CopyError::Output)?;
+            written += moved.written;
+            if moved.end == DrainEnd::Done {
+                return Ok(PumpDrain { written, end: DrainEnd::Done });
+            }
+        }
     }
 
     pub(crate) fn finish(&mut self, output: &mut [u8]) -> Result<DrainTransfer, Error> {

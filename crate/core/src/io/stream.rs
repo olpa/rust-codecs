@@ -5,8 +5,8 @@
 //! - [`CodecWriter`]: wraps a `Write`; bytes written to it are
 //!   transformed on the fly before reaching the wrapped writer.
 //!
-//! Both share the bufferless codec lifecycle driver while retaining
-//! only their direction-specific cursor loop. The reader owns input
+//! Both use the same adapter-pumping loops as `stream_to_stream`; they
+//! retain only the lifecycle policy imposed by `Read` or `Write`. The reader owns input
 //! scratch and writes directly into its caller's output; the writer
 //! reads directly from its caller and owns output scratch. Both take a
 //! caller-provided scratch buffer
@@ -18,12 +18,47 @@
 
 use std::io::{self, Read, Write};
 
-use crate::driver::{DrainEnd, Driver};
-use crate::transfer::TransferEnd;
+use core::convert::Infallible;
+
+use crate::driver::{Driver, PumpEnd};
+use crate::io::slice_adapters::{SliceInput, SliceOutput};
+use crate::io::{CopyError, Output, StdInput, StdOutput};
 use crate::{Codec, Error};
 
 fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
+}
+
+fn reader_error(err: CopyError<io::Error, Infallible>) -> io::Error {
+    match err {
+        CopyError::Input(error) => error,
+        CopyError::Output(never) => match never {},
+        CopyError::Codec(error) => to_io_error(error),
+        CopyError::OutputExhausted | CopyError::EmptySlot => {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
+        }
+    }
+}
+
+fn writer_error(err: CopyError<Infallible, io::Error>) -> io::Error {
+    match err {
+        CopyError::Input(never) => match never {},
+        CopyError::Output(error) => error,
+        CopyError::Codec(error) => to_io_error(error),
+        CopyError::OutputExhausted | CopyError::EmptySlot => {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid std output adapter")
+        }
+    }
+}
+
+fn slice_error(err: CopyError<Infallible, Infallible>) -> io::Error {
+    match err {
+        CopyError::Input(never) | CopyError::Output(never) => match never {},
+        CopyError::Codec(error) => to_io_error(error),
+        CopyError::OutputExhausted | CopyError::EmptySlot => {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
+        }
+    }
 }
 
 /// Wraps a `Read`, running `C` over the bytes as they're pulled through.
@@ -35,12 +70,8 @@ fn to_io_error(err: Error) -> io::Error {
 /// does, trailing input bytes already pulled from the wrapped reader
 /// are lost.
 pub struct CodecReader<R, C: Codec, S> {
-    inner: R,
+    input: StdInput<R, S>,
     driver: Driver<C>,
-    inbuf: S,
-    inpos: usize,
-    inlen: usize,
-    inner_eof: bool,
 }
 
 impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
@@ -51,23 +82,15 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Panics on an empty `inbuf`: it could never hold a byte read
     /// from `inner`, so the codec could never see any input — a caller
     /// bug, not a runtime condition.
-    pub fn new(inner: R, codec: C, mut inbuf: S) -> Self {
-        assert!(!inbuf.as_mut().is_empty(), "CodecReader buffer must be non-empty");
-        Self {
-            inner,
-            driver: Driver::new(codec),
-            inbuf,
-            inpos: 0,
-            inlen: 0,
-            inner_eof: false,
-        }
+    pub fn new(inner: R, codec: C, inbuf: S) -> Self {
+        Self { input: StdInput::new(inner, inbuf), driver: Driver::new(codec) }
     }
 
     /// Unwrap this reader, discarding the codec, and return the wrapped
     /// reader. Any bytes already pulled from it but not yet yielded to
     /// the caller are lost.
     pub fn into_inner(self) -> R {
-        self.inner
+        self.input.into_inner()
     }
 }
 
@@ -77,47 +100,23 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
             return Ok(0);
         }
 
-        loop {
-            if self.driver.is_done() {
-                return Ok(0);
-            }
-
-            if self.inpos == self.inlen && !self.inner_eof {
-                self.inlen = self.inner.read(self.inbuf.as_mut())?;
-                self.inpos = 0;
-                if self.inlen == 0 {
-                    self.inner_eof = true;
-                }
-            }
-
-            let input = &self.inbuf.as_mut()[self.inpos..self.inlen];
-            if input.is_empty() {
-                let moved = self.driver.finish(buf).map_err(to_io_error)?;
-                return Ok(moved.written);
-            }
-            let moved = self.driver.process(input, buf).map_err(to_io_error)?;
-            self.inpos += moved.consumed;
-            match moved.end {
-                TransferEnd::InputExhausted => {
-                    if moved.written > 0 {
-                        return Ok(moved.written);
-                    }
-                    // Codec buffered internally — feed it more input.
-                }
-                TransferEnd::OutputExhausted | TransferEnd::StreamEnd => {
-                    return Ok(moved.written);
-                }
-            }
+        if self.driver.is_done() {
+            return Ok(0);
         }
+        let mut output = SliceOutput::new(buf);
+        let moved = self.driver.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
+        if moved.end == PumpEnd::InputExhausted {
+            self.driver.finish_to(&mut output).map_err(slice_error)?;
+        }
+        Ok(output.written())
     }
 }
 
 /// Wraps a `Write`; bytes written to this adapter are run through `C`
 /// before being written to the wrapped writer.
 pub struct CodecWriter<W, C: Codec, S> {
-    inner: W,
+    output: StdOutput<W, S>,
     driver: Driver<C>,
-    outbuf: S,
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
@@ -128,53 +127,30 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// Panics on an empty `outbuf`, for the same reason
     /// [`CodecReader::new`] does: it could never hold a byte for
     /// `inner` to receive.
-    pub fn new(inner: W, codec: C, mut outbuf: S) -> Self {
-        assert!(!outbuf.as_mut().is_empty(), "CodecWriter buffer must be non-empty");
-        Self { inner, driver: Driver::new(codec), outbuf }
+    pub fn new(inner: W, codec: C, outbuf: S) -> Self {
+        Self { output: StdOutput::new(inner, outbuf), driver: Driver::new(codec) }
     }
 
     /// Flush any bytes the codec was still holding, finalize the stream
     /// (trailer, checksum, padding — for a stateful codec), and hand back
     /// ownership of the wrapped writer.
     pub fn finish(mut self) -> io::Result<W> {
-        while !self.driver.is_done() {
-            let outbuf = self.outbuf.as_mut();
-            let moved = self.driver.finish(outbuf).map_err(to_io_error)?;
-            self.inner.write_all(&outbuf[..moved.written])?;
-        }
-        self.inner.flush()?;
-        Ok(self.inner)
+        self.driver.finish_to(&mut self.output).map_err(writer_error)?;
+        self.output.finish()?;
+        Ok(self.output.into_inner())
     }
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut consumed = 0usize;
-        // Once the codec has ended its stream in-band, no more bytes
-        // are accepted; returning the short (possibly zero) count lets
-        // a `write_all` caller surface it as `WriteZero`.
-        while consumed < buf.len() && !self.driver.is_done() {
-            let outbuf = self.outbuf.as_mut();
-            let moved = self
-                .driver
-                .process(&buf[consumed..], outbuf)
-                .map_err(to_io_error)?;
-            self.inner.write_all(&outbuf[..moved.written])?;
-            consumed += moved.consumed;
-        }
-        Ok(consumed)
+        let mut input = SliceInput::new(buf);
+        self.driver.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
+        Ok(input.consumed())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        loop {
-            let outbuf = self.outbuf.as_mut();
-            let moved = self.driver.flush(outbuf).map_err(to_io_error)?;
-            self.inner.write_all(&outbuf[..moved.written])?;
-            if moved.end == DrainEnd::Done {
-                break;
-            }
-        }
-        self.inner.flush()
+        self.driver.flush_to(&mut self.output).map_err(writer_error)?;
+        self.output.finish()
     }
 }
 
@@ -185,6 +161,22 @@ mod tests {
     use super::{CodecReader, CodecWriter};
     use crate::rot13::rot13;
     use crate::{Codec, Drain, Error, Outcome};
+
+    struct CountingReader {
+        bytes: &'static [u8],
+        pos: usize,
+        reads: usize,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            let n = buf.len().min(self.bytes.len() - self.pos);
+            buf[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
 
     #[test]
     #[should_panic(expected = "buffer must be non-empty")]
@@ -237,5 +229,14 @@ mod tests {
         assert_eq!(out, b"Hel");
         let mut buf = [0u8; 4];
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn reader_does_not_read_ahead_when_caller_output_is_full() {
+        let inner = CountingReader { bytes: b"abcdef", pos: 0, reads: 0 };
+        let mut reader = CodecReader::new(inner, rot13(), [0u8; 3]);
+        let mut output = [0u8; 3];
+        assert_eq!(reader.read(&mut output).unwrap(), 3);
+        assert_eq!(reader.into_inner().reads, 1);
     }
 }

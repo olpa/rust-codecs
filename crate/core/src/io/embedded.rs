@@ -9,8 +9,9 @@ use core::fmt;
 
 use embedded_io::{ErrorType, Read, Write};
 
-use crate::driver::{DrainEnd, Driver};
-use crate::transfer::TransferEnd;
+use crate::driver::{Driver, PumpEnd};
+use crate::io::slice_adapters::{SliceInput, SliceOutput};
+use crate::io::{CopyError, EmbeddedInput, EmbeddedOutput, Output};
 use crate::{Codec, Error};
 
 /// An endpoint error or a codec error from an embedded I/O adapter.
@@ -20,6 +21,32 @@ pub enum EmbeddedError<E> {
     Codec(Error),
     /// The codec ended without accepting any of a non-empty write.
     WriteZero,
+}
+
+fn reader_error<E>(error: CopyError<E, core::convert::Infallible>) -> EmbeddedError<E> {
+    match error {
+        CopyError::Input(error) => EmbeddedError::Io(error),
+        CopyError::Output(never) => match never {},
+        CopyError::Codec(error) => EmbeddedError::Codec(error),
+        CopyError::OutputExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
+    }
+}
+
+fn writer_error<E>(error: CopyError<core::convert::Infallible, E>) -> EmbeddedError<E> {
+    match error {
+        CopyError::Input(never) => match never {},
+        CopyError::Output(error) => EmbeddedError::Io(error),
+        CopyError::Codec(error) => EmbeddedError::Codec(error),
+        CopyError::OutputExhausted | CopyError::EmptySlot => unreachable!("embedded output adapter"),
+    }
+}
+
+fn slice_error<E>(error: CopyError<core::convert::Infallible, core::convert::Infallible>) -> EmbeddedError<E> {
+    match error {
+        CopyError::Input(never) | CopyError::Output(never) => match never {},
+        CopyError::Codec(error) => EmbeddedError::Codec(error),
+        CopyError::OutputExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
+    }
 }
 
 impl<E: embedded_io::Error> fmt::Display for EmbeddedError<E> {
@@ -42,34 +69,19 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 
 /// Wraps an [`embedded_io::Read`], yielding bytes transformed by `C`.
 pub struct EmbeddedCodecReader<R, C: Codec, S> {
-    inner: R,
+    input: EmbeddedInput<R, S>,
     driver: Driver<C>,
-    inbuf: S,
-    inpos: usize,
-    inlen: usize,
-    inner_eof: bool,
 }
 
 impl<R: Read, C: Codec, S: AsMut<[u8]>> EmbeddedCodecReader<R, C, S> {
-    pub fn new(inner: R, codec: C, mut inbuf: S) -> Self {
-        assert!(
-            !inbuf.as_mut().is_empty(),
-            "EmbeddedCodecReader buffer must be non-empty"
-        );
-        Self {
-            inner,
-            driver: Driver::new(codec),
-            inbuf,
-            inpos: 0,
-            inlen: 0,
-            inner_eof: false,
-        }
+    pub fn new(inner: R, codec: C, inbuf: S) -> Self {
+        Self { input: EmbeddedInput::new(inner, inbuf), driver: Driver::new(codec) }
     }
 
     /// Return the wrapped reader. Any buffered, unconsumed input is
     /// discarded.
     pub fn into_inner(self) -> R {
-        self.inner
+        self.input.into_inner()
     }
 }
 
@@ -83,74 +95,32 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for EmbeddedCodecReader<R, C, S> {
             return Ok(0);
         }
 
-        loop {
-            if self.inpos == self.inlen && !self.inner_eof {
-                self.inlen = self
-                    .inner
-                    .read(self.inbuf.as_mut())
-                    .map_err(EmbeddedError::Io)?;
-                self.inpos = 0;
-                if self.inlen == 0 {
-                    self.inner_eof = true;
-                }
-            }
-
-            let input = &self.inbuf.as_mut()[self.inpos..self.inlen];
-            if input.is_empty() {
-                return self
-                    .driver
-                    .finish(buf)
-                    .map(|moved| moved.written)
-                    .map_err(EmbeddedError::Codec);
-            }
-
-            let moved = self
-                .driver
-                .process(input, buf)
-                .map_err(EmbeddedError::Codec)?;
-            self.inpos += moved.consumed;
-            match moved.end {
-                TransferEnd::InputExhausted if moved.written == 0 => {}
-                TransferEnd::InputExhausted
-                | TransferEnd::OutputExhausted
-                | TransferEnd::StreamEnd => return Ok(moved.written),
-            }
+        let mut output = SliceOutput::new(buf);
+        let moved = self.driver.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
+        if moved.end == PumpEnd::InputExhausted {
+            self.driver.finish_to(&mut output).map_err(slice_error)?;
         }
+        Ok(output.written())
     }
 }
 
 /// Wraps an [`embedded_io::Write`], transforming bytes before writing
 /// them to the wrapped endpoint.
 pub struct EmbeddedCodecWriter<W, C: Codec, S> {
-    inner: W,
+    output: EmbeddedOutput<W, S>,
     driver: Driver<C>,
-    outbuf: S,
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> EmbeddedCodecWriter<W, C, S> {
-    pub fn new(inner: W, codec: C, mut outbuf: S) -> Self {
-        assert!(
-            !outbuf.as_mut().is_empty(),
-            "EmbeddedCodecWriter buffer must be non-empty"
-        );
-        Self {
-            inner,
-            driver: Driver::new(codec),
-            outbuf,
-        }
+    pub fn new(inner: W, codec: C, outbuf: S) -> Self {
+        Self { output: EmbeddedOutput::new(inner, outbuf), driver: Driver::new(codec) }
     }
 
     /// Finish the codec stream, flush the endpoint, and return it.
     pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
-        while !self.driver.is_done() {
-            let outbuf = self.outbuf.as_mut();
-            let moved = self.driver.finish(outbuf).map_err(EmbeddedError::Codec)?;
-            self.inner
-                .write_all(&outbuf[..moved.written])
-                .map_err(EmbeddedError::Io)?;
-        }
-        self.inner.flush().map_err(EmbeddedError::Io)?;
-        Ok(self.inner)
+        self.driver.finish_to(&mut self.output).map_err(writer_error)?;
+        self.output.finish().map_err(EmbeddedError::Io)?;
+        Ok(self.output.into_inner())
     }
 }
 
@@ -163,37 +133,18 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for EmbeddedCodecWriter<W, C, S> 
         if !buf.is_empty() && self.driver.is_done() {
             return Err(EmbeddedError::WriteZero);
         }
-        let mut consumed = 0;
-        while consumed < buf.len() && !self.driver.is_done() {
-            let outbuf = self.outbuf.as_mut();
-            let moved = self
-                .driver
-                .process(&buf[consumed..], outbuf)
-                .map_err(EmbeddedError::Codec)?;
-            self.inner
-                .write_all(&outbuf[..moved.written])
-                .map_err(EmbeddedError::Io)?;
-            consumed += moved.consumed;
-        }
-        if !buf.is_empty() && consumed == 0 {
+        let mut input = SliceInput::new(buf);
+        self.driver.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
+        if !buf.is_empty() && input.consumed() == 0 {
             Err(EmbeddedError::WriteZero)
         } else {
-            Ok(consumed)
+            Ok(input.consumed())
         }
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        loop {
-            let outbuf = self.outbuf.as_mut();
-            let moved = self.driver.flush(outbuf).map_err(EmbeddedError::Codec)?;
-            self.inner
-                .write_all(&outbuf[..moved.written])
-                .map_err(EmbeddedError::Io)?;
-            if moved.end == DrainEnd::Done {
-                break;
-            }
-        }
-        self.inner.flush().map_err(EmbeddedError::Io)
+        self.driver.flush_to(&mut self.output).map_err(writer_error)?;
+        self.output.finish().map_err(EmbeddedError::Io)
     }
 }
 

@@ -17,6 +17,8 @@ mod embedded;
 #[cfg(feature = "std")]
 mod stream;
 mod stream_to_stream;
+#[cfg(any(feature = "std", feature = "embedded-io"))]
+mod slice_adapters;
 #[cfg(feature = "alloc")]
 mod adapters;
 #[cfg(feature = "std")]
