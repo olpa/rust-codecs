@@ -385,7 +385,7 @@ mod tests {
     use super::Chain;
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
-    use crate::io::{drive, CopyError, VecInput, VecOutput};
+    use crate::io::{stream_to_stream, CopyError, VecInput, VecOutput};
     use crate::rot13::rot13;
     use crate::{Codec, Drain, Error, Outcome};
 
@@ -394,7 +394,7 @@ mod tests {
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, Error> {
         let mut input = VecInput::new(bytes.to_vec());
         let mut output = VecOutput::default();
-        drive(&mut input, codec, &mut output)
+        stream_to_stream(&mut input, codec, &mut output)
             .map_err(|error| match error {
                 CopyError::Codec(error) => error,
                 _ => unreachable!("infallible Vec adapter"),

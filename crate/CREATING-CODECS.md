@@ -113,7 +113,7 @@ pub fn rot13() -> Rot13 {
 
 Plain functions need no trait import and no pairing machinery — callers
 just call `rot13()` and get a value ready to hand to `CodecReader`,
-`CodecWriter`, `drive` with `VecOutput`, etc.
+`CodecWriter`, `stream_to_stream` with `VecOutput`, etc.
 
 ROT13 is stateless and self-inverse — the same value handles both
 directions — so one `<name>()` constructor is enough. If encoding and
@@ -129,7 +129,7 @@ associated-type machinery to satisfy.
 
 At minimum, exercise:
 
-- In-memory round-trip via `drive`, `VecInput`, and `VecOutput`.
+- In-memory round-trip via `stream_to_stream`, `VecInput`, and `VecOutput`.
 - The streaming adapters (`CodecReader`/`CodecWriter`) over a
   `Cursor`/`Vec<u8>`, including a case where the output buffer is
   smaller than the input, to confirm `OutputFilled` is handled and the

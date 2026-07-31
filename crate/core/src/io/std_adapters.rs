@@ -99,13 +99,13 @@ mod tests {
 
     use super::{StdInput, StdOutput};
     use crate::identity::identity;
-    use crate::io::{drive, VecInput, VecOutput};
+    use crate::io::{stream_to_stream, VecInput, VecOutput};
 
     #[test]
     fn std_input_can_feed_vec_output() {
         let mut input = StdInput::new(Cursor::new(b"std to vec"), [0u8; 3]);
         let mut output = VecOutput::default();
-        drive(&mut input, identity(), &mut output).unwrap();
+        stream_to_stream(&mut input, identity(), &mut output).unwrap();
         assert_eq!(output.into_inner(), b"std to vec");
     }
 
@@ -113,7 +113,7 @@ mod tests {
     fn vec_input_can_feed_std_output() {
         let mut input = VecInput::new(b"vec to std".to_vec());
         let mut output = StdOutput::new(Vec::new(), [0u8; 3]);
-        drive(&mut input, identity(), &mut output).unwrap();
+        stream_to_stream(&mut input, identity(), &mut output).unwrap();
         assert_eq!(output.into_inner(), b"vec to std");
     }
 }

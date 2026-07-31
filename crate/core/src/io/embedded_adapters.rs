@@ -97,13 +97,13 @@ impl<W: Write, S: AsMut<[u8]>> Output for EmbeddedOutput<W, S> {
 mod tests {
     use super::{EmbeddedInput, EmbeddedOutput};
     use crate::identity::identity;
-    use crate::io::{drive, VecInput, VecOutput};
+    use crate::io::{stream_to_stream, VecInput, VecOutput};
 
     #[test]
     fn embedded_input_can_feed_vec_output() {
         let mut input = EmbeddedInput::new(&b"embedded to vec"[..], [0u8; 3]);
         let mut output = VecOutput::default();
-        drive(&mut input, identity(), &mut output).unwrap();
+        stream_to_stream(&mut input, identity(), &mut output).unwrap();
         assert_eq!(output.into_inner(), b"embedded to vec");
     }
 
@@ -113,7 +113,7 @@ mod tests {
         let mut bytes = [0u8; 32];
         let remaining = {
             let mut output = EmbeddedOutput::new(&mut bytes[..], [0u8; 3]);
-            drive(&mut input, identity(), &mut output).unwrap();
+            stream_to_stream(&mut input, identity(), &mut output).unwrap();
             output.into_inner().len()
         };
         assert_eq!(&bytes[..bytes.len() - remaining], b"vec to embedded");

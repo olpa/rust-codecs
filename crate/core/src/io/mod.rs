@@ -5,8 +5,7 @@
 //! - `embedded`: native `embedded_io::Read`/`Write` wrappers, enabled by
 //!   the `embedded-io` feature.
 //! - [`VecInput`]/[`VecOutput`]: use owned vectors as stream endpoints.
-//! - [`stream_to_stream`]: drive a transform between two iterator-based
-//!   streams of byte buffers.
+//! - [`stream_to_stream`]: transfer between supported stream adapters.
 //!
 //! A runtime-built chain of codecs (e.g. one assembled from a list of
 //! codec names) is a [`Chain`](crate::Chain), not a stack of nested
@@ -18,6 +17,7 @@ mod embedded;
 #[cfg(feature = "std")]
 mod stream;
 mod stream_to_stream;
+#[cfg(feature = "alloc")]
 mod adapters;
 #[cfg(feature = "std")]
 mod std_adapters;
@@ -28,8 +28,7 @@ mod embedded_adapters;
 pub use embedded::{EmbeddedCodecReader, EmbeddedCodecWriter, EmbeddedError};
 #[cfg(feature = "std")]
 pub use stream::{CodecReader, CodecWriter};
-pub use stream_to_stream::{drive, stream_to_stream, CopyError, Input, Output, Totals};
-pub use adapters::{IteratorInput, IteratorOutput};
+pub use stream_to_stream::{stream_to_stream, CopyError, Input, Output, Totals};
 #[cfg(feature = "alloc")]
 pub use adapters::{VecInput, VecOutput};
 #[cfg(feature = "std")]

@@ -376,7 +376,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
-    use crate::io::{drive, CodecReader, CodecWriter, CopyError, VecInput, VecOutput};
+    use crate::io::{stream_to_stream, CodecReader, CodecWriter, CopyError, VecInput, VecOutput};
     use crate::{Codec, Drain, Outcome};
 
     const INPUT: &[u8] = b"Hello, World! 123";
@@ -385,7 +385,7 @@ mod tests {
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
         let mut input = VecInput::new(bytes.to_vec());
         let mut output = VecOutput::default();
-        drive(&mut input, codec, &mut output)
+        stream_to_stream(&mut input, codec, &mut output)
             .map_err(|error| match error {
                 CopyError::Codec(error) => error,
                 _ => unreachable!("infallible Vec adapter"),

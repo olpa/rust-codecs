@@ -1,8 +1,9 @@
-//! Allocation-backed and iterator adapters for the lending stream driver.
+//! Allocation-backed adapters for the lending stream driver.
 
 #[cfg(feature = "alloc")]
 use core::convert::Infallible;
 
+#[cfg(feature = "alloc")]
 use super::stream_to_stream::{Input, Output};
 
 /// An owned `Vec<u8>` used directly as an input stream.
@@ -105,102 +106,11 @@ impl Output for VecOutput {
     }
 }
 
-/// Turns an iterator of fallible byte chunks into an [`Input`].
-pub struct IteratorInput<I, B> {
-    iter: I,
-    current: Option<(B, usize)>,
-}
-
-impl<I, B> IteratorInput<I, B> {
-    pub fn new(iter: I) -> Self {
-        Self {
-            iter,
-            current: None,
-        }
-    }
-}
-
-impl<I, B, E> Input for IteratorInput<I, B>
-where
-    I: Iterator<Item = Result<B, E>>,
-    B: AsRef<[u8]>,
-{
-    type Error = E;
-
-    fn chunk(&mut self) -> Result<Option<&[u8]>, E> {
-        while self
-            .current
-            .as_ref()
-            .is_none_or(|(chunk, pos)| *pos == chunk.as_ref().len())
-        {
-            self.current = match self.iter.next().transpose()? {
-                Some(chunk) => Some((chunk, 0)),
-                None => return Ok(None),
-            };
-        }
-        let (chunk, pos) = self.current.as_ref().expect("current chunk");
-        Ok(Some(&chunk.as_ref()[*pos..]))
-    }
-
-    fn consume(&mut self, amount: usize) {
-        let (chunk, pos) = self.current.as_mut().expect("consume without chunk");
-        assert!(amount <= chunk.as_ref().len() - *pos);
-        *pos += amount;
-    }
-}
-
-/// Turns an iterator of fallible writable slots into an [`Output`].
-pub struct IteratorOutput<I, S> {
-    iter: I,
-    current: Option<(S, usize)>,
-}
-
-impl<I, S> IteratorOutput<I, S> {
-    pub fn new(iter: I) -> Self {
-        Self {
-            iter,
-            current: None,
-        }
-    }
-}
-
-impl<I, S, E> Output for IteratorOutput<I, S>
-where
-    I: Iterator<Item = Result<S, E>>,
-    S: AsMut<[u8]>,
-{
-    type Error = E;
-
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, E> {
-        let spent = self
-            .current
-            .as_mut()
-            .is_some_and(|(slot, pos)| *pos == slot.as_mut().len());
-        if spent {
-            self.current = None;
-        }
-        if self.current.is_none() {
-            self.current = self.iter.next().transpose()?.map(|slot| (slot, 0));
-        }
-        Ok(self
-            .current
-            .as_mut()
-            .map(|(slot, pos)| &mut slot.as_mut()[*pos..]))
-    }
-
-    fn commit(&mut self, amount: usize) -> Result<(), E> {
-        let (slot, pos) = self.current.as_mut().expect("commit without slot");
-        assert!(amount <= slot.as_mut().len() - *pos);
-        *pos += amount;
-        Ok(())
-    }
-}
-
 #[cfg(all(test, feature = "identity", feature = "alloc"))]
 mod tests {
     use super::{VecInput, VecOutput};
     use crate::identity::identity;
-    use crate::io::drive;
+    use crate::io::stream_to_stream;
 
     #[test]
     fn vec_to_vec_uses_the_shared_driver() {
@@ -208,7 +118,7 @@ mod tests {
         let mut input = VecInput::new(data.clone());
         let mut output = VecOutput::with_growth(alloc::vec::Vec::new(), 2);
 
-        let totals = drive(&mut input, identity(), &mut output).unwrap();
+        let totals = stream_to_stream(&mut input, identity(), &mut output).unwrap();
 
         assert_eq!(totals.consumed, data.len());
         assert_eq!(totals.written, data.len());
