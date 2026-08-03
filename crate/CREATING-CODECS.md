@@ -73,7 +73,7 @@ Two consequences worth spelling out:
 
 - **"I need more input before I can produce anything" is expressed by
   consuming.** Buffer the partial unit internally (see
-  `pending_group` in `core/src/base64.rs`) and return
+  `pending_group` in `core/src/codecs/base64.rs`) and return
   `InputConsumed { written: 0 }`; the driver feeds the next chunk,
   and at end of stream `finish` drains what you buffered. Drivers
   never coalesce input into a larger contiguous slice for you.
