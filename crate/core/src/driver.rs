@@ -6,7 +6,7 @@
 //! lifecycle, so using it never introduces a byte copy.
 
 use crate::transfer::{transfer, Transfer};
-use crate::{Codec, CopyError, Drain, Error, Sink, Source};
+use crate::{Codec, Drain, DriveError, Error, Sink, Source};
 
 /// Exact progress and boundary of one validated `finish` or `flush`
 /// call.
@@ -77,53 +77,53 @@ impl<C: Codec> Driver<C> {
         &mut self,
         input: &mut I,
         output: &mut O,
-    ) -> Result<PumpTransfer, CopyError<I::Error, O::Error>> {
+    ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
         let mut consumed = 0;
         let mut written = 0;
         let mut output_first = false;
         loop {
             let (moved, offered) = if output_first {
-                let Some(spare) = output.spare().map_err(CopyError::Sink)? else {
+                let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
                     return Ok(PumpTransfer { consumed, written, end: PumpEnd::SinkExhausted });
                 };
                 if spare.is_empty() {
-                    return Err(CopyError::EmptySlot);
+                    return Err(DriveError::EmptySlot);
                 }
                 let offered = spare.len();
-                let Some(chunk) = input.chunk().map_err(CopyError::Source)? else {
-                    output.commit(0).map_err(CopyError::Sink)?;
+                let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
+                    output.commit(0).map_err(DriveError::Sink)?;
                     return Ok(PumpTransfer { consumed, written, end: PumpEnd::SourceExhausted });
                 };
                 let moved = match self.process(chunk, spare) {
                     Ok(moved) => moved,
                     Err(error) => {
-                        output.commit(0).map_err(CopyError::Sink)?;
-                        return Err(CopyError::Codec(error));
+                        output.commit(0).map_err(DriveError::Sink)?;
+                        return Err(DriveError::Codec(error));
                     }
                 };
                 (moved, offered)
             } else {
-                let Some(chunk) = input.chunk().map_err(CopyError::Source)? else {
+                let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
                     return Ok(PumpTransfer { consumed, written, end: PumpEnd::SourceExhausted });
                 };
-                let Some(spare) = output.spare().map_err(CopyError::Sink)? else {
+                let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
                     return Ok(PumpTransfer { consumed, written, end: PumpEnd::SinkExhausted });
                 };
                 if spare.is_empty() {
-                    return Err(CopyError::EmptySlot);
+                    return Err(DriveError::EmptySlot);
                 }
                 let offered = spare.len();
                 let moved = match self.process(chunk, spare) {
                     Ok(moved) => moved,
                     Err(error) => {
-                        output.commit(0).map_err(CopyError::Sink)?;
-                        return Err(CopyError::Codec(error));
+                        output.commit(0).map_err(DriveError::Sink)?;
+                        return Err(DriveError::Codec(error));
                     }
                 };
                 (moved, offered)
             };
             input.consume(moved.consumed);
-            output.commit(moved.written).map_err(CopyError::Sink)?;
+            output.commit(moved.written).map_err(DriveError::Sink)?;
             consumed += moved.consumed;
             written += moved.written;
             if moved.end == crate::transfer::TransferEnd::StreamEnd {
@@ -136,7 +136,7 @@ impl<C: Codec> Driver<C> {
     pub(crate) fn finish_to<O: Sink>(
         &mut self,
         output: &mut O,
-    ) -> Result<PumpDrain, CopyError<core::convert::Infallible, O::Error>> {
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         self.drain_to(output, true)
     }
 
@@ -144,7 +144,7 @@ impl<C: Codec> Driver<C> {
     pub(crate) fn flush_to<O: Sink>(
         &mut self,
         output: &mut O,
-    ) -> Result<PumpDrain, CopyError<core::convert::Infallible, O::Error>> {
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         self.drain_to(output, false)
     }
 
@@ -152,26 +152,26 @@ impl<C: Codec> Driver<C> {
         &mut self,
         output: &mut O,
         finishing: bool,
-    ) -> Result<PumpDrain, CopyError<core::convert::Infallible, O::Error>> {
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         let mut written = 0;
         loop {
-            let moved = match output.spare().map_err(CopyError::Sink)? {
+            let moved = match output.spare().map_err(DriveError::Sink)? {
                 Some(spare) => {
                     if spare.is_empty() {
-                        return Err(CopyError::EmptySlot);
+                        return Err(DriveError::EmptySlot);
                     }
                     let result = if finishing { self.finish(spare) } else { self.flush(spare) };
                     match result {
                         Ok(moved) => Ok(moved),
                         Err(error) => {
-                            output.commit(0).map_err(CopyError::Sink)?;
-                            return Err(CopyError::Codec(error));
+                            output.commit(0).map_err(DriveError::Sink)?;
+                            return Err(DriveError::Codec(error));
                         }
                     }
                 }
                 None => {
                     let moved = if finishing { self.finish(&mut []) } else { self.flush(&mut []) }
-                        .map_err(CopyError::Codec)?;
+                        .map_err(DriveError::Codec)?;
                     return Ok(PumpDrain { written, end: if moved.end == DrainEnd::Done {
                         DrainEnd::Done
                     } else {
@@ -179,8 +179,8 @@ impl<C: Codec> Driver<C> {
                     }});
                 }
             }
-            .map_err(CopyError::Codec)?;
-            output.commit(moved.written).map_err(CopyError::Sink)?;
+            .map_err(DriveError::Codec)?;
+            output.commit(moved.written).map_err(DriveError::Sink)?;
             written += moved.written;
             if moved.end == DrainEnd::Done {
                 return Ok(PumpDrain { written, end: DrainEnd::Done });

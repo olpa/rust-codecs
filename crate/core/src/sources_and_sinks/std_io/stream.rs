@@ -22,7 +22,7 @@ use core::convert::Infallible;
 
 use crate::driver::{Driver, PumpEnd};
 use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
-use crate::{Codec, CopyError, Error, Sink};
+use crate::{Codec, DriveError, Error, Sink};
 
 use super::bridge::{StdSource, StdSink};
 
@@ -30,33 +30,33 @@ fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
 }
 
-fn reader_error(err: CopyError<io::Error, Infallible>) -> io::Error {
+fn reader_error(err: DriveError<io::Error, Infallible>) -> io::Error {
     match err {
-        CopyError::Source(error) => error,
-        CopyError::Sink(never) => match never {},
-        CopyError::Codec(error) => to_io_error(error),
-        CopyError::SinkExhausted | CopyError::EmptySlot => {
+        DriveError::Source(error) => error,
+        DriveError::Sink(never) => match never {},
+        DriveError::Codec(error) => to_io_error(error),
+        DriveError::SinkExhausted | DriveError::EmptySlot => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
         }
     }
 }
 
-fn writer_error(err: CopyError<Infallible, io::Error>) -> io::Error {
+fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
     match err {
-        CopyError::Source(never) => match never {},
-        CopyError::Sink(error) => error,
-        CopyError::Codec(error) => to_io_error(error),
-        CopyError::SinkExhausted | CopyError::EmptySlot => {
+        DriveError::Source(never) => match never {},
+        DriveError::Sink(error) => error,
+        DriveError::Codec(error) => to_io_error(error),
+        DriveError::SinkExhausted | DriveError::EmptySlot => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid std output adapter")
         }
     }
 }
 
-fn slice_error(err: CopyError<Infallible, Infallible>) -> io::Error {
+fn slice_error(err: DriveError<Infallible, Infallible>) -> io::Error {
     match err {
-        CopyError::Source(never) | CopyError::Sink(never) => match never {},
-        CopyError::Codec(error) => to_io_error(error),
-        CopyError::SinkExhausted | CopyError::EmptySlot => {
+        DriveError::Source(never) | DriveError::Sink(never) => match never {},
+        DriveError::Codec(error) => to_io_error(error),
+        DriveError::SinkExhausted | DriveError::EmptySlot => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
         }
     }

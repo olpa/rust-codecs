@@ -25,7 +25,7 @@ pub struct Carry<const N: usize>; // helper for atomic-output codecs
 // transport, plus one entry point that drives it to completion.
 pub trait Source { /* ... */ }
 pub trait Sink { /* ... */ }
-pub fn stream_to_stream(/* ... */) -> Result<Totals, CopyError<_, _>>;
+pub fn stream_to_stream(/* ... */) -> Result<Totals, DriveError<_, _>>;
 
 // Concrete Source/Sink backends: std::io, embedded_io, Vec<u8>.
 pub mod sources_and_sinks;

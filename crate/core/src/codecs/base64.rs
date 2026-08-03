@@ -376,7 +376,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
-    use crate::{stream_to_stream, Codec, CopyError, Drain, Outcome};
+    use crate::{stream_to_stream, Codec, DriveError, Drain, Outcome};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
 
@@ -388,7 +388,7 @@ mod tests {
         let mut output = VecSink::default();
         stream_to_stream(&mut input, codec, &mut output)
             .map_err(|error| match error {
-                CopyError::Codec(error) => error,
+                DriveError::Codec(error) => error,
                 _ => unreachable!("infallible Vec adapter"),
             })?;
         Ok(output.into_inner())

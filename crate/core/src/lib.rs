@@ -30,7 +30,7 @@ mod chain;
 pub use chain::Chain;
 
 mod stream_to_stream;
-pub use stream_to_stream::{stream_to_stream, CopyError, Source, Sink, Totals};
+pub use stream_to_stream::{stream_to_stream, DriveError, Source, Sink, Totals};
 
 pub mod sources_and_sinks;
 

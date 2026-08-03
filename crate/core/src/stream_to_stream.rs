@@ -39,7 +39,7 @@ pub struct Totals {
 
 /// Why [`stream_to_stream`] stopped before the codec finished its stream.
 #[derive(Debug)]
-pub enum CopyError<EI, EO> {
+pub enum DriveError<EI, EO> {
     Source(EI),
     Sink(EO),
     Codec(crate::Error),
@@ -52,7 +52,7 @@ pub fn stream_to_stream<I, O, C>(
     input: &mut I,
     codec: C,
     output: &mut O,
-) -> Result<Totals, CopyError<I::Error, O::Error>>
+) -> Result<Totals, DriveError<I::Error, O::Error>>
 where
     I: Source,
     O: Sink,
@@ -66,26 +66,26 @@ where
     totals.written += moved.written;
     match moved.end {
         PumpEnd::StreamEnd => {
-            output.finish().map_err(CopyError::Sink)?;
+            output.finish().map_err(DriveError::Sink)?;
             return Ok(totals);
         }
-        PumpEnd::SinkExhausted => return Err(CopyError::SinkExhausted),
+        PumpEnd::SinkExhausted => return Err(DriveError::SinkExhausted),
         PumpEnd::SourceExhausted => {}
     }
 
     let drained = driver.finish_to(output).map_err(|error| match error {
-        CopyError::Source(never) => match never {},
-        CopyError::Sink(error) => CopyError::Sink(error),
-        CopyError::Codec(error) => CopyError::Codec(error),
-        CopyError::SinkExhausted => CopyError::SinkExhausted,
-        CopyError::EmptySlot => CopyError::EmptySlot,
+        DriveError::Source(never) => match never {},
+        DriveError::Sink(error) => DriveError::Sink(error),
+        DriveError::Codec(error) => DriveError::Codec(error),
+        DriveError::SinkExhausted => DriveError::SinkExhausted,
+        DriveError::EmptySlot => DriveError::EmptySlot,
     })?;
     totals.written += drained.written;
     match drained.end {
         DrainEnd::Done => {
-            output.finish().map_err(CopyError::Sink)?;
+            output.finish().map_err(DriveError::Sink)?;
             Ok(totals)
         }
-        DrainEnd::SinkExhausted => Err(CopyError::SinkExhausted),
+        DrainEnd::SinkExhausted => Err(DriveError::SinkExhausted),
     }
 }

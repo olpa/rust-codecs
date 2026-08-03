@@ -11,7 +11,7 @@ use embedded_io::{ErrorType, Read, Write};
 
 use crate::driver::{Driver, PumpEnd};
 use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
-use crate::{Codec, CopyError, Error, Sink};
+use crate::{Codec, DriveError, Error, Sink};
 
 use super::bridge::{EmbeddedSource, EmbeddedSink};
 
@@ -24,29 +24,29 @@ pub enum EmbeddedError<E> {
     WriteZero,
 }
 
-fn reader_error<E>(error: CopyError<E, core::convert::Infallible>) -> EmbeddedError<E> {
+fn reader_error<E>(error: DriveError<E, core::convert::Infallible>) -> EmbeddedError<E> {
     match error {
-        CopyError::Source(error) => EmbeddedError::Io(error),
-        CopyError::Sink(never) => match never {},
-        CopyError::Codec(error) => EmbeddedError::Codec(error),
-        CopyError::SinkExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
+        DriveError::Source(error) => EmbeddedError::Io(error),
+        DriveError::Sink(never) => match never {},
+        DriveError::Codec(error) => EmbeddedError::Codec(error),
+        DriveError::SinkExhausted | DriveError::EmptySlot => unreachable!("slice output adapter"),
     }
 }
 
-fn writer_error<E>(error: CopyError<core::convert::Infallible, E>) -> EmbeddedError<E> {
+fn writer_error<E>(error: DriveError<core::convert::Infallible, E>) -> EmbeddedError<E> {
     match error {
-        CopyError::Source(never) => match never {},
-        CopyError::Sink(error) => EmbeddedError::Io(error),
-        CopyError::Codec(error) => EmbeddedError::Codec(error),
-        CopyError::SinkExhausted | CopyError::EmptySlot => unreachable!("embedded output adapter"),
+        DriveError::Source(never) => match never {},
+        DriveError::Sink(error) => EmbeddedError::Io(error),
+        DriveError::Codec(error) => EmbeddedError::Codec(error),
+        DriveError::SinkExhausted | DriveError::EmptySlot => unreachable!("embedded output adapter"),
     }
 }
 
-fn slice_error<E>(error: CopyError<core::convert::Infallible, core::convert::Infallible>) -> EmbeddedError<E> {
+fn slice_error<E>(error: DriveError<core::convert::Infallible, core::convert::Infallible>) -> EmbeddedError<E> {
     match error {
-        CopyError::Source(never) | CopyError::Sink(never) => match never {},
-        CopyError::Codec(error) => EmbeddedError::Codec(error),
-        CopyError::SinkExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
+        DriveError::Source(never) | DriveError::Sink(never) => match never {},
+        DriveError::Codec(error) => EmbeddedError::Codec(error),
+        DriveError::SinkExhausted | DriveError::EmptySlot => unreachable!("slice output adapter"),
     }
 }
 
