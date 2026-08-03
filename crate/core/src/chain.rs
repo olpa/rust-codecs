@@ -385,7 +385,8 @@ mod tests {
     use super::Chain;
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
-    use crate::io::{stream_to_stream, CopyError, VecSource, VecSink};
+    use crate::{stream_to_stream, CopyError};
+    use crate::sources_and_sinks::vec::{VecSource, VecSink};
     use crate::rot13::rot13;
     use crate::{Codec, Drain, Error, Outcome};
 

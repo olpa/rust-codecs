@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 
-use crate::io::stream_to_stream::{Source, Sink};
+use crate::{Source, Sink};
 
 pub struct StdSource<R, S> {
     inner: R,
@@ -99,7 +99,8 @@ mod tests {
 
     use super::{StdSource, StdSink};
     use crate::identity::identity;
-    use crate::io::{stream_to_stream, VecSource, VecSink};
+    use crate::stream_to_stream;
+    use crate::sources_and_sinks::vec::{VecSource, VecSink};
 
     #[test]
     fn std_input_can_feed_vec_output() {

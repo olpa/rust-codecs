@@ -13,7 +13,7 @@
 
 use std::io::{self, Read, Write};
 
-use rust_codecs_core::io::{CodecReader, CodecWriter};
+use rust_codecs_core::sources_and_sinks::std_io::{CodecReader, CodecWriter};
 use rust_codecs_core::{Chain, Codec};
 
 /// Staging buffer size for each link in a `--readers`/`--writers` chain.
@@ -143,7 +143,8 @@ mod tests {
     use std::io::{Cursor, Write};
     use std::rc::Rc;
 
-    use rust_codecs_core::io::{stream_to_stream, VecSource, VecSink};
+    use rust_codecs_core::stream_to_stream;
+    use rust_codecs_core::sources_and_sinks::vec::{VecSource, VecSink};
     use rust_codecs_core::rot13::rot13;
 
     use super::{compose, run_io};
@@ -201,8 +202,11 @@ mod tests {
         // calling `finish`.
         let writer_codec = compose(&names(&["rot13"])).unwrap();
         let sink = SharedSink::default();
-        let mut writer =
-            rust_codecs_core::io::CodecWriter::new(sink.clone(), writer_codec, vec![0u8; 64]);
+        let mut writer = rust_codecs_core::sources_and_sinks::std_io::CodecWriter::new(
+            sink.clone(),
+            writer_codec,
+            vec![0u8; 64],
+        );
 
         writer.write_all(b"hi\n").unwrap();
         writer.flush().unwrap();

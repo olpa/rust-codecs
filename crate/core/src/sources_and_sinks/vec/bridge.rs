@@ -4,7 +4,7 @@
 use core::convert::Infallible;
 
 #[cfg(feature = "alloc")]
-use crate::io::stream_to_stream::{Source, Sink};
+use crate::{Source, Sink};
 
 /// An owned `Vec<u8>` used directly as an input stream.
 #[cfg(feature = "alloc")]
@@ -110,7 +110,7 @@ impl Sink for VecSink {
 mod tests {
     use super::{VecSource, VecSink};
     use crate::identity::identity;
-    use crate::io::stream_to_stream;
+    use crate::stream_to_stream;
 
     #[test]
     fn vec_to_vec_uses_the_shared_driver() {

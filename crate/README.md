@@ -21,7 +21,14 @@ pub struct Error { /* kind + consumed/written progress */ }
 
 pub struct Carry<const N: usize>; // helper for atomic-output codecs
 
-pub mod io; // stream_to_stream, stream adapters, CodecReader, CodecWriter
+// The lending stream contract, independent of any particular byte
+// transport, plus one entry point that drives it to completion.
+pub trait Source { /* ... */ }
+pub trait Sink { /* ... */ }
+pub fn stream_to_stream(/* ... */) -> Result<Totals, CopyError<_, _>>;
+
+// Concrete Source/Sink backends: std::io, embedded_io, Vec<u8>.
+pub mod sources_and_sinks;
 ```
 
 Deliberately **not** exposed: any `Algorithm`-style pairing trait. A codec
@@ -43,7 +50,7 @@ crate, e.g. `rust_codecs_rot13::rot13_dec()`).
 use std::fs::File;
 use std::io;
 
-use rust_codecs_core::io::CodecReader;
+use rust_codecs_core::sources_and_sinks::std_io::CodecReader;
 use rust_codecs_rot13::rot13_dec;
 
 fn main() -> std::io::Result<()> {
@@ -64,7 +71,7 @@ internally — the caller never needs to call `finish()` explicitly.
 ```rust
 use std::io::Write;
 
-use rust_codecs_core::io::CodecWriter;
+use rust_codecs_core::sources_and_sinks::std_io::CodecWriter;
 use rust_codecs_rot13::rot13_enc;
 
 fn main() -> std::io::Result<()> {
@@ -99,7 +106,8 @@ read-then-write (or write-then-read) boundary needs an explicit
 For a payload you already have fully in memory:
 
 ```rust
-use rust_codecs_core::io::{stream_to_stream, VecSource, VecSink};
+use rust_codecs_core::stream_to_stream;
+use rust_codecs_core::sources_and_sinks::vec::{VecSource, VecSink};
 // rot13_enc()/rot13_dec() come from a codec crate, as above.
 
 let mut input = VecSource::new(b"Hello, world!\n".to_vec());

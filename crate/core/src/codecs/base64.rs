@@ -376,8 +376,9 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
-    use crate::io::{stream_to_stream, CodecReader, CodecWriter, CopyError, VecSource, VecSink};
-    use crate::{Codec, Drain, Outcome};
+    use crate::{stream_to_stream, Codec, CopyError, Drain, Outcome};
+    use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
+    use crate::sources_and_sinks::vec::{VecSource, VecSink};
 
     const INPUT: &[u8] = b"Hello, World! 123";
     const ENCODED: &[u8] = b"SGVsbG8sIFdvcmxkISAxMjM=";

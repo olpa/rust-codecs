@@ -10,9 +10,8 @@ use core::fmt;
 use embedded_io::{ErrorType, Read, Write};
 
 use crate::driver::{Driver, PumpEnd};
-use crate::io::slice_adapters::{SliceSource, SliceSink};
-use crate::io::{CopyError, Sink};
-use crate::{Codec, Error};
+use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
+use crate::{Codec, CopyError, Error, Sink};
 
 use super::bridge::{EmbeddedSource, EmbeddedSink};
 

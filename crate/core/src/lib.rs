@@ -9,8 +9,10 @@
 //!   the stream.
 //! - [`Carry`]: helper for codecs with a minimum atomic output unit,
 //!   letting an emitted unit span output buffers.
-//! - [`io`]: adapters for driving codecs between iterator, `Vec`,
-//!   `std::io`, and `embedded_io` streams.
+//! - [`Source`]/[`Sink`]/[`stream_to_stream`]: the lending stream
+//!   contract, independent of any particular byte transport.
+//! - [`sources_and_sinks`]: concrete `Source`/`Sink` backends —
+//!   `std::io`, `embedded_io`, and `Vec<u8>`.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -27,7 +29,10 @@ mod driver;
 mod chain;
 pub use chain::Chain;
 
-pub mod io;
+mod stream_to_stream;
+pub use stream_to_stream::{stream_to_stream, CopyError, Source, Sink, Totals};
+
+pub mod sources_and_sinks;
 
 mod codecs;
 #[allow(unused_imports)]

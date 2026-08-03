@@ -6,8 +6,7 @@
 //! lifecycle, so using it never introduces a byte copy.
 
 use crate::transfer::{transfer, Transfer};
-use crate::io::{CopyError, Sink, Source};
-use crate::{Codec, Drain, Error};
+use crate::{Codec, CopyError, Drain, Error, Sink, Source};
 
 /// Exact progress and boundary of one validated `finish` or `flush`
 /// call.

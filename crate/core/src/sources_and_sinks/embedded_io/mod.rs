@@ -1,5 +1,5 @@
-//! `embedded_io` backend: bridges into the driver's [`Source`](crate::io::Source)/
-//! [`Sink`](crate::io::Sink) traits, and the [`EmbeddedCodecReader`]/
+//! `embedded_io` backend: bridges into the driver's [`Source`](crate::Source)/
+//! [`Sink`](crate::Sink) traits, and the [`EmbeddedCodecReader`]/
 //! [`EmbeddedCodecWriter`] wrappers built on top of them.
 
 mod bridge;

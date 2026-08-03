@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 
-use super::stream_to_stream::{Source, Sink};
+use crate::{Source, Sink};
 
 pub(crate) struct SliceSource<'a> {
     bytes: &'a [u8],
