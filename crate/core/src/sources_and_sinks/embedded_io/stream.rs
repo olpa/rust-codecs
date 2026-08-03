@@ -1,8 +1,8 @@
 //! `embedded_io::Read`/`Write` adapters over a [`Codec`](crate::Codec).
 //!
 //! The ownership is directional and zero-copy at the codec boundary:
-//! [`EmbeddedCodecReader`] owns input scratch and writes directly into
-//! its caller's output, while [`EmbeddedCodecWriter`] reads directly
+//! [`CodecReader`] owns input scratch and writes directly into
+//! its caller's output, while [`CodecWriter`] reads directly
 //! from its caller and owns output scratch.
 
 use core::fmt;
@@ -69,12 +69,12 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 }
 
 /// Wraps an [`embedded_io::Read`], yielding bytes transformed by `C`.
-pub struct EmbeddedCodecReader<R, C: Codec, S> {
+pub struct CodecReader<R, C: Codec, S> {
     input: EmbeddedSource<R, S>,
     driver: Driver<C>,
 }
 
-impl<R: Read, C: Codec, S: AsMut<[u8]>> EmbeddedCodecReader<R, C, S> {
+impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
         Self { input: EmbeddedSource::new(inner, inbuf), driver: Driver::new(codec) }
     }
@@ -86,11 +86,11 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> EmbeddedCodecReader<R, C, S> {
     }
 }
 
-impl<R: Read, C: Codec, S: AsMut<[u8]>> ErrorType for EmbeddedCodecReader<R, C, S> {
+impl<R: Read, C: Codec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
     type Error = EmbeddedError<R::Error>;
 }
 
-impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for EmbeddedCodecReader<R, C, S> {
+impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         if buf.is_empty() || self.driver.is_done() {
             return Ok(0);
@@ -107,12 +107,12 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for EmbeddedCodecReader<R, C, S> {
 
 /// Wraps an [`embedded_io::Write`], transforming bytes before writing
 /// them to the wrapped endpoint.
-pub struct EmbeddedCodecWriter<W, C: Codec, S> {
+pub struct CodecWriter<W, C: Codec, S> {
     output: EmbeddedSink<W, S>,
     driver: Driver<C>,
 }
 
-impl<W: Write, C: Codec, S: AsMut<[u8]>> EmbeddedCodecWriter<W, C, S> {
+impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
         Self { output: EmbeddedSink::new(inner, outbuf), driver: Driver::new(codec) }
     }
@@ -125,11 +125,11 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> EmbeddedCodecWriter<W, C, S> {
     }
 }
 
-impl<W: Write, C: Codec, S: AsMut<[u8]>> ErrorType for EmbeddedCodecWriter<W, C, S> {
+impl<W: Write, C: Codec, S: AsMut<[u8]>> ErrorType for CodecWriter<W, C, S> {
     type Error = EmbeddedError<W::Error>;
 }
 
-impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for EmbeddedCodecWriter<W, C, S> {
+impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         if !buf.is_empty() && self.driver.is_done() {
             return Err(EmbeddedError::WriteZero);
@@ -153,7 +153,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for EmbeddedCodecWriter<W, C, S> 
 mod tests {
     use embedded_io::{Error as _, ErrorKind, Read, Write};
 
-    use super::{EmbeddedCodecReader, EmbeddedCodecWriter, EmbeddedError};
+    use super::{CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
     use crate::{Codec, Drain, Error, Outcome};
 
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn reader_uses_caller_output_directly() {
-        let mut reader = EmbeddedCodecReader::new(INPUT, identity(), [0u8; 3]);
+        let mut reader = CodecReader::new(INPUT, identity(), [0u8; 3]);
         let mut output = [0u8; INPUT.len()];
         let mut pos = 0;
         while pos < output.len() {
@@ -179,7 +179,7 @@ mod tests {
     fn writer_uses_caller_input_directly_and_finishes() {
         let mut output = [0u8; 32];
         let remaining = {
-            let mut writer = EmbeddedCodecWriter::new(&mut output[..], identity(), [0u8; 3]);
+            let mut writer = CodecWriter::new(&mut output[..], identity(), [0u8; 3]);
             writer.write_all(INPUT).unwrap();
             writer.finish().unwrap().len()
         };
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn nonempty_write_never_returns_zero() {
         let mut output = [0u8; 1];
-        let mut writer = EmbeddedCodecWriter::new(&mut output[..], EndsImmediately, [0u8; 1]);
+        let mut writer = CodecWriter::new(&mut output[..], EndsImmediately, [0u8; 1]);
         let error = writer.write(b"x").unwrap_err();
         assert!(matches!(error, EmbeddedError::WriteZero));
         assert_eq!(error.kind(), ErrorKind::WriteZero);
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn endpoint_errors_remain_distinguishable() {
         let mut output = [0u8; 1];
-        let mut writer = EmbeddedCodecWriter::new(&mut output[..], identity(), [0u8; 2]);
+        let mut writer = CodecWriter::new(&mut output[..], identity(), [0u8; 2]);
         assert!(matches!(writer.write(b"ab"), Err(EmbeddedError::Io(_))));
     }
 }
