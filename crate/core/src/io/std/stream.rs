@@ -21,9 +21,11 @@ use std::io::{self, Read, Write};
 use core::convert::Infallible;
 
 use crate::driver::{Driver, PumpEnd};
-use crate::io::slice_adapters::{SliceInput, SliceOutput};
-use crate::io::{CopyError, Output, StdInput, StdOutput};
+use crate::io::slice_adapters::{SliceSource, SliceSink};
+use crate::io::{CopyError, Sink};
 use crate::{Codec, Error};
+
+use super::bridge::{StdSource, StdSink};
 
 fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
@@ -31,10 +33,10 @@ fn to_io_error(err: Error) -> io::Error {
 
 fn reader_error(err: CopyError<io::Error, Infallible>) -> io::Error {
     match err {
-        CopyError::Input(error) => error,
-        CopyError::Output(never) => match never {},
+        CopyError::Source(error) => error,
+        CopyError::Sink(never) => match never {},
         CopyError::Codec(error) => to_io_error(error),
-        CopyError::OutputExhausted | CopyError::EmptySlot => {
+        CopyError::SinkExhausted | CopyError::EmptySlot => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
         }
     }
@@ -42,10 +44,10 @@ fn reader_error(err: CopyError<io::Error, Infallible>) -> io::Error {
 
 fn writer_error(err: CopyError<Infallible, io::Error>) -> io::Error {
     match err {
-        CopyError::Input(never) => match never {},
-        CopyError::Output(error) => error,
+        CopyError::Source(never) => match never {},
+        CopyError::Sink(error) => error,
         CopyError::Codec(error) => to_io_error(error),
-        CopyError::OutputExhausted | CopyError::EmptySlot => {
+        CopyError::SinkExhausted | CopyError::EmptySlot => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid std output adapter")
         }
     }
@@ -53,9 +55,9 @@ fn writer_error(err: CopyError<Infallible, io::Error>) -> io::Error {
 
 fn slice_error(err: CopyError<Infallible, Infallible>) -> io::Error {
     match err {
-        CopyError::Input(never) | CopyError::Output(never) => match never {},
+        CopyError::Source(never) | CopyError::Sink(never) => match never {},
         CopyError::Codec(error) => to_io_error(error),
-        CopyError::OutputExhausted | CopyError::EmptySlot => {
+        CopyError::SinkExhausted | CopyError::EmptySlot => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
         }
     }
@@ -70,7 +72,7 @@ fn slice_error(err: CopyError<Infallible, Infallible>) -> io::Error {
 /// does, trailing input bytes already pulled from the wrapped reader
 /// are lost.
 pub struct CodecReader<R, C: Codec, S> {
-    input: StdInput<R, S>,
+    input: StdSource<R, S>,
     driver: Driver<C>,
 }
 
@@ -83,7 +85,7 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// from `inner`, so the codec could never see any input — a caller
     /// bug, not a runtime condition.
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
-        Self { input: StdInput::new(inner, inbuf), driver: Driver::new(codec) }
+        Self { input: StdSource::new(inner, inbuf), driver: Driver::new(codec) }
     }
 
     /// Unwrap this reader, discarding the codec, and return the wrapped
@@ -103,9 +105,9 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
         if self.driver.is_done() {
             return Ok(0);
         }
-        let mut output = SliceOutput::new(buf);
+        let mut output = SliceSink::new(buf);
         let moved = self.driver.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
-        if moved.end == PumpEnd::InputExhausted {
+        if moved.end == PumpEnd::SourceExhausted {
             self.driver.finish_to(&mut output).map_err(slice_error)?;
         }
         Ok(output.written())
@@ -115,7 +117,7 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
 /// Wraps a `Write`; bytes written to this adapter are run through `C`
 /// before being written to the wrapped writer.
 pub struct CodecWriter<W, C: Codec, S> {
-    output: StdOutput<W, S>,
+    output: StdSink<W, S>,
     driver: Driver<C>,
 }
 
@@ -128,7 +130,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// [`CodecReader::new`] does: it could never hold a byte for
     /// `inner` to receive.
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
-        Self { output: StdOutput::new(inner, outbuf), driver: Driver::new(codec) }
+        Self { output: StdSink::new(inner, outbuf), driver: Driver::new(codec) }
     }
 
     /// Flush any bytes the codec was still holding, finalize the stream
@@ -143,7 +145,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut input = SliceInput::new(buf);
+        let mut input = SliceSource::new(buf);
         self.driver.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
         Ok(input.consumed())
     }

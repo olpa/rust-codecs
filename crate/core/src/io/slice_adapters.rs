@@ -1,18 +1,18 @@
 use core::convert::Infallible;
 
-use super::stream_to_stream::{Input, Output};
+use super::stream_to_stream::{Source, Sink};
 
-pub(crate) struct SliceInput<'a> {
+pub(crate) struct SliceSource<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
-impl<'a> SliceInput<'a> {
+impl<'a> SliceSource<'a> {
     pub(crate) fn new(bytes: &'a [u8]) -> Self { Self { bytes, pos: 0 } }
     pub(crate) fn consumed(&self) -> usize { self.pos }
 }
 
-impl Input for SliceInput<'_> {
+impl Source for SliceSource<'_> {
     type Error = Infallible;
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
@@ -20,17 +20,17 @@ impl Input for SliceInput<'_> {
     fn consume(&mut self, amount: usize) { self.pos += amount; }
 }
 
-pub(crate) struct SliceOutput<'a> {
+pub(crate) struct SliceSink<'a> {
     bytes: &'a mut [u8],
     pos: usize,
 }
 
-impl<'a> SliceOutput<'a> {
+impl<'a> SliceSink<'a> {
     pub(crate) fn new(bytes: &'a mut [u8]) -> Self { Self { bytes, pos: 0 } }
     pub(crate) fn written(&self) -> usize { self.pos }
 }
 
-impl Output for SliceOutput<'_> {
+impl Sink for SliceSink<'_> {
     type Error = Infallible;
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
         Ok((self.pos < self.bytes.len()).then_some(&mut self.bytes[self.pos..]))

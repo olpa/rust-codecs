@@ -4,7 +4,7 @@ use crate::driver::{DrainEnd, Driver, PumpEnd};
 use crate::Codec;
 
 /// A byte source which lends its current input chunk to the driver.
-pub trait Input {
+pub trait Source {
     type Error;
 
     /// Return the current non-empty chunk, or `None` at end of input.
@@ -15,7 +15,7 @@ pub trait Input {
 }
 
 /// A byte destination which lends writable space to the driver.
-pub trait Output {
+pub trait Sink {
     type Error;
 
     /// Return writable space, or `None` when the destination is full.
@@ -40,10 +40,10 @@ pub struct Totals {
 /// Why [`stream_to_stream`] stopped before the codec finished its stream.
 #[derive(Debug)]
 pub enum CopyError<EI, EO> {
-    Input(EI),
-    Output(EO),
+    Source(EI),
+    Sink(EO),
     Codec(crate::Error),
-    OutputExhausted,
+    SinkExhausted,
     EmptySlot,
 }
 
@@ -54,8 +54,8 @@ pub fn stream_to_stream<I, O, C>(
     output: &mut O,
 ) -> Result<Totals, CopyError<I::Error, O::Error>>
 where
-    I: Input,
-    O: Output,
+    I: Source,
+    O: Sink,
     C: Codec,
 {
     let mut driver = Driver::new(codec);
@@ -66,26 +66,26 @@ where
     totals.written += moved.written;
     match moved.end {
         PumpEnd::StreamEnd => {
-            output.finish().map_err(CopyError::Output)?;
+            output.finish().map_err(CopyError::Sink)?;
             return Ok(totals);
         }
-        PumpEnd::OutputExhausted => return Err(CopyError::OutputExhausted),
-        PumpEnd::InputExhausted => {}
+        PumpEnd::SinkExhausted => return Err(CopyError::SinkExhausted),
+        PumpEnd::SourceExhausted => {}
     }
 
     let drained = driver.finish_to(output).map_err(|error| match error {
-        CopyError::Input(never) => match never {},
-        CopyError::Output(error) => CopyError::Output(error),
+        CopyError::Source(never) => match never {},
+        CopyError::Sink(error) => CopyError::Sink(error),
         CopyError::Codec(error) => CopyError::Codec(error),
-        CopyError::OutputExhausted => CopyError::OutputExhausted,
+        CopyError::SinkExhausted => CopyError::SinkExhausted,
         CopyError::EmptySlot => CopyError::EmptySlot,
     })?;
     totals.written += drained.written;
     match drained.end {
         DrainEnd::Done => {
-            output.finish().map_err(CopyError::Output)?;
+            output.finish().map_err(CopyError::Sink)?;
             Ok(totals)
         }
-        DrainEnd::OutputExhausted => Err(CopyError::OutputExhausted),
+        DrainEnd::SinkExhausted => Err(CopyError::SinkExhausted),
     }
 }

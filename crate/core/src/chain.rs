@@ -385,15 +385,15 @@ mod tests {
     use super::Chain;
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
-    use crate::io::{stream_to_stream, CopyError, VecInput, VecOutput};
+    use crate::io::{stream_to_stream, CopyError, VecSource, VecSink};
     use crate::rot13::rot13;
     use crate::{Codec, Drain, Error, Outcome};
 
     const INPUT: &[u8] = b"Hello, World! 123";
 
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut input = VecInput::new(bytes.to_vec());
-        let mut output = VecOutput::default();
+        let mut input = VecSource::new(bytes.to_vec());
+        let mut output = VecSink::default();
         stream_to_stream(&mut input, codec, &mut output)
             .map_err(|error| match error {
                 CopyError::Codec(error) => error,

@@ -45,11 +45,11 @@ mod tests {
     use std::io::{Cursor, Read, Write};
 
     use super::rot13;
-    use crate::io::{stream_to_stream, CodecReader, CodecWriter, VecInput, VecOutput};
+    use crate::io::{stream_to_stream, CodecReader, CodecWriter, VecSource, VecSink};
 
     fn collect(codec: impl crate::Codec, bytes: &[u8]) -> Vec<u8> {
-        let mut input = VecInput::new(bytes.to_vec());
-        let mut output = VecOutput::default();
+        let mut input = VecSource::new(bytes.to_vec());
+        let mut output = VecSink::default();
         stream_to_stream(&mut input, codec, &mut output).unwrap();
         output.into_inner()
     }

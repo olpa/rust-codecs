@@ -99,16 +99,16 @@ read-then-write (or write-then-read) boundary needs an explicit
 For a payload you already have fully in memory:
 
 ```rust
-use rust_codecs_core::io::{stream_to_stream, VecInput, VecOutput};
+use rust_codecs_core::io::{stream_to_stream, VecSource, VecSink};
 // rot13_enc()/rot13_dec() come from a codec crate, as above.
 
-let mut input = VecInput::new(b"Hello, world!\n".to_vec());
-let mut encoded = VecOutput::default();
+let mut input = VecSource::new(b"Hello, world!\n".to_vec());
+let mut encoded = VecSink::default();
 stream_to_stream(&mut input, rot13_enc(), &mut encoded)?;
 let encoded = encoded.into_inner();
 
-let mut input = VecInput::new(encoded);
-let mut decoded = VecOutput::default();
+let mut input = VecSource::new(encoded);
+let mut decoded = VecSink::default();
 stream_to_stream(&mut input, rot13_dec(), &mut decoded)?;
 let decoded = decoded.into_inner();
 assert_eq!(decoded, b"Hello, world!\n");

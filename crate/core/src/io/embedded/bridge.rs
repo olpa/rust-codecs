@@ -1,8 +1,8 @@
-use std::io::{Read, Write};
+use embedded_io::{Read, Write};
 
-use super::stream_to_stream::{Input, Output};
+use crate::io::stream_to_stream::{Source, Sink};
 
-pub struct StdInput<R, S> {
+pub struct EmbeddedSource<R, S> {
     inner: R,
     buffer: S,
     pos: usize,
@@ -10,11 +10,11 @@ pub struct StdInput<R, S> {
     eof: bool,
 }
 
-impl<R: Read, S: AsMut<[u8]>> StdInput<R, S> {
+impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     pub fn new(inner: R, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),
-            "StdInput buffer must be non-empty"
+            "EmbeddedSource buffer must be non-empty"
         );
         Self {
             inner,
@@ -30,8 +30,8 @@ impl<R: Read, S: AsMut<[u8]>> StdInput<R, S> {
     }
 }
 
-impl<R: Read, S: AsMut<[u8]>> Input for StdInput<R, S> {
-    type Error = std::io::Error;
+impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
+    type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         if self.pos == self.len && !self.eof {
@@ -48,17 +48,17 @@ impl<R: Read, S: AsMut<[u8]>> Input for StdInput<R, S> {
     }
 }
 
-pub struct StdOutput<W, S> {
+pub struct EmbeddedSink<W, S> {
     inner: W,
     buffer: S,
     offered: usize,
 }
 
-impl<W: Write, S: AsMut<[u8]>> StdOutput<W, S> {
+impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
     pub fn new(inner: W, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),
-            "StdOutput buffer must be non-empty"
+            "EmbeddedSink buffer must be non-empty"
         );
         Self {
             inner,
@@ -72,8 +72,8 @@ impl<W: Write, S: AsMut<[u8]>> StdOutput<W, S> {
     }
 }
 
-impl<W: Write, S: AsMut<[u8]>> Output for StdOutput<W, S> {
-    type Error = std::io::Error;
+impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
+    type Error = W::Error;
 
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
         assert_eq!(self.offered, 0, "commit must follow spare");
@@ -93,27 +93,29 @@ impl<W: Write, S: AsMut<[u8]>> Output for StdOutput<W, S> {
     }
 }
 
-#[cfg(all(test, feature = "identity"))]
+#[cfg(all(test, feature = "identity", feature = "alloc"))]
 mod tests {
-    use std::io::Cursor;
-
-    use super::{StdInput, StdOutput};
+    use super::{EmbeddedSource, EmbeddedSink};
     use crate::identity::identity;
-    use crate::io::{stream_to_stream, VecInput, VecOutput};
+    use crate::io::{stream_to_stream, VecSource, VecSink};
 
     #[test]
-    fn std_input_can_feed_vec_output() {
-        let mut input = StdInput::new(Cursor::new(b"std to vec"), [0u8; 3]);
-        let mut output = VecOutput::default();
+    fn embedded_input_can_feed_vec_output() {
+        let mut input = EmbeddedSource::new(&b"embedded to vec"[..], [0u8; 3]);
+        let mut output = VecSink::default();
         stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"std to vec");
+        assert_eq!(output.into_inner(), b"embedded to vec");
     }
 
     #[test]
-    fn vec_input_can_feed_std_output() {
-        let mut input = VecInput::new(b"vec to std".to_vec());
-        let mut output = StdOutput::new(Vec::new(), [0u8; 3]);
-        stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"vec to std");
+    fn vec_input_can_feed_embedded_output() {
+        let mut input = VecSource::new(b"vec to embedded".to_vec());
+        let mut bytes = [0u8; 32];
+        let remaining = {
+            let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 3]);
+            stream_to_stream(&mut input, identity(), &mut output).unwrap();
+            output.into_inner().len()
+        };
+        assert_eq!(&bytes[..bytes.len() - remaining], b"vec to embedded");
     }
 }

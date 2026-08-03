@@ -10,9 +10,11 @@ use core::fmt;
 use embedded_io::{ErrorType, Read, Write};
 
 use crate::driver::{Driver, PumpEnd};
-use crate::io::slice_adapters::{SliceInput, SliceOutput};
-use crate::io::{CopyError, EmbeddedInput, EmbeddedOutput, Output};
+use crate::io::slice_adapters::{SliceSource, SliceSink};
+use crate::io::{CopyError, Sink};
 use crate::{Codec, Error};
+
+use super::bridge::{EmbeddedSource, EmbeddedSink};
 
 /// An endpoint error or a codec error from an embedded I/O adapter.
 #[derive(Debug)]
@@ -25,27 +27,27 @@ pub enum EmbeddedError<E> {
 
 fn reader_error<E>(error: CopyError<E, core::convert::Infallible>) -> EmbeddedError<E> {
     match error {
-        CopyError::Input(error) => EmbeddedError::Io(error),
-        CopyError::Output(never) => match never {},
+        CopyError::Source(error) => EmbeddedError::Io(error),
+        CopyError::Sink(never) => match never {},
         CopyError::Codec(error) => EmbeddedError::Codec(error),
-        CopyError::OutputExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
+        CopyError::SinkExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
     }
 }
 
 fn writer_error<E>(error: CopyError<core::convert::Infallible, E>) -> EmbeddedError<E> {
     match error {
-        CopyError::Input(never) => match never {},
-        CopyError::Output(error) => EmbeddedError::Io(error),
+        CopyError::Source(never) => match never {},
+        CopyError::Sink(error) => EmbeddedError::Io(error),
         CopyError::Codec(error) => EmbeddedError::Codec(error),
-        CopyError::OutputExhausted | CopyError::EmptySlot => unreachable!("embedded output adapter"),
+        CopyError::SinkExhausted | CopyError::EmptySlot => unreachable!("embedded output adapter"),
     }
 }
 
 fn slice_error<E>(error: CopyError<core::convert::Infallible, core::convert::Infallible>) -> EmbeddedError<E> {
     match error {
-        CopyError::Input(never) | CopyError::Output(never) => match never {},
+        CopyError::Source(never) | CopyError::Sink(never) => match never {},
         CopyError::Codec(error) => EmbeddedError::Codec(error),
-        CopyError::OutputExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
+        CopyError::SinkExhausted | CopyError::EmptySlot => unreachable!("slice output adapter"),
     }
 }
 
@@ -69,13 +71,13 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 
 /// Wraps an [`embedded_io::Read`], yielding bytes transformed by `C`.
 pub struct EmbeddedCodecReader<R, C: Codec, S> {
-    input: EmbeddedInput<R, S>,
+    input: EmbeddedSource<R, S>,
     driver: Driver<C>,
 }
 
 impl<R: Read, C: Codec, S: AsMut<[u8]>> EmbeddedCodecReader<R, C, S> {
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
-        Self { input: EmbeddedInput::new(inner, inbuf), driver: Driver::new(codec) }
+        Self { input: EmbeddedSource::new(inner, inbuf), driver: Driver::new(codec) }
     }
 
     /// Return the wrapped reader. Any buffered, unconsumed input is
@@ -95,9 +97,9 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for EmbeddedCodecReader<R, C, S> {
             return Ok(0);
         }
 
-        let mut output = SliceOutput::new(buf);
+        let mut output = SliceSink::new(buf);
         let moved = self.driver.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
-        if moved.end == PumpEnd::InputExhausted {
+        if moved.end == PumpEnd::SourceExhausted {
             self.driver.finish_to(&mut output).map_err(slice_error)?;
         }
         Ok(output.written())
@@ -107,13 +109,13 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for EmbeddedCodecReader<R, C, S> {
 /// Wraps an [`embedded_io::Write`], transforming bytes before writing
 /// them to the wrapped endpoint.
 pub struct EmbeddedCodecWriter<W, C: Codec, S> {
-    output: EmbeddedOutput<W, S>,
+    output: EmbeddedSink<W, S>,
     driver: Driver<C>,
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> EmbeddedCodecWriter<W, C, S> {
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
-        Self { output: EmbeddedOutput::new(inner, outbuf), driver: Driver::new(codec) }
+        Self { output: EmbeddedSink::new(inner, outbuf), driver: Driver::new(codec) }
     }
 
     /// Finish the codec stream, flush the endpoint, and return it.
@@ -133,7 +135,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for EmbeddedCodecWriter<W, C, S> 
         if !buf.is_empty() && self.driver.is_done() {
             return Err(EmbeddedError::WriteZero);
         }
-        let mut input = SliceInput::new(buf);
+        let mut input = SliceSource::new(buf);
         self.driver.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
         if !buf.is_empty() && input.consumed() == 0 {
             Err(EmbeddedError::WriteZero)

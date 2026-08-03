@@ -143,14 +143,14 @@ mod tests {
     use std::io::{Cursor, Write};
     use std::rc::Rc;
 
-    use rust_codecs_core::io::{stream_to_stream, VecInput, VecOutput};
+    use rust_codecs_core::io::{stream_to_stream, VecSource, VecSink};
     use rust_codecs_core::rot13::rot13;
 
     use super::{compose, run_io};
 
     fn collect(codec: impl rust_codecs_core::Codec, bytes: &[u8]) -> Vec<u8> {
-        let mut input = VecInput::new(bytes.to_vec());
-        let mut output = VecOutput::default();
+        let mut input = VecSource::new(bytes.to_vec());
+        let mut output = VecSink::default();
         stream_to_stream(&mut input, codec, &mut output).unwrap();
         output.into_inner()
     }
