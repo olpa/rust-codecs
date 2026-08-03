@@ -17,8 +17,8 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-mod codec;
-pub use codec::{Codec, Drain, Error, ErrorKind, Outcome};
+mod vocabulary;
+pub use vocabulary::{Codec, Drain, Error, ErrorKind, Outcome};
 
 mod carry;
 pub use carry::Carry;
