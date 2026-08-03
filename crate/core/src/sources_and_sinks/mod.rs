@@ -4,7 +4,7 @@
 //! - [`std_io`][]: `std::io::Read`/`Write`.
 //! - [`embedded_io`][]: `embedded_io::Read`/`Write`, enabled by the
 //!   `embedded-io` feature.
-//! - [`vec`][]: an owned `Vec<u8>` — fully in-memory, so there's no
+//! - [`mod@vec`][]: an owned `Vec<u8>` — fully in-memory, so there's no
 //!   reader/writer wrapper on top, just the bridge.
 //!
 //! `slice` (a `&mut [u8]` bridge) stays private: it exists only to give
