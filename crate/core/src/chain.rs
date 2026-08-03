@@ -5,7 +5,7 @@
 //! `io` (or a client's own) gets chaining for free without knowing
 //! anything about it.
 
-use crate::transfer::{transfer, TransferEnd};
+use crate::transfer::{transfer, StepEnd};
 use crate::{Codec, Drain, Error, Outcome};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
@@ -156,13 +156,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 self.drained += moved.consumed;
                 out_pos += moved.written;
                 match moved.end {
-                    TransferEnd::InputExhausted => {
+                    StepEnd::InputExhausted => {
                         continue;
                     }
-                    TransferEnd::OutputExhausted => {
+                    StepEnd::OutputExhausted => {
                         return Ok(Outcome::OutputFilled { consumed: in_pos });
                     }
-                    TransferEnd::StreamEnd => {
+                    StepEnd::StreamEnd => {
                         return Ok(Outcome::StreamEnd { consumed: in_pos, written: out_pos });
                     }
                 }
@@ -214,7 +214,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
             in_pos += moved.consumed;
             self.filled += moved.written;
-            if moved.end == TransferEnd::StreamEnd {
+            if moved.end == StepEnd::StreamEnd {
                 self.first_ended = true;
             }
             // Loop around: drain what was just staged.
@@ -244,13 +244,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 self.drained += moved.consumed;
                 out_pos += moved.written;
                 match moved.end {
-                    TransferEnd::InputExhausted => {
+                    StepEnd::InputExhausted => {
                         continue;
                     }
-                    TransferEnd::OutputExhausted => {
+                    StepEnd::OutputExhausted => {
                         return Ok(Drain::OutputFilled);
                     }
-                    TransferEnd::StreamEnd => {
+                    StepEnd::StreamEnd => {
                         return Ok(Drain::Done { written: out_pos });
                     }
                 }
@@ -313,13 +313,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 self.drained += moved.consumed;
                 out_pos += moved.written;
                 match moved.end {
-                    TransferEnd::InputExhausted => {
+                    StepEnd::InputExhausted => {
                         continue;
                     }
-                    TransferEnd::OutputExhausted => {
+                    StepEnd::OutputExhausted => {
                         return Ok(Drain::OutputFilled);
                     }
-                    TransferEnd::StreamEnd => {
+                    StepEnd::StreamEnd => {
                         // `second` ended in-band mid-flush: nothing
                         // more can ever come out, so the flush is
                         // trivially complete.

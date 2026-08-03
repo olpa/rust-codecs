@@ -5,13 +5,13 @@
 //! frontends lend both current windows. This driver owns only codec
 //! lifecycle, so using it never introduces a byte copy.
 
-use crate::transfer::{transfer, Transfer};
+use crate::transfer::{transfer, Step};
 use crate::{Codec, Drain, DriveError, Error, Sink, Source};
 
 /// Exact progress and boundary of one validated `finish` or `flush`
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DrainTransfer {
+pub(crate) struct DrainStep {
     pub(crate) written: usize,
     pub(crate) end: DrainEnd,
 }
@@ -58,16 +58,16 @@ impl<C: Codec> Driver<C> {
         self.done
     }
 
-    pub(crate) fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Transfer, Error> {
+    pub(crate) fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Step, Error> {
         if self.done {
-            return Ok(Transfer {
+            return Ok(Step {
                 consumed: 0,
                 written: 0,
-                end: crate::transfer::TransferEnd::StreamEnd,
+                end: crate::transfer::StepEnd::StreamEnd,
             });
         }
         let moved = transfer(&mut self.codec, input, output)?;
-        if moved.end == crate::transfer::TransferEnd::StreamEnd {
+        if moved.end == crate::transfer::StepEnd::StreamEnd {
             self.done = true;
         }
         Ok(moved)
@@ -126,7 +126,7 @@ impl<C: Codec> Driver<C> {
             output.commit(moved.written).map_err(DriveError::Sink)?;
             consumed += moved.consumed;
             written += moved.written;
-            if moved.end == crate::transfer::TransferEnd::StreamEnd {
+            if moved.end == crate::transfer::StepEnd::StreamEnd {
                 return Ok(PumpTransfer { consumed, written, end: PumpEnd::StreamEnd });
             }
             output_first = moved.written == offered;
@@ -188,9 +188,9 @@ impl<C: Codec> Driver<C> {
         }
     }
 
-    pub(crate) fn finish(&mut self, output: &mut [u8]) -> Result<DrainTransfer, Error> {
+    pub(crate) fn finish(&mut self, output: &mut [u8]) -> Result<DrainStep, Error> {
         if self.done {
-            return Ok(DrainTransfer {
+            return Ok(DrainStep {
                 written: 0,
                 end: DrainEnd::Done,
             });
@@ -204,9 +204,9 @@ impl<C: Codec> Driver<C> {
     }
 
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
-    pub(crate) fn flush(&mut self, output: &mut [u8]) -> Result<DrainTransfer, Error> {
+    pub(crate) fn flush(&mut self, output: &mut [u8]) -> Result<DrainStep, Error> {
         if self.done {
-            return Ok(DrainTransfer {
+            return Ok(DrainStep {
                 written: 0,
                 end: DrainEnd::Done,
             });
@@ -219,13 +219,13 @@ impl<C: Codec> Driver<C> {
 fn normalize_drain(
     result: Result<Drain, Error>,
     output_len: usize,
-) -> Result<DrainTransfer, Error> {
+) -> Result<DrainStep, Error> {
     Ok(match result?.validated(output_len)? {
-        Drain::OutputFilled => DrainTransfer {
+        Drain::OutputFilled => DrainStep {
             written: output_len,
             end: DrainEnd::SinkExhausted,
         },
-        Drain::Done { written } => DrainTransfer {
+        Drain::Done { written } => DrainStep {
             written,
             end: DrainEnd::Done,
         },
@@ -235,7 +235,7 @@ fn normalize_drain(
 #[cfg(test)]
 mod tests {
     use super::{DrainEnd, Driver};
-    use crate::transfer::TransferEnd;
+    use crate::transfer::StepEnd;
     use crate::{Codec, Drain, Error, ErrorKind, Outcome};
 
     struct Scripted {
@@ -266,7 +266,7 @@ mod tests {
         let moved = driver.process(b"abc", &mut [0; 4]).unwrap();
         assert_eq!(moved.consumed, 2);
         assert_eq!(moved.written, 4);
-        assert_eq!(moved.end, TransferEnd::OutputExhausted);
+        assert_eq!(moved.end, StepEnd::OutputExhausted);
     }
 
     #[test]
@@ -284,7 +284,7 @@ mod tests {
         let repeated = driver.process(b"trailing", &mut [0; 4]).unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
-        assert_eq!(repeated.end, TransferEnd::StreamEnd);
+        assert_eq!(repeated.end, StepEnd::StreamEnd);
     }
 
     #[test]

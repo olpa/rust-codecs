@@ -9,7 +9,7 @@ use crate::{Codec, Error, Outcome};
 
 /// Why one transfer between the current input and output windows stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransferEnd {
+pub(crate) enum StepEnd {
     /// The complete input window was consumed.
     InputExhausted,
     /// The complete output window was filled.
@@ -20,10 +20,10 @@ pub(crate) enum TransferEnd {
 
 /// Exact progress made by one validated [`Codec::process`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Transfer {
+pub(crate) struct Step {
     pub(crate) consumed: usize,
     pub(crate) written: usize,
-    pub(crate) end: TransferEnd,
+    pub(crate) end: StepEnd,
 }
 
 /// Transfer between the current windows until the codec reaches the
@@ -32,7 +32,7 @@ pub(crate) fn transfer<C: Codec + ?Sized>(
     codec: &mut C,
     input: &[u8],
     output: &mut [u8],
-) -> Result<Transfer, Error> {
+) -> Result<Step, Error> {
     let input_len = input.len();
     let output_len = output.len();
     let outcome = codec
@@ -40,27 +40,27 @@ pub(crate) fn transfer<C: Codec + ?Sized>(
         .validated(input_len, output_len)?;
 
     Ok(match outcome {
-        Outcome::InputConsumed { written } => Transfer {
+        Outcome::InputConsumed { written } => Step {
             consumed: input_len,
             written,
-            end: TransferEnd::InputExhausted,
+            end: StepEnd::InputExhausted,
         },
-        Outcome::OutputFilled { consumed } => Transfer {
+        Outcome::OutputFilled { consumed } => Step {
             consumed,
             written: output_len,
-            end: TransferEnd::OutputExhausted,
+            end: StepEnd::OutputExhausted,
         },
-        Outcome::StreamEnd { consumed, written } => Transfer {
+        Outcome::StreamEnd { consumed, written } => Step {
             consumed,
             written,
-            end: TransferEnd::StreamEnd,
+            end: StepEnd::StreamEnd,
         },
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{transfer, Transfer, TransferEnd};
+    use super::{transfer, Step, StepEnd};
     use crate::{Codec, Drain, Error, ErrorKind, Outcome};
 
     struct Reports(Outcome);
@@ -82,10 +82,10 @@ mod tests {
 
         assert_eq!(
             transfer(&mut codec, b"abc", &mut output),
-            Ok(Transfer {
+            Ok(Step {
                 consumed: 3,
                 written: 2,
-                end: TransferEnd::InputExhausted,
+                end: StepEnd::InputExhausted,
             })
         );
     }
@@ -97,10 +97,10 @@ mod tests {
 
         assert_eq!(
             transfer(&mut codec, b"abc", &mut output),
-            Ok(Transfer {
+            Ok(Step {
                 consumed: 2,
                 written: 5,
-                end: TransferEnd::OutputExhausted,
+                end: StepEnd::OutputExhausted,
             })
         );
     }
@@ -115,10 +115,10 @@ mod tests {
 
         assert_eq!(
             transfer(&mut codec, b"abc", &mut output),
-            Ok(Transfer {
+            Ok(Step {
                 consumed: 2,
                 written: 4,
-                end: TransferEnd::StreamEnd
+                end: StepEnd::StreamEnd
             })
         );
     }
@@ -128,20 +128,20 @@ mod tests {
         let mut input_done = Reports(Outcome::InputConsumed { written: 0 });
         assert_eq!(
             transfer(&mut input_done, b"", &mut []),
-            Ok(Transfer {
+            Ok(Step {
                 consumed: 0,
                 written: 0,
-                end: TransferEnd::InputExhausted,
+                end: StepEnd::InputExhausted,
             })
         );
 
         let mut output_done = Reports(Outcome::OutputFilled { consumed: 0 });
         assert_eq!(
             transfer(&mut output_done, b"abc", &mut []),
-            Ok(Transfer {
+            Ok(Step {
                 consumed: 0,
                 written: 0,
-                end: TransferEnd::OutputExhausted,
+                end: StepEnd::OutputExhausted,
             })
         );
     }
