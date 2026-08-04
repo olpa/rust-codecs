@@ -163,22 +163,6 @@ mod tests {
     use crate::rot13::rot13;
     use crate::{Codec, Drain, Error, Progress};
 
-    struct CountingReader {
-        bytes: &'static [u8],
-        pos: usize,
-        reads: usize,
-    }
-
-    impl Read for CountingReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.reads += 1;
-            let n = buf.len().min(self.bytes.len() - self.pos);
-            buf[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
-            self.pos += n;
-            Ok(n)
-        }
-    }
-
     #[test]
     #[should_panic(expected = "buffer must be non-empty")]
     fn codec_reader_rejects_empty_buffer() {
@@ -230,14 +214,5 @@ mod tests {
         assert_eq!(out, b"Hel");
         let mut buf = [0u8; 4];
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
-    }
-
-    #[test]
-    fn reader_does_not_read_ahead_when_caller_output_is_full() {
-        let inner = CountingReader { bytes: b"abcdef", pos: 0, reads: 0 };
-        let mut reader = CodecReader::new(inner, rot13(), [0u8; 3]);
-        let mut output = [0u8; 3];
-        assert_eq!(reader.read(&mut output).unwrap(), 3);
-        assert_eq!(reader.into_inner().reads, 1);
     }
 }

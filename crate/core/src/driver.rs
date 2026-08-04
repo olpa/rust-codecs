@@ -96,18 +96,9 @@ impl<C: Codec> Driver<C> {
     /// its stream end or either endpoint has no more room/data to
     /// offer.
     ///
-    /// Each loop iteration fetches one chunk from `input` and one spare
-    /// slice from `output`, calls [`Driver::process`] once, then feeds
-    /// the result back (`input.consume`, `output.commit`). The order in
-    /// which `chunk()` and `spare()` are polled alternates each
-    /// iteration (`output_first`), driven by whether the previous call
-    /// filled the output slice completely: if it did, spare space is
-    /// likely the next bottleneck, so `spare()` is checked first (and a
-    /// `None` there is reported before bothering to check `input`, so a
-    /// full sink is reported over an exhausted source); otherwise
-    /// `chunk()` is checked first. This just avoids one redundant
-    /// `chunk`/`spare` call per iteration; it does not change the
-    /// bytes moved.
+    /// Each loop iteration fetches one chunk from `input`, then one
+    /// spare slice from `output`, calls [`Driver::process`] once, then
+    /// feeds the result back (`input.consume`, `output.commit`).
     ///
     /// Returns once one of three things happens: the source is
     /// exhausted (`PumpEnd::SourceExhausted`), the sink has no more
@@ -123,47 +114,29 @@ impl<C: Codec> Driver<C> {
     ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
         let mut consumed = 0;
         let mut written = 0;
-        let mut output_first = false;
         loop {
-            let (moved, offered) = if output_first {
-                let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
-                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::SinkExhausted });
-                };
-                if spare.is_empty() {
-                    return Err(DriveError::EmptySlot);
-                }
-                let offered = spare.len();
-                let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
+            // Invariants at top of loop: `consumed`/`written` are the
+            // committed totals from prior iterations only (this
+            // iteration hasn't moved anything yet); the codec hasn't
+            // reported `StreamEnd` (that returns immediately); neither
+            // `input` nor `output` holds a chunk/spare left over from a
+            // prior iteration (each iteration either resolves what it
+            // borrowed via `process`, or commits 0 before returning).
+            let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
+                return Ok(PumpTransfer { consumed, written, end: PumpEnd::SourceExhausted });
+            };
+            let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
+                return Ok(PumpTransfer { consumed, written, end: PumpEnd::SinkExhausted });
+            };
+            if spare.is_empty() {
+                return Err(DriveError::EmptySlot);
+            }
+            let moved = match self.process(chunk, spare) {
+                Ok(moved) => moved,
+                Err(error) => {
                     output.commit(0).map_err(DriveError::Sink)?;
-                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::SourceExhausted });
-                };
-                let moved = match self.process(chunk, spare) {
-                    Ok(moved) => moved,
-                    Err(error) => {
-                        output.commit(0).map_err(DriveError::Sink)?;
-                        return Err(DriveError::Codec(error));
-                    }
-                };
-                (moved, offered)
-            } else {
-                let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
-                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::SourceExhausted });
-                };
-                let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
-                    return Ok(PumpTransfer { consumed, written, end: PumpEnd::SinkExhausted });
-                };
-                if spare.is_empty() {
-                    return Err(DriveError::EmptySlot);
+                    return Err(DriveError::Codec(error));
                 }
-                let offered = spare.len();
-                let moved = match self.process(chunk, spare) {
-                    Ok(moved) => moved,
-                    Err(error) => {
-                        output.commit(0).map_err(DriveError::Sink)?;
-                        return Err(DriveError::Codec(error));
-                    }
-                };
-                (moved, offered)
             };
             input.consume(moved.consumed);
             output.commit(moved.written).map_err(DriveError::Sink)?;
@@ -172,7 +145,6 @@ impl<C: Codec> Driver<C> {
             if moved.end == crate::transfer::ProgressEnd::StreamEnd {
                 return Ok(PumpTransfer { consumed, written, end: PumpEnd::StreamEnd });
             }
-            output_first = moved.written == offered;
         }
     }
 
