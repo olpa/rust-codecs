@@ -53,7 +53,10 @@ pub enum DriveError<EI, EO> {
     Sink(EO),
     Codec(crate::Error),
     SinkExhausted,
-    EmptySlot,
+    /// A call moved zero bytes on both sides without ending the
+    /// stream — the driver refuses to spin forever on a stalled
+    /// codec/endpoint pair.
+    NoProgress,
 }
 
 /// Drive one codec between any pair of lending stream adapters.
@@ -87,7 +90,7 @@ where
         DriveError::Sink(error) => DriveError::Sink(error),
         DriveError::Codec(error) => DriveError::Codec(error),
         DriveError::SinkExhausted => DriveError::SinkExhausted,
-        DriveError::EmptySlot => DriveError::EmptySlot,
+        DriveError::NoProgress => DriveError::NoProgress,
     })?;
     totals.written += drained.written;
     match drained.end {

@@ -35,7 +35,7 @@ fn reader_error(err: DriveError<io::Error, Infallible>) -> io::Error {
         DriveError::Source(error) => error,
         DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::EmptySlot => {
+        DriveError::SinkExhausted | DriveError::NoProgress => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
         }
     }
@@ -46,7 +46,7 @@ fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => error,
         DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::EmptySlot => {
+        DriveError::SinkExhausted | DriveError::NoProgress => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid std output adapter")
         }
     }
@@ -56,7 +56,7 @@ fn slice_error(err: DriveError<Infallible, Infallible>) -> io::Error {
     match err {
         DriveError::Source(never) | DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::EmptySlot => {
+        DriveError::SinkExhausted | DriveError::NoProgress => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
         }
     }

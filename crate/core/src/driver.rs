@@ -103,10 +103,12 @@ impl<C: Codec> Driver<C> {
     /// Returns once one of three things happens: the source is
     /// exhausted (`PumpEnd::SourceExhausted`), the sink has no more
     /// spare space (`PumpEnd::SinkExhausted`), or the codec itself
-    /// signals the end of the stream (`PumpEnd::StreamEnd`). An empty
-    /// (but `Some`) spare slice from the sink is treated as a contract
-    /// violation (`DriveError::EmptySlot`), as is a codec error, which
-    /// aborts the loop after committing zero bytes to the sink.
+    /// signals the end of the stream (`PumpEnd::StreamEnd`). A call
+    /// that moves zero bytes on both sides without ending the stream
+    /// is a stall — the sink offered an empty (but `Some`) slice and
+    /// the codec couldn't do anything with it — and is reported as
+    /// `DriveError::NoProgress`, the same as a codec error, both of
+    /// which abort the loop after committing zero bytes to the sink.
     pub(crate) fn transfer_from<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
@@ -128,11 +130,25 @@ impl<C: Codec> Driver<C> {
             let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
                 return Ok(PumpTransfer { consumed, written, end: PumpEnd::SinkExhausted });
             };
-            if spare.is_empty() {
-                return Err(DriveError::EmptySlot);
-            }
+            // A call may make progress with an empty `spare` (e.g. a
+            // codec that only ever consumes input, never writing
+            // anything), so instead of rejecting an empty slice up
+            // front, progress is judged as part of the call's own
+            // result, right alongside the error case: zero bytes moved
+            // on both sides, without ending the stream, means this
+            // pair genuinely can't advance.
             let moved = match self.process(chunk, spare) {
-                Ok(moved) => moved,
+                Ok(moved)
+                    if moved.consumed > 0
+                        || moved.written > 0
+                        || moved.end == crate::transfer::ProgressEnd::StreamEnd =>
+                {
+                    moved
+                }
+                Ok(_) => {
+                    output.commit(0).map_err(DriveError::Sink)?;
+                    return Err(DriveError::NoProgress);
+                }
                 Err(error) => {
                     output.commit(0).map_err(DriveError::Sink)?;
                     return Err(DriveError::Codec(error));
@@ -194,9 +210,13 @@ impl<C: Codec> Driver<C> {
     /// full but the codec had nothing left anyway" with "sink is full
     /// and blocking real progress".
     ///
-    /// A `Some` but empty spare slice is a contract violation
-    /// (`DriveError::EmptySlot`); a codec error commits zero bytes to
-    /// the sink before propagating.
+    /// A call that writes nothing and doesn't reach `Done` is a stall
+    /// (`DriveError::NoProgress`), judged as part of the call's own
+    /// result right alongside the error case, not by rejecting an
+    /// empty spare slice up front — so a codec that happens to have
+    /// nothing left to write against an empty buffer still completes
+    /// normally. A codec error commits zero bytes to the sink before
+    /// propagating.
     fn drain_to<O: Sink>(
         &mut self,
         output: &mut O,
@@ -205,18 +225,17 @@ impl<C: Codec> Driver<C> {
         let mut written = 0;
         loop {
             let moved = match output.spare().map_err(DriveError::Sink)? {
-                Some(spare) => {
-                    if spare.is_empty() {
-                        return Err(DriveError::EmptySlot);
+                Some(spare) => match kind.drive(self, spare) {
+                    Ok(moved) if moved.written > 0 || moved.end == DrainEnd::Done => Ok(moved),
+                    Ok(_) => {
+                        output.commit(0).map_err(DriveError::Sink)?;
+                        return Err(DriveError::NoProgress);
                     }
-                    match kind.drive(self, spare) {
-                        Ok(moved) => Ok(moved),
-                        Err(error) => {
-                            output.commit(0).map_err(DriveError::Sink)?;
-                            return Err(DriveError::Codec(error));
-                        }
+                    Err(error) => {
+                        output.commit(0).map_err(DriveError::Sink)?;
+                        return Err(DriveError::Codec(error));
                     }
-                }
+                },
                 None => {
                     let moved = kind.drive(self, &mut []).map_err(DriveError::Codec)?;
                     return Ok(PumpDrain { written, end: if moved.end == DrainEnd::Done {
@@ -292,9 +311,9 @@ fn normalize_drain(
 
 #[cfg(test)]
 mod tests {
-    use super::{DrainEnd, Driver};
+    use super::{DrainEnd, Driver, PumpEnd};
     use crate::transfer::ProgressEnd;
-    use crate::{Codec, Drain, Error, ErrorKind, Progress};
+    use crate::{Codec, Drain, DriveError, Error, ErrorKind, Progress, Sink, Source};
 
     struct Scripted {
         process: Progress,
@@ -313,6 +332,79 @@ mod tests {
         fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
             Ok(self.drain)
         }
+    }
+
+    /// A `Source` over a plain byte slice.
+    struct SliceSource<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+
+    impl Source for SliceSource<'_> {
+        type Error = core::convert::Infallible;
+
+        fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+            Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.pos += amount;
+        }
+    }
+
+    /// A `Sink` that always offers a zero-length slice and never
+    /// reports exhaustion — stands in for an endpoint a codec doesn't
+    /// actually need output room from.
+    struct NullSink;
+
+    impl Sink for NullSink {
+        type Error = core::convert::Infallible;
+
+        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+            Ok(Some(&mut []))
+        }
+
+        fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
+            assert_eq!(amount, 0, "NullSink never offers room to write into");
+            Ok(())
+        }
+    }
+
+    /// Consumes everything, writes nothing — e.g. a hash/checksum
+    /// pass with no output stream at all.
+    struct DropEverything;
+
+    impl Codec for DropEverything {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            Ok(Progress::InputConsumed { written: 0 })
+        }
+
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    #[test]
+    fn codec_that_only_consumes_input_needs_no_output_room() {
+        let mut input = SliceSource { bytes: b"abcdef", pos: 0 };
+        let mut output = NullSink;
+        let mut driver = Driver::new(DropEverything);
+        let moved = driver.transfer_from(&mut input, &mut output).unwrap();
+        assert_eq!(moved.consumed, 6);
+        assert_eq!(moved.written, 0);
+        assert_eq!(moved.end, PumpEnd::SourceExhausted);
+    }
+
+    #[test]
+    fn a_pair_that_truly_cannot_progress_reports_no_progress() {
+        let mut input = SliceSource { bytes: b"x", pos: 0 };
+        let mut output = NullSink;
+        let mut driver = Driver::new(Scripted {
+            process: Progress::OutputFilled { consumed: 0 },
+            drain: Drain::Done { written: 0 },
+        });
+        let error = driver.transfer_from(&mut input, &mut output).unwrap_err();
+        assert!(matches!(error, DriveError::NoProgress));
     }
 
     #[test]

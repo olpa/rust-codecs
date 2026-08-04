@@ -29,7 +29,7 @@ fn reader_error<E>(error: DriveError<E, core::convert::Infallible>) -> EmbeddedE
         DriveError::Source(error) => EmbeddedError::Io(error),
         DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::EmptySlot => unreachable!("slice output adapter"),
+        DriveError::SinkExhausted | DriveError::NoProgress => unreachable!("slice output adapter"),
     }
 }
 
@@ -38,7 +38,7 @@ fn writer_error<E>(error: DriveError<core::convert::Infallible, E>) -> EmbeddedE
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => EmbeddedError::Io(error),
         DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::EmptySlot => unreachable!("embedded output adapter"),
+        DriveError::SinkExhausted | DriveError::NoProgress => unreachable!("embedded output adapter"),
     }
 }
 
@@ -46,7 +46,7 @@ fn slice_error<E>(error: DriveError<core::convert::Infallible, core::convert::In
     match error {
         DriveError::Source(never) | DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::EmptySlot => unreachable!("slice output adapter"),
+        DriveError::SinkExhausted | DriveError::NoProgress => unreachable!("slice output adapter"),
     }
 }
 
