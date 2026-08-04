@@ -5,8 +5,8 @@
 //! `io` (or a client's own) gets chaining for free without knowing
 //! anything about it.
 
-use crate::transfer::{transfer, StepEnd};
-use crate::{Codec, Drain, Error, Outcome};
+use crate::transfer::{transfer, ProgressEnd};
+use crate::{Codec, Drain, Error, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
 /// `staging`) into a single [`Codec`].
@@ -126,7 +126,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
         // New input invalidates a half-completed flush's phase
@@ -156,14 +156,14 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 self.drained += moved.consumed;
                 out_pos += moved.written;
                 match moved.end {
-                    StepEnd::InputExhausted => {
+                    ProgressEnd::InputExhausted => {
                         continue;
                     }
-                    StepEnd::OutputExhausted => {
-                        return Ok(Outcome::OutputFilled { consumed: in_pos });
+                    ProgressEnd::OutputExhausted => {
+                        return Ok(Progress::OutputFilled { consumed: in_pos });
                     }
-                    StepEnd::StreamEnd => {
-                        return Ok(Outcome::StreamEnd { consumed: in_pos, written: out_pos });
+                    ProgressEnd::StreamEnd => {
+                        return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
                     }
                 }
             }
@@ -188,21 +188,21 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     .and_then(|d| d.validated(output.len() - out_pos))
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?
                 {
-                    Drain::OutputFilled => Ok(Outcome::OutputFilled { consumed: in_pos }),
+                    Drain::OutputFilled => Ok(Progress::OutputFilled { consumed: in_pos }),
                     Drain::Done { written } => {
-                        Ok(Outcome::StreamEnd { consumed: in_pos, written: out_pos + written })
+                        Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos + written })
                     }
                 };
             }
             if in_pos == input.len() {
-                return Ok(Outcome::InputConsumed { written: out_pos });
+                return Ok(Progress::InputConsumed { written: out_pos });
             }
             if out_pos == output.len() {
                 // Output is exactly full with staging clean and input
                 // remaining: report the bottleneck rather than churn
                 // `first`'s bytes into staging that `second` couldn't
                 // move anywhere.
-                return Ok(Outcome::OutputFilled { consumed: in_pos });
+                return Ok(Progress::OutputFilled { consumed: in_pos });
             }
 
             let staging = self.staging.as_mut();
@@ -214,7 +214,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
             in_pos += moved.consumed;
             self.filled += moved.written;
-            if moved.end == StepEnd::StreamEnd {
+            if moved.end == ProgressEnd::StreamEnd {
                 self.first_ended = true;
             }
             // Loop around: drain what was just staged.
@@ -244,13 +244,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 self.drained += moved.consumed;
                 out_pos += moved.written;
                 match moved.end {
-                    StepEnd::InputExhausted => {
+                    ProgressEnd::InputExhausted => {
                         continue;
                     }
-                    StepEnd::OutputExhausted => {
+                    ProgressEnd::OutputExhausted => {
                         return Ok(Drain::OutputFilled);
                     }
-                    StepEnd::StreamEnd => {
+                    ProgressEnd::StreamEnd => {
                         return Ok(Drain::Done { written: out_pos });
                     }
                 }
@@ -313,13 +313,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 self.drained += moved.consumed;
                 out_pos += moved.written;
                 match moved.end {
-                    StepEnd::InputExhausted => {
+                    ProgressEnd::InputExhausted => {
                         continue;
                     }
-                    StepEnd::OutputExhausted => {
+                    ProgressEnd::OutputExhausted => {
                         return Ok(Drain::OutputFilled);
                     }
-                    StepEnd::StreamEnd => {
+                    ProgressEnd::StreamEnd => {
                         // `second` ended in-band mid-flush: nothing
                         // more can ever come out, so the flush is
                         // trivially complete.
@@ -388,7 +388,7 @@ mod tests {
     use crate::{stream_to_stream, DriveError};
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
     use crate::rot13::rot13;
-    use crate::{Codec, Drain, Error, Outcome};
+    use crate::{Codec, Drain, Error, Progress};
 
     const INPUT: &[u8] = b"Hello, World! 123";
 
@@ -414,17 +414,17 @@ mod tests {
     }
 
     impl Codec for EarlyEnd {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
             output[..n].copy_from_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
-                Ok(Outcome::StreamEnd { consumed: n, written: n })
+                Ok(Progress::StreamEnd { consumed: n, written: n })
             } else if n == input.len() {
-                Ok(Outcome::InputConsumed { written: n })
+                Ok(Progress::InputConsumed { written: n })
             } else {
-                Ok(Outcome::OutputFilled { consumed: n })
+                Ok(Progress::OutputFilled { consumed: n })
             }
         }
 
@@ -471,7 +471,7 @@ mod tests {
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 8]);
         let mut out = [0u8; 1];
         let outcome = chain.process(INPUT, &mut out).unwrap();
-        assert!(matches!(outcome, Outcome::OutputFilled { .. }));
+        assert!(matches!(outcome, Progress::OutputFilled { .. }));
         assert_eq!(out[0], INPUT[0]);
     }
 
@@ -483,7 +483,7 @@ mod tests {
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, &mut out).unwrap();
-        assert_eq!(outcome, Outcome::InputConsumed { written: INPUT.len() });
+        assert_eq!(outcome, Progress::InputConsumed { written: INPUT.len() });
         assert_eq!(&out[..INPUT.len()], INPUT);
     }
 
@@ -502,15 +502,15 @@ mod tests {
         while in_pos < INPUT.len() {
             let mut out = [0u8; 1];
             match chain.process(&INPUT[in_pos..], &mut out).unwrap() {
-                Outcome::InputConsumed { written } => {
+                Progress::InputConsumed { written } => {
                     collected.extend_from_slice(&out[..written]);
                     in_pos = INPUT.len();
                 }
-                Outcome::OutputFilled { consumed } => {
+                Progress::OutputFilled { consumed } => {
                     collected.extend_from_slice(&out);
                     in_pos += consumed;
                 }
-                Outcome::StreamEnd { .. } => unreachable!("base64∘rot13 never self-terminates"),
+                Progress::StreamEnd { .. } => unreachable!("base64∘rot13 never self-terminates"),
             }
         }
         loop {
@@ -555,7 +555,7 @@ mod tests {
         let mut chain = Chain::new(EarlyEnd { limit: 3, done: 0 }, identity(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(b"Hello World", &mut out).unwrap();
-        assert_eq!(outcome, Outcome::StreamEnd { consumed: 3, written: 3 });
+        assert_eq!(outcome, Progress::StreamEnd { consumed: 3, written: 3 });
         assert_eq!(&out[..3], b"Hel");
     }
 
@@ -569,7 +569,7 @@ mod tests {
         let mut chain = Chain::new(EarlyEnd { limit: 4, done: 0 }, base64_enc(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(b"Hello World", &mut out).unwrap();
-        assert_eq!(outcome, Outcome::StreamEnd { consumed: 4, written: expected.len() });
+        assert_eq!(outcome, Progress::StreamEnd { consumed: 4, written: expected.len() });
         assert_eq!(&out[..expected.len()], expected.as_slice());
     }
 
@@ -618,9 +618,9 @@ mod tests {
     }
 
     impl Codec for Hoarder {
-        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Outcome, Error> {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             self.buf.extend_from_slice(input);
-            Ok(Outcome::InputConsumed { written: 0 })
+            Ok(Progress::InputConsumed { written: 0 })
         }
 
         fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
@@ -641,7 +641,7 @@ mod tests {
         let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, &mut out).unwrap();
-        assert_eq!(outcome, Outcome::InputConsumed { written: 0 });
+        assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         let drain = chain.flush(&mut out).unwrap();
         assert_eq!(drain, Drain::Done { written: expected.len() });
         assert_eq!(&out[..expected.len()], expected.as_slice());
@@ -655,7 +655,7 @@ mod tests {
         let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, &mut out).unwrap();
-        assert_eq!(outcome, Outcome::InputConsumed { written: 0 });
+        assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         let drain = chain.flush(&mut out).unwrap();
         assert_eq!(drain, Drain::Done { written: expected.len() });
         assert_eq!(&out[..expected.len()], expected.as_slice());
@@ -697,8 +697,8 @@ mod tests {
     struct Overclaimer;
 
     impl Codec for Overclaimer {
-        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Outcome, Error> {
-            Ok(Outcome::OutputFilled { consumed: input.len() + 1 })
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            Ok(Progress::OutputFilled { consumed: input.len() + 1 })
         }
 
         fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {

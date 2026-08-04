@@ -1,21 +1,21 @@
 //! Example [`Codec`]: passes bytes through unchanged.
 
-use crate::{Codec, Drain, Error, Outcome};
+use crate::{Codec, Drain, Error, Progress};
 
 /// A no-op codec: output is identical to input.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Identity;
 
 impl Codec for Identity {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
         output[..n].copy_from_slice(&input[..n]);
         // A 1:1 codec satisfies the fully-consume-or-fully-fill
         // contract for free: `n` exhausts whichever side is shorter.
         if n == input.len() {
-            Ok(Outcome::InputConsumed { written: n })
+            Ok(Progress::InputConsumed { written: n })
         } else {
-            Ok(Outcome::OutputFilled { consumed: n })
+            Ok(Progress::OutputFilled { consumed: n })
         }
     }
 

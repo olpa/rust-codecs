@@ -7,7 +7,7 @@ one.
 ## 1. Implement `Codec`
 
 ```rust
-use rust_codecs_core::{Codec, Drain, Error, Outcome};
+use rust_codecs_core::{Codec, Drain, Error, Progress};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Rot13;
@@ -21,15 +21,15 @@ fn rot13_byte(b: u8) -> u8 {
 }
 
 impl Codec for Rot13 {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
         for (out, &inp) in output[..n].iter_mut().zip(&input[..n]) {
             *out = rot13_byte(inp);
         }
         if n == input.len() {
-            Ok(Outcome::InputConsumed { written: n })
+            Ok(Progress::InputConsumed { written: n })
         } else {
-            Ok(Outcome::OutputFilled { consumed: n })
+            Ok(Progress::OutputFilled { consumed: n })
         }
     }
 
@@ -45,7 +45,7 @@ impl Codec for Rot13 {
 the stream.** That's the whole contract, and the return types make any
 other outcome unrepresentable:
 
-- `process` returns an [`Outcome`]:
+- `process` returns a [`Progress`]:
   - `InputConsumed { written }` — all of `input` was taken (some
     possibly into internal buffering, so `written` may be less than
     what will eventually come out, even zero).
@@ -64,7 +64,7 @@ other outcome unrepresentable:
 
 The drivers do not take your word for it: every reported count is
 checked against the buffer sizes the call was given
-(`Outcome::validated`/`Drain::validated`), and an overclaimed count
+(`Progress::validated`/`Drain::validated`), and an overclaimed count
 surfaces as an `ErrorKind::ContractViolation` error rather than
 corrupting driver state. If you build your own driver, apply the same
 check at your codec boundary.

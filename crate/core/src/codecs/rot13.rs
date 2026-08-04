@@ -1,6 +1,6 @@
 //! Example [`Codec`]: ROT13 letter substitution.
 
-use crate::{Codec, Drain, Error, Outcome};
+use crate::{Codec, Drain, Error, Progress};
 
 fn rot13_byte(b: u8) -> u8 {
     match b {
@@ -15,7 +15,7 @@ fn rot13_byte(b: u8) -> u8 {
 pub struct Rot13;
 
 impl Codec for Rot13 {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
         for (out, &inp) in output[..n].iter_mut().zip(&input[..n]) {
             *out = rot13_byte(inp);
@@ -23,9 +23,9 @@ impl Codec for Rot13 {
         // A 1:1 codec satisfies the fully-consume-or-fully-fill
         // contract for free: `n` exhausts whichever side is shorter.
         if n == input.len() {
-            Ok(Outcome::InputConsumed { written: n })
+            Ok(Progress::InputConsumed { written: n })
         } else {
-            Ok(Outcome::OutputFilled { consumed: n })
+            Ok(Progress::OutputFilled { consumed: n })
         }
     }
 

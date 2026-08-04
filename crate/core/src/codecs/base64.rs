@@ -21,7 +21,7 @@
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
-use crate::{Carry, Codec, Drain, Error, ErrorKind, Outcome};
+use crate::{Carry, Codec, Drain, Error, ErrorKind, Progress};
 
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
 // of the base64 algorithm itself, not a detail of any one alphabet or
@@ -90,13 +90,13 @@ impl<E: Engine> Base64Enc<E> {
 }
 
 impl<E: Engine> Codec for Base64Enc<E> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let mut in_pos = 0;
 
         // Deliver the tail of a group from a previous call first.
         let mut out_pos = self.carry.drain(output);
         if !self.carry.is_empty() {
-            return Ok(Outcome::OutputFilled { consumed: 0 });
+            return Ok(Progress::OutputFilled { consumed: 0 });
         }
 
         // Top up a pending partial group with fresh input; emit it
@@ -105,13 +105,13 @@ impl<E: Engine> Codec for Base64Enc<E> {
             in_pos += append_to_pending(&mut self.pending_group, &mut self.len, input);
             if self.len < GROUP {
                 // The top-up took everything `input` had.
-                return Ok(Outcome::InputConsumed { written: out_pos });
+                return Ok(Progress::InputConsumed { written: out_pos });
             }
             let (scratch, n) = self.encode_group(&self.pending_group, in_pos, out_pos)?;
             self.len = 0;
             out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
             if !self.carry.is_empty() {
-                return Ok(Outcome::OutputFilled { consumed: in_pos });
+                return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
 
@@ -151,14 +151,14 @@ impl<E: Engine> Codec for Base64Enc<E> {
         }
         if input.len() - in_pos >= GROUP {
             debug_assert_eq!(out_pos, output.len());
-            return Ok(Outcome::OutputFilled { consumed: in_pos });
+            return Ok(Progress::OutputFilled { consumed: in_pos });
         }
 
         // Buffer any leftover < GROUP bytes for the next call.
         if in_pos < input.len() {
             buffer_leftover(&mut self.pending_group, &mut self.len, &input[in_pos..]);
         }
-        Ok(Outcome::InputConsumed { written: out_pos })
+        Ok(Progress::InputConsumed { written: out_pos })
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
@@ -227,20 +227,20 @@ impl<E: Engine> Base64Dec<E> {
 }
 
 impl<E: Engine> Codec for Base64Dec<E> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let mut in_pos = 0;
 
         // Deliver the tail of a group from a previous call first.
         let mut out_pos = self.carry.drain(output);
         if !self.carry.is_empty() {
-            return Ok(Outcome::OutputFilled { consumed: 0 });
+            return Ok(Progress::OutputFilled { consumed: 0 });
         }
 
         // Top up a pending partial group with fresh input.
         if self.len > 0 {
             in_pos += append_to_pending(&mut self.pending_group, &mut self.len, input);
             if self.len < ENCODED_GROUP {
-                return Ok(Outcome::InputConsumed { written: out_pos });
+                return Ok(Progress::InputConsumed { written: out_pos });
             }
             if self.pending_group.contains(&b'=') {
                 // Padding is only valid in the true last group of the
@@ -253,13 +253,13 @@ impl<E: Engine> Codec for Base64Dec<E> {
                 if in_pos < input.len() {
                     return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
                 }
-                return Ok(Outcome::InputConsumed { written: out_pos });
+                return Ok(Progress::InputConsumed { written: out_pos });
             }
             let (scratch, n) = self.decode_group(&self.pending_group, in_pos, out_pos)?;
             self.len = 0;
             out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
             if !self.carry.is_empty() {
-                return Ok(Outcome::OutputFilled { consumed: in_pos });
+                return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
 
@@ -312,16 +312,16 @@ impl<E: Engine> Codec for Base64Dec<E> {
                 if in_pos < input.len() {
                     return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
                 }
-                return Ok(Outcome::InputConsumed { written: out_pos });
+                return Ok(Progress::InputConsumed { written: out_pos });
             }
             if out_pos == output.len() {
-                return Ok(Outcome::OutputFilled { consumed: in_pos });
+                return Ok(Progress::OutputFilled { consumed: in_pos });
             }
             let (scratch, n) = self.decode_group(&next_group, in_pos, out_pos)?;
             in_pos += ENCODED_GROUP;
             out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
             if !self.carry.is_empty() {
-                return Ok(Outcome::OutputFilled { consumed: in_pos });
+                return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
 
@@ -330,7 +330,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
         if in_pos < input.len() {
             buffer_leftover(&mut self.pending_group, &mut self.len, &input[in_pos..]);
         }
-        Ok(Outcome::InputConsumed { written: out_pos })
+        Ok(Progress::InputConsumed { written: out_pos })
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
@@ -376,7 +376,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
-    use crate::{stream_to_stream, Codec, DriveError, Drain, Outcome};
+    use crate::{stream_to_stream, Codec, DriveError, Drain, Progress};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
 
@@ -526,7 +526,7 @@ mod tests {
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
         let outcome = dec.process(b"QQ==", &mut out).unwrap();
-        assert_eq!(outcome, Outcome::InputConsumed { written: 0 });
+        assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         let drain = dec.finish(&mut out).unwrap();
         assert_eq!(drain, Drain::Done { written: 1 });
         assert_eq!(&out[..1], b"A");
@@ -543,15 +543,15 @@ mod tests {
         while in_pos < INPUT.len() {
             let mut out = [0u8; 1];
             match enc.process(&INPUT[in_pos..], &mut out).unwrap() {
-                Outcome::InputConsumed { written } => {
+                Progress::InputConsumed { written } => {
                     collected.extend_from_slice(&out[..written]);
                     in_pos = INPUT.len();
                 }
-                Outcome::OutputFilled { consumed } => {
+                Progress::OutputFilled { consumed } => {
                     collected.extend_from_slice(&out);
                     in_pos += consumed;
                 }
-                Outcome::StreamEnd { .. } => unreachable!("base64 never self-terminates"),
+                Progress::StreamEnd { .. } => unreachable!("base64 never self-terminates"),
             }
         }
         loop {

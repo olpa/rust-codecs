@@ -15,7 +15,7 @@ pub trait Codec { /* ... */ } // implement this to add a codec
 // The vocabulary Codec's methods speak in. The contract in one
 // sentence: every call fully consumes its input, fully fills its
 // output, or ends the stream.
-pub enum Outcome { /* InputConsumed, OutputFilled, StreamEnd */ }
+pub enum Progress { /* InputConsumed, OutputFilled, StreamEnd */ }
 pub enum Drain { /* OutputFilled, Done */ }
 pub struct Error { /* kind + consumed/written progress */ }
 

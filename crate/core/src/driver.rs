@@ -5,7 +5,7 @@
 //! frontends lend both current windows. This driver owns only codec
 //! lifecycle, so using it never introduces a byte copy.
 
-use crate::transfer::{transfer, Step};
+use crate::transfer::{transfer, ProgressStep};
 use crate::{Codec, Drain, DriveError, Error, Sink, Source};
 
 /// Exact progress and boundary of one validated `finish` or `flush`
@@ -76,16 +76,16 @@ impl<C: Codec> Driver<C> {
         self.done
     }
 
-    pub(crate) fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Step, Error> {
+    pub(crate) fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<ProgressStep, Error> {
         if self.done {
-            return Ok(Step {
+            return Ok(ProgressStep {
                 consumed: 0,
                 written: 0,
-                end: crate::transfer::StepEnd::StreamEnd,
+                end: crate::transfer::ProgressEnd::StreamEnd,
             });
         }
         let moved = transfer(&mut self.codec, input, output)?;
-        if moved.end == crate::transfer::StepEnd::StreamEnd {
+        if moved.end == crate::transfer::ProgressEnd::StreamEnd {
             self.done = true;
         }
         Ok(moved)
@@ -169,7 +169,7 @@ impl<C: Codec> Driver<C> {
             output.commit(moved.written).map_err(DriveError::Sink)?;
             consumed += moved.consumed;
             written += moved.written;
-            if moved.end == crate::transfer::StepEnd::StreamEnd {
+            if moved.end == crate::transfer::ProgressEnd::StreamEnd {
                 return Ok(PumpTransfer { consumed, written, end: PumpEnd::StreamEnd });
             }
             output_first = moved.written == offered;
@@ -317,16 +317,16 @@ fn normalize_drain(
 #[cfg(test)]
 mod tests {
     use super::{DrainEnd, Driver};
-    use crate::transfer::StepEnd;
-    use crate::{Codec, Drain, Error, ErrorKind, Outcome};
+    use crate::transfer::ProgressEnd;
+    use crate::{Codec, Drain, Error, ErrorKind, Progress};
 
     struct Scripted {
-        process: Outcome,
+        process: Progress,
         drain: Drain,
     }
 
     impl Codec for Scripted {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Outcome, Error> {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(self.process)
         }
 
@@ -342,19 +342,19 @@ mod tests {
     #[test]
     fn process_uses_the_shared_transfer_boundary() {
         let mut driver = Driver::new(Scripted {
-            process: Outcome::OutputFilled { consumed: 2 },
+            process: Progress::OutputFilled { consumed: 2 },
             drain: Drain::Done { written: 0 },
         });
         let moved = driver.process(b"abc", &mut [0; 4]).unwrap();
         assert_eq!(moved.consumed, 2);
         assert_eq!(moved.written, 4);
-        assert_eq!(moved.end, StepEnd::OutputExhausted);
+        assert_eq!(moved.end, ProgressEnd::OutputExhausted);
     }
 
     #[test]
     fn in_band_end_latches_completion() {
         let mut driver = Driver::new(Scripted {
-            process: Outcome::StreamEnd {
+            process: Progress::StreamEnd {
                 consumed: 1,
                 written: 2,
             },
@@ -366,13 +366,13 @@ mod tests {
         let repeated = driver.process(b"trailing", &mut [0; 4]).unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
-        assert_eq!(repeated.end, StepEnd::StreamEnd);
+        assert_eq!(repeated.end, ProgressEnd::StreamEnd);
     }
 
     #[test]
     fn finish_normalizes_output_progress_and_latches_done() {
         let mut filled = Driver::new(Scripted {
-            process: Outcome::InputConsumed { written: 0 },
+            process: Progress::InputConsumed { written: 0 },
             drain: Drain::OutputFilled,
         });
         let moved = filled.finish(&mut [0; 3]).unwrap();
@@ -381,7 +381,7 @@ mod tests {
         assert!(!filled.is_done());
 
         let mut done = Driver::new(Scripted {
-            process: Outcome::InputConsumed { written: 0 },
+            process: Progress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 2 },
         });
         let moved = done.finish(&mut [0; 3]).unwrap();
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn flush_does_not_end_the_stream() {
         let mut driver = Driver::new(Scripted {
-            process: Outcome::InputConsumed { written: 0 },
+            process: Progress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 2 },
         });
         let moved = driver.flush(&mut [0; 3]).unwrap();
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn drain_overclaims_are_contract_violations() {
         let mut driver = Driver::new(Scripted {
-            process: Outcome::InputConsumed { written: 0 },
+            process: Progress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 4 },
         });
         assert_eq!(

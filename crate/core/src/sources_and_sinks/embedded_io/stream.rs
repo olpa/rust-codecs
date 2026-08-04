@@ -155,7 +155,7 @@ mod tests {
 
     use super::{CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
-    use crate::{Codec, Drain, Error, Outcome};
+    use crate::{Codec, Drain, Error, Progress};
 
     const INPUT: &[u8] = b"embedded io";
 
@@ -190,8 +190,8 @@ mod tests {
     struct EndsImmediately;
 
     impl Codec for EndsImmediately {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Outcome, Error> {
-            Ok(Outcome::StreamEnd {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            Ok(Progress::StreamEnd {
                 consumed: 0,
                 written: 0,
             })

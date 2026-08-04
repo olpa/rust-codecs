@@ -161,7 +161,7 @@ mod tests {
 
     use super::{CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::{Codec, Drain, Error, Outcome};
+    use crate::{Codec, Drain, Error, Progress};
 
     struct CountingReader {
         bytes: &'static [u8],
@@ -199,17 +199,17 @@ mod tests {
     }
 
     impl Codec for EarlyEnd {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
             output[..n].copy_from_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
-                Ok(Outcome::StreamEnd { consumed: n, written: n })
+                Ok(Progress::StreamEnd { consumed: n, written: n })
             } else if n == input.len() {
-                Ok(Outcome::InputConsumed { written: n })
+                Ok(Progress::InputConsumed { written: n })
             } else {
-                Ok(Outcome::OutputFilled { consumed: n })
+                Ok(Progress::OutputFilled { consumed: n })
             }
         }
 

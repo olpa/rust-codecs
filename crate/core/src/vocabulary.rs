@@ -1,12 +1,12 @@
 //! The [`Codec`] trait and the vocabulary its methods speak in:
-//! [`Outcome`], [`Drain`], [`Error`]. See `CREATING-CODECS.md` for how
+//! [`Progress`], [`Drain`], [`Error`]. See `CREATING-CODECS.md` for how
 //! to write a codec.
 
-/// Outcome of one [`Codec::process`] call. Every variant states an
+/// Progress of one [`Codec::process`] call. Every variant states an
 /// invariant a driver can rely on without inspecting byte counts —
 /// "made no progress and can't say why" is not expressible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub enum Progress {
     /// All of `input` was consumed; `written` bytes were produced
     /// (possibly zero, when everything went into internal buffering).
     /// The driver's move: supply more input, or `finish`.
@@ -22,7 +22,7 @@ pub enum Outcome {
     StreamEnd { consumed: usize, written: usize },
 }
 
-/// Outcome of one [`Codec::finish`] or [`Codec::flush`] call.
+/// Progress of one [`Codec::finish`] or [`Codec::flush`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drain {
     /// All of `output` was filled and there is more to come — call
@@ -48,7 +48,7 @@ pub enum ErrorKind {
     BufferOverrun,
     /// The codec reported byte counts exceeding the buffers it was
     /// given — a codec bug, caught at the driver's trust boundary (see
-    /// [`Outcome::validated`]/[`Drain::validated`]) before it can
+    /// [`Progress::validated`]/[`Drain::validated`]) before it can
     /// corrupt positions, panic on a later slice, or make an adapter
     /// break its host contract (`std::io::Read` must never report more
     /// bytes than the buffer holds). The error's `consumed`/`written`
@@ -74,18 +74,18 @@ impl Error {
     }
 }
 
-impl Outcome {
+impl Progress {
     /// Check the reported byte counts against the buffer sizes the
     /// call was actually given, turning a lying codec into
     /// [`ErrorKind::ContractViolation`] instead of letting bogus
     /// counts corrupt driver state. Every driver in this crate applies
     /// this at its codec trust boundary; a driver of your own should
     /// too.
-    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Outcome, Error> {
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Progress, Error> {
         let honest = match self {
-            Outcome::InputConsumed { written } => written <= output_len,
-            Outcome::OutputFilled { consumed } => consumed <= input_len,
-            Outcome::StreamEnd { consumed, written } => {
+            Progress::InputConsumed { written } => written <= output_len,
+            Progress::OutputFilled { consumed } => consumed <= input_len,
+            Progress::StreamEnd { consumed, written } => {
                 consumed <= input_len && written <= output_len
             }
         };
@@ -98,7 +98,7 @@ impl Outcome {
 }
 
 impl Drain {
-    /// The [`Outcome::validated`] counterpart for `finish`/`flush`.
+    /// The [`Progress::validated`] counterpart for `finish`/`flush`.
     pub fn validated(self, output_len: usize) -> Result<Drain, Error> {
         match self {
             Drain::Done { written } if written > output_len => {
@@ -125,7 +125,7 @@ impl Drain {
 /// empty-output call, since it can't progress.
 pub trait Codec {
     /// Push input bytes and pull output bytes.
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error>;
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
 
     /// Signal "no more input is coming": flush any buffered state and,
     /// for formats with one, write the trailer/checksum. Call
@@ -151,7 +151,7 @@ use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
 impl<C: Codec + ?Sized> Codec for Box<C> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Outcome, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         (**self).process(input, output)
     }
 
@@ -166,25 +166,25 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drain, Error, ErrorKind, Outcome};
+    use super::{Drain, Error, ErrorKind, Progress};
 
     const CV: Error = Error { kind: ErrorKind::ContractViolation, consumed: 0, written: 0 };
 
     #[test]
     fn validated_accepts_honest_counts() {
-        assert!(Outcome::InputConsumed { written: 4 }.validated(10, 4).is_ok());
-        assert!(Outcome::OutputFilled { consumed: 10 }.validated(10, 4).is_ok());
-        assert!(Outcome::StreamEnd { consumed: 0, written: 0 }.validated(0, 0).is_ok());
+        assert!(Progress::InputConsumed { written: 4 }.validated(10, 4).is_ok());
+        assert!(Progress::OutputFilled { consumed: 10 }.validated(10, 4).is_ok());
+        assert!(Progress::StreamEnd { consumed: 0, written: 0 }.validated(0, 0).is_ok());
         assert!(Drain::OutputFilled.validated(0).is_ok());
         assert!(Drain::Done { written: 4 }.validated(4).is_ok());
     }
 
     #[test]
     fn validated_rejects_overclaimed_counts() {
-        assert_eq!(Outcome::InputConsumed { written: 5 }.validated(10, 4), Err(CV));
-        assert_eq!(Outcome::OutputFilled { consumed: 11 }.validated(10, 4), Err(CV));
-        assert_eq!(Outcome::StreamEnd { consumed: 11, written: 0 }.validated(10, 4), Err(CV));
-        assert_eq!(Outcome::StreamEnd { consumed: 0, written: 5 }.validated(10, 4), Err(CV));
+        assert_eq!(Progress::InputConsumed { written: 5 }.validated(10, 4), Err(CV));
+        assert_eq!(Progress::OutputFilled { consumed: 11 }.validated(10, 4), Err(CV));
+        assert_eq!(Progress::StreamEnd { consumed: 11, written: 0 }.validated(10, 4), Err(CV));
+        assert_eq!(Progress::StreamEnd { consumed: 0, written: 5 }.validated(10, 4), Err(CV));
         assert_eq!(Drain::Done { written: 5 }.validated(4), Err(CV));
     }
 }

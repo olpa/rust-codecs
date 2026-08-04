@@ -3,7 +3,7 @@
 //! the stream adapters a codec crate and its clients build on.
 //!
 //! - [`Codec`]: implement this to add a codec.
-//! - [`Outcome`], [`Drain`], [`Error`], [`ErrorKind`]: the vocabulary
+//! - [`Progress`], [`Drain`], [`Error`], [`ErrorKind`]: the vocabulary
 //!   [`Codec`]'s methods speak in. The contract in one sentence: every
 //!   call fully consumes its input, fully fills its output, or ends
 //!   the stream.
@@ -18,7 +18,7 @@
 extern crate alloc;
 
 mod vocabulary;
-pub use vocabulary::{Codec, Drain, Error, ErrorKind, Outcome};
+pub use vocabulary::{Codec, Drain, Error, ErrorKind, Progress};
 
 mod carry;
 pub use carry::Carry;
