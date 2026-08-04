@@ -42,6 +42,24 @@ pub(crate) struct PumpDrain {
     pub(crate) end: DrainEnd,
 }
 
+/// Which of the codec's two draining operations `drain_to` should
+/// call: `Finish` permanently ends the stream, `Flush` may be
+/// followed by further `process` calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainKind {
+    Finish,
+    Flush,
+}
+
+impl DrainKind {
+    fn drive<C: Codec>(self, driver: &mut Driver<C>, output: &mut [u8]) -> Result<DrainStep, Error> {
+        match self {
+            DrainKind::Finish => driver.finish(output),
+            DrainKind::Flush => driver.flush(output),
+        }
+    }
+}
+
 /// A bufferless lifecycle wrapper around a codec.
 pub(crate) struct Driver<C> {
     codec: C,
@@ -73,6 +91,31 @@ impl<C: Codec> Driver<C> {
         Ok(moved)
     }
 
+    /// Drive the codec by repeatedly pulling chunks from `input` and
+    /// pushing processed bytes into `output`, until the codec reaches
+    /// its stream end or either endpoint has no more room/data to
+    /// offer.
+    ///
+    /// Each loop iteration fetches one chunk from `input` and one spare
+    /// slice from `output`, calls [`Driver::process`] once, then feeds
+    /// the result back (`input.consume`, `output.commit`). The order in
+    /// which `chunk()` and `spare()` are polled alternates each
+    /// iteration (`output_first`), driven by whether the previous call
+    /// filled the output slice completely: if it did, spare space is
+    /// likely the next bottleneck, so `spare()` is checked first (and a
+    /// `None` there is reported before bothering to check `input`, so a
+    /// full sink is reported over an exhausted source); otherwise
+    /// `chunk()` is checked first. This just avoids one redundant
+    /// `chunk`/`spare` call per iteration; it does not change the
+    /// bytes moved.
+    ///
+    /// Returns once one of three things happens: the source is
+    /// exhausted (`PumpEnd::SourceExhausted`), the sink has no more
+    /// spare space (`PumpEnd::SinkExhausted`), or the codec itself
+    /// signals the end of the stream (`PumpEnd::StreamEnd`). An empty
+    /// (but `Some`) spare slice from the sink is treated as a contract
+    /// violation (`DriveError::EmptySlot`), as is a codec error, which
+    /// aborts the loop after committing zero bytes to the sink.
     pub(crate) fn transfer_from<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
@@ -133,11 +176,22 @@ impl<C: Codec> Driver<C> {
         }
     }
 
+    /// Drain the codec's trailing output by repeatedly calling
+    /// [`Driver::finish`] against spare space taken from `output`,
+    /// until the codec reports `Done`.
+    ///
+    /// This is the finalizing counterpart to `transfer_from`: it is
+    /// called once the source is exhausted, to flush whatever bytes
+    /// the codec still owes (e.g. block padding, trailers) with no
+    /// further input. It shares its loop with `flush_to` via
+    /// `drain_to(output, DrainKind::Finish)`, which selects `finish`
+    /// (permanently ends the stream) over `flush` (may be called
+    /// again later).
     pub(crate) fn finish_to<O: Sink>(
         &mut self,
         output: &mut O,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
-        self.drain_to(output, true)
+        self.drain_to(output, DrainKind::Finish)
     }
 
     #[cfg_attr(not(any(feature = "std", feature = "embedded-io")), allow(dead_code))]
@@ -145,13 +199,32 @@ impl<C: Codec> Driver<C> {
         &mut self,
         output: &mut O,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
-        self.drain_to(output, false)
+        self.drain_to(output, DrainKind::Flush)
     }
 
+    /// Shared loop behind `finish_to`/`flush_to`: repeatedly obtain
+    /// spare space from `output` and hand it to [`Driver::finish`] (if
+    /// `kind` is `DrainKind::Finish`) or [`Driver::flush`] (otherwise),
+    /// committing what was written, until the codec reports `Done`.
+    ///
+    /// When `output.spare()` returns `None`, the sink has no room —
+    /// but rather than immediately reporting `SinkExhausted`, one more
+    /// `finish`/`flush` call is made against an empty slice (`&mut
+    /// []`) to ask the codec whether it was actually done regardless
+    /// (e.g. nothing left to write, or it errors/rejects the empty
+    /// buffer). If that call reports `Done`, the drain is genuinely
+    /// complete; otherwise it really is blocked on sink space, and
+    /// `SinkExhausted` is returned. This avoids conflating "sink is
+    /// full but the codec had nothing left anyway" with "sink is full
+    /// and blocking real progress".
+    ///
+    /// A `Some` but empty spare slice is a contract violation
+    /// (`DriveError::EmptySlot`); a codec error commits zero bytes to
+    /// the sink before propagating.
     fn drain_to<O: Sink>(
         &mut self,
         output: &mut O,
-        finishing: bool,
+        kind: DrainKind,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         let mut written = 0;
         loop {
@@ -160,8 +233,7 @@ impl<C: Codec> Driver<C> {
                     if spare.is_empty() {
                         return Err(DriveError::EmptySlot);
                     }
-                    let result = if finishing { self.finish(spare) } else { self.flush(spare) };
-                    match result {
+                    match kind.drive(self, spare) {
                         Ok(moved) => Ok(moved),
                         Err(error) => {
                             output.commit(0).map_err(DriveError::Sink)?;
@@ -170,8 +242,7 @@ impl<C: Codec> Driver<C> {
                     }
                 }
                 None => {
-                    let moved = if finishing { self.finish(&mut []) } else { self.flush(&mut []) }
-                        .map_err(DriveError::Codec)?;
+                    let moved = kind.drive(self, &mut []).map_err(DriveError::Codec)?;
                     return Ok(PumpDrain { written, end: if moved.end == DrainEnd::Done {
                         DrainEnd::Done
                     } else {
@@ -216,6 +287,17 @@ impl<C: Codec> Driver<C> {
     }
 }
 
+/// Turn a raw [`Drain`] from `Codec::finish`/`Codec::flush` into a
+/// [`DrainStep`], after checking it against the codec contract
+/// (`validated`, which rejects a `Done { written }` that overclaims
+/// past `output_len` as `ErrorKind::ContractViolation`).
+///
+/// `Drain` only tells you *how* the codec stopped (filled the buffer,
+/// or actually finished); it doesn't carry the amount written for the
+/// filled case, since by contract that must be the whole buffer. This
+/// fills that in: `OutputFilled` becomes `written: output_len`, so
+/// both variants collapse into the uniform `{ written, end }` shape
+/// `Driver::finish`/`Driver::flush` and their callers work with.
 fn normalize_drain(
     result: Result<Drain, Error>,
     output_len: usize,
