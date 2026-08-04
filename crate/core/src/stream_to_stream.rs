@@ -8,6 +8,15 @@ pub trait Source {
     type Error;
 
     /// Return the current non-empty chunk, or `None` at end of input.
+    ///
+    /// "Current" is load-bearing: this is whatever hasn't been
+    /// released by `consume` yet, not necessarily fresh bytes. A
+    /// caller is never required to consume a whole chunk in one call
+    /// (a codec may only take part of it, e.g. when output runs out
+    /// first) — the unconsumed remainder is exactly what the next
+    /// `chunk()` call returns, so consecutive chunks can overlap.
+    /// Implementations must not hand out new bytes ahead of `pos`
+    /// until the old ones are released.
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
 
     /// Release the first `amount` bytes of the current chunk.

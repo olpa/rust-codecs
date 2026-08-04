@@ -15,6 +15,8 @@ impl<'a> SliceSource<'a> {
 impl Source for SliceSource<'_> {
     type Error = Infallible;
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        // Starts at `pos`, so an unconsumed remainder overlaps the
+        // previous call's chunk.
         Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
     }
     fn consume(&mut self, amount: usize) { self.pos += amount; }

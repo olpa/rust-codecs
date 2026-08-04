@@ -34,6 +34,8 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
     type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        // Only refills once the current window is fully consumed; an
+        // unconsumed remainder overlaps the previous call's chunk.
         if self.pos == self.len && !self.eof {
             self.len = self.inner.read(self.buffer.as_mut())?;
             self.pos = 0;

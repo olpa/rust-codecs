@@ -138,6 +138,10 @@ impl<C: Codec> Driver<C> {
                     return Err(DriveError::Codec(error));
                 }
             };
+            // `moved.consumed` may be less than `chunk.len()` (output
+            // ran out first); the unconsumed remainder isn't lost —
+            // it reappears (overlapping this chunk) on the next
+            // `input.chunk()` call.
             input.consume(moved.consumed);
             output.commit(moved.written).map_err(DriveError::Sink)?;
             consumed += moved.consumed;

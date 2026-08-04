@@ -29,6 +29,8 @@ impl Source for VecSource {
     type Error = Infallible;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        // Starts at `pos`, so an unconsumed remainder overlaps the
+        // previous call's chunk.
         Ok((self.pos < self.inner.len()).then_some(&self.inner[self.pos..]))
     }
 
