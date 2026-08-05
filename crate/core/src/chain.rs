@@ -127,36 +127,44 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
         // those hold (staging came up empty but both `input` and
         // `output` still have room) does another pass run.
         //
-        // `first` is called every pass regardless of whether it ended
-        // on an earlier one: a well-behaved codec keeps answering
-        // `StreamEnd` once it has reported it, so there is nothing to
-        // latch — the fresh result is trusted each time.
+        // `first` is called every pass that still has input to offer
+        // it, regardless of whether it ended on an earlier pass: a
+        // well-behaved codec keeps answering `StreamEnd` once it has
+        // reported it, so there is nothing to latch — the fresh result
+        // is trusted each time. Once `input` is exhausted, calling
+        // `first` again would only feed it an empty slice, so it's
+        // skipped; `first_ended` then just carries forward as "not
+        // detected this pass" rather than forcing a pointless call.
         loop {
-            let staging = self.staging.as_mut();
-            let moved = transfer(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
-                .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-            in_pos += moved.consumed;
-            self.stage_pos += moved.written;
-            let first_ended = moved.end == ProgressEnd::StreamEnd;
+            let first_ended = if in_pos < input.len() {
+                let staging = self.staging.as_mut();
+                let moved = transfer(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
+                    .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
+                in_pos += moved.consumed;
+                self.stage_pos += moved.written;
+                moved.end == ProgressEnd::StreamEnd
+            } else {
+                false
+            };
 
-            // `second` always reads staging from offset 0; a partial
+            // `second` always reads staging from offset 0 — called
+            // unconditionally, even against an empty staging window,
+            // per the `Codec` contract's empty-input case. A partial
             // drain is compacted to the front so the invariant holds
             // for the next pass (or the next call).
-            if self.stage_pos > 0 {
-                let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-                out_pos += moved.written;
-                if moved.end == ProgressEnd::StreamEnd {
-                    return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
-                }
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
+            let staging = self.staging.as_mut();
+            let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
+            out_pos += moved.written;
+            if moved.end == ProgressEnd::StreamEnd {
+                return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
             }
+            let leftover = self.stage_pos - moved.consumed;
+            if leftover > 0 {
+                let staging = self.staging.as_mut();
+                staging.copy_within(moved.consumed..self.stage_pos, 0);
+            }
+            self.stage_pos = leftover;
 
             // Case: `first`'s stream ended in-band and everything it
             // had already staged has passed through `second` — no more
@@ -223,21 +231,19 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 }
             };
 
-            if self.stage_pos > 0 {
-                let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                out_pos += moved.written;
-                if moved.end == ProgressEnd::StreamEnd {
-                    return Ok(Drain::Done { written: out_pos });
-                }
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
+            let staging = self.staging.as_mut();
+            let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+            out_pos += moved.written;
+            if moved.end == ProgressEnd::StreamEnd {
+                return Ok(Drain::Done { written: out_pos });
             }
+            let leftover = self.stage_pos - moved.consumed;
+            if leftover > 0 {
+                let staging = self.staging.as_mut();
+                staging.copy_within(moved.consumed..self.stage_pos, 0);
+            }
+            self.stage_pos = leftover;
 
             if first_done && self.stage_pos == 0 {
                 // `first` is fully drained through `second`; finish `second`.
@@ -287,24 +293,22 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 }
             };
 
-            if self.stage_pos > 0 {
-                let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                out_pos += moved.written;
-                if moved.end == ProgressEnd::StreamEnd {
-                    // `second` ended in-band mid-flush: nothing more
-                    // can ever come out, so the flush is trivially
-                    // complete.
-                    return Ok(Drain::Done { written: out_pos });
-                }
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
+            let staging = self.staging.as_mut();
+            let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+            out_pos += moved.written;
+            if moved.end == ProgressEnd::StreamEnd {
+                // `second` ended in-band mid-flush: nothing more
+                // can ever come out, so the flush is trivially
+                // complete.
+                return Ok(Drain::Done { written: out_pos });
             }
+            let leftover = self.stage_pos - moved.consumed;
+            if leftover > 0 {
+                let staging = self.staging.as_mut();
+                staging.copy_within(moved.consumed..self.stage_pos, 0);
+            }
+            self.stage_pos = leftover;
 
             if !(first_done && self.stage_pos == 0) {
                 if out_pos == output.len() {
