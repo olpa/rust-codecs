@@ -47,17 +47,18 @@ use crate::{Codec, Drain, Error, Progress};
 ///
 /// **Calling again after the end.** Once the chain has reported
 /// `StreamEnd`, a later `process` call consumes nothing and reports
-/// `StreamEnd` with zero counts (it re-runs `second.finish`, which a
-/// well-behaved codec answers with "done, zero bytes").
+/// `StreamEnd` with zero counts: it queries `first` again (a no-op,
+/// per the `Codec` contract) and re-runs `second.finish` (likewise a
+/// no-op once `Done`).
 ///
 /// **Interrupted `flush`.** A flush that returns `OutputFilled` is
-/// resumed by calling `flush` again with fresh output room. The
-/// resume continues where it stopped: once `first.flush` has
-/// completed, it is not started a second time — a deflate-style codec
-/// would emit a second sync marker. But if you call `process` between
-/// the two flush calls, the half-done flush is forgotten and the next
-/// flush starts from `first` again: new input opens a new sync
-/// boundary.
+/// resumed by calling `flush` again with fresh output room. `first`
+/// is always asked to flush again on resume — the `Codec` contract
+/// requires that to be a no-op once `first` already reached `Done`
+/// for this sync point, so no second sync marker comes out. If you
+/// call `process` between the two flush calls, `first` sees new input
+/// and is expected to treat the next `flush` as a fresh one: new
+/// input opens a new sync boundary.
 ///
 /// **Return-clean.** When `process` returns, the staging buffer holds
 /// only bytes that `second` refused because your output was full. The
@@ -71,10 +72,12 @@ use crate::{Codec, Drain, Error, Progress};
 /// `Codec` contract guarantees progress into any non-empty buffer.
 /// An empty staging buffer can never work, so `new` panics on it.
 ///
-/// **Empty output buffer.** `process` with zero-length output reports
-/// `OutputFilled` without progress when data is waiting. It is not an
-/// error, but a driver looping on that call gets nowhere — give it
-/// room instead.
+/// **Empty output buffer.** `process` with zero-length output always
+/// reports `OutputFilled`, since a zero-length window is trivially
+/// full — `written` never advances. `first` may still be pulled from
+/// into staging if there's room, but nothing can ever reach `output`.
+/// It is not an error, but a driver looping on that call gets nowhere
+/// for output — give it room instead.
 ///
 /// **Misbehaving codecs.** The byte counts reported by both inner
 /// codecs are checked on every call; an overclaimed count surfaces as
@@ -86,21 +89,11 @@ pub struct Chain<A, B, S> {
     first: A,
     second: B,
     staging: S,
-    /// Bytes in `staging` written by `first`, not yet all drained by `second`.
-    filled: usize,
-    /// Of `filled`, how many `second` has already consumed. The pair is
-    /// normalized (both zero once equal) at the top of every
-    /// `process`/`finish` turn, not at each mutation site — between
-    /// turns `drained == filled` may linger un-reset.
-    drained: usize,
-    /// `first` reported `StreamEnd` (or was finished) — stop feeding it.
-    first_ended: bool,
-    /// A `flush` interrupted by `OutputFilled` resumes where it left
-    /// off: once `first.flush` has reported done, later `flush` calls
-    /// skip straight to `second` — re-flushing `first` would make a
-    /// deflate-style codec emit a second sync marker. Cleared when new
-    /// input arrives (`process`) or the flush completes.
-    flushing_second: bool,
+    /// Bytes in `staging[..stage_pos]` are valid, produced by `first`
+    /// and not yet all drained by `second` — `second` is always fed
+    /// from offset 0, so a partial drain is compacted to the front
+    /// (and `stage_pos` shrunk to match) before `first` appends more.
+    stage_pos: usize,
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
@@ -117,10 +110,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             first,
             second,
             staging,
-            filled: 0,
-            drained: 0,
-            first_ended: false,
-            flushing_second: false,
+            stage_pos: 0,
         }
     }
 }
@@ -129,59 +119,54 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
-        // New input invalidates a half-completed flush's phase
-        // tracking; the next flush starts from `first` again.
-        self.flushing_second = false;
 
+        // Each turn is one pass — `first` appends to staging, then
+        // staging drains into `output` — followed by a check of the
+        // `Codec` contract's three outcomes: input fully consumed,
+        // output fully filled, or the stream ended. Only when none of
+        // those hold (staging came up empty but both `input` and
+        // `output` still have room) does another pass run.
+        //
+        // `first` is called every pass regardless of whether it ended
+        // on an earlier one: a well-behaved codec keeps answering
+        // `StreamEnd` once it has reported it, so there is nothing to
+        // latch — the fresh result is trusted each time.
         loop {
-            // Normalized once per turn: everything staged has been
-            // drained, so refills start from the top of the buffer.
-            // The arms below only advance counts; none of them resets.
-            if self.drained == self.filled {
-                self.drained = 0;
-                self.filled = 0;
-            }
+            let staging = self.staging.as_mut();
+            let moved = transfer(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
+                .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
+            in_pos += moved.consumed;
+            self.stage_pos += moved.written;
+            let first_ended = moved.end == ProgressEnd::StreamEnd;
 
-            // Drain whatever's already staged into the caller's output
-            // before asking `first` for more — biggest possible chunks,
-            // invisible from outside a single call.
-            if self.drained < self.filled {
+            // `second` always reads staging from offset 0; a partial
+            // drain is compacted to the front so the invariant holds
+            // for the next pass (or the next call).
+            if self.stage_pos > 0 {
                 let staging = self.staging.as_mut();
-                let moved = transfer(
-                    &mut self.second,
-                    &staging[self.drained..self.filled],
-                    &mut output[out_pos..],
-                )
+                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-                self.drained += moved.consumed;
                 out_pos += moved.written;
-                match moved.end {
-                    ProgressEnd::InputExhausted => {
-                        continue;
-                    }
-                    ProgressEnd::OutputExhausted => {
-                        return Ok(Progress::OutputFilled { consumed: in_pos });
-                    }
-                    ProgressEnd::StreamEnd => {
-                        return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
-                    }
+                if moved.end == ProgressEnd::StreamEnd {
+                    return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
                 }
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
             }
 
-            // Staging is clean (guaranteed above whenever we get here).
-            // Return-clean: don't withhold anything `second` could
-            // take — only stop when there's genuinely nothing left to
-            // feed `first`.
-            if self.first_ended {
-                // `first`'s stream ended in-band, so no more input
-                // will ever reach `second` — exactly what `finish`
-                // expresses. Drive it here so the composed codec is
-                // self-terminating exactly when `first` is: once
-                // `second` is done, report `StreamEnd`, which (unlike
-                // the `InputConsumed` this branch used to return)
-                // leaves the rest of `input` unconsumed and reported —
-                // it's simply not this stream's to read.
-                debug_assert!(self.drained == self.filled, "staging must be drained before finishing second");
+            // Case: `first`'s stream ended in-band and everything it
+            // had already staged has passed through `second` — no more
+            // input will ever reach `second`, exactly what `finish`
+            // expresses. Drive it here so the composed codec is
+            // self-terminating exactly when `first` is: `second` being
+            // done reports `StreamEnd`, which leaves the rest of
+            // `input` unconsumed and reported — it's simply not this
+            // stream's to read.
+            if first_ended && self.stage_pos == 0 {
                 return match self
                     .second
                     .finish(&mut output[out_pos..])
@@ -194,161 +179,139 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     }
                 };
             }
-            if in_pos == input.len() {
+            // Case: input fully consumed, and nothing is left waiting
+            // in staging for `second`.
+            if in_pos == input.len() && self.stage_pos == 0 {
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
+            // Case: output fully filled.
             if out_pos == output.len() {
-                // Output is exactly full with staging clean and input
-                // remaining: report the bottleneck rather than churn
-                // `first`'s bytes into staging that `second` couldn't
-                // move anywhere.
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
-
-            let staging = self.staging.as_mut();
-            let moved = transfer(
-                &mut self.first,
-                &input[in_pos..],
-                &mut staging[self.filled..],
-            )
-                .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-            in_pos += moved.consumed;
-            self.filled += moved.written;
-            if moved.end == ProgressEnd::StreamEnd {
-                self.first_ended = true;
-            }
-            // Loop around: drain what was just staged.
+            // Otherwise staging came up empty but neither `input` nor
+            // `output` is finished — run another pass.
         }
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         let mut out_pos = 0;
 
+        // Same pass structure as `process`, but pulling from
+        // `first.finish` instead of `first.process`: every pass asks
+        // `first` for whatever it still owes, drains staging into
+        // `second` (always from offset 0, compacting any leftover to
+        // the front), and finishes `second` once `first` is `Done`
+        // and staging is empty. `first.finish` is called every pass
+        // regardless of an earlier `Done` — once terminal, it keeps
+        // answering `Done { written: 0 }`, the same assumption already
+        // relied on for `second.finish` below.
         loop {
-            // Same per-turn normalization as `process`.
-            if self.drained == self.filled {
-                self.drained = 0;
-                self.filled = 0;
-            }
-
-            // Any leftover staged bytes (from a prior `process`/`finish`
-            // call that left the caller's output full) go first.
-            if self.drained < self.filled {
-                let staging = self.staging.as_mut();
-                let moved = transfer(
-                    &mut self.second,
-                    &staging[self.drained..self.filled],
-                    &mut output[out_pos..],
-                )
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                self.drained += moved.consumed;
-                out_pos += moved.written;
-                match moved.end {
-                    ProgressEnd::InputExhausted => {
-                        continue;
-                    }
-                    ProgressEnd::OutputExhausted => {
-                        return Ok(Drain::OutputFilled);
-                    }
-                    ProgressEnd::StreamEnd => {
-                        return Ok(Drain::Done { written: out_pos });
-                    }
-                }
-            }
-
-            if !self.first_ended {
-                let staging = self.staging.as_mut();
-                match self
-                    .first
-                    .finish(&mut staging[self.filled..])
-                    .and_then(|d| d.validated(staging.len() - self.filled))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => {
-                        self.filled = staging.len();
-                    }
-                    Drain::Done { written } => {
-                        self.filled += written;
-                        self.first_ended = true;
-                    }
-                }
-                continue;
-            }
-
-            // `first` is fully drained through `second`; finish `second`.
-            return match self
-                .second
-                .finish(&mut output[out_pos..])
-                .and_then(|d| d.validated(output.len() - out_pos))
+            let staging = self.staging.as_mut();
+            let first_done = match self
+                .first
+                .finish(&mut staging[self.stage_pos..])
+                .and_then(|d| d.validated(staging.len() - self.stage_pos))
                 .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
             {
-                Drain::OutputFilled => Ok(Drain::OutputFilled),
-                Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
+                Drain::OutputFilled => {
+                    self.stage_pos = staging.len();
+                    false
+                }
+                Drain::Done { written } => {
+                    self.stage_pos += written;
+                    true
+                }
             };
+
+            if self.stage_pos > 0 {
+                let staging = self.staging.as_mut();
+                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                out_pos += moved.written;
+                if moved.end == ProgressEnd::StreamEnd {
+                    return Ok(Drain::Done { written: out_pos });
+                }
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
+            }
+
+            if first_done && self.stage_pos == 0 {
+                // `first` is fully drained through `second`; finish `second`.
+                return match self
+                    .second
+                    .finish(&mut output[out_pos..])
+                    .and_then(|d| d.validated(output.len() - out_pos))
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
+                {
+                    Drain::OutputFilled => Ok(Drain::OutputFilled),
+                    Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
+                };
+            }
+            if out_pos == output.len() {
+                return Ok(Drain::OutputFilled);
+            }
+            // Otherwise staging came up empty but `first` isn't `Done`
+            // yet — run another pass.
         }
     }
 
     fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         let mut out_pos = 0;
 
+        // Same pass structure as `finish`, pulling from `first.flush`
+        // instead of `first.finish`. `first.flush` is called every
+        // pass regardless of an earlier `Done`: contract point 3 makes
+        // that safe — once terminal, it must answer `Done { written: 0
+        // }` again rather than emit a second sync marker, unless a
+        // `process` call supplied new input in between, in which case
+        // `first` itself is expected to treat this as a fresh flush.
         loop {
-            // Same per-turn normalization as `process`/`finish`.
-            if self.drained == self.filled {
-                self.drained = 0;
-                self.filled = 0;
-            }
+            let staging = self.staging.as_mut();
+            let first_done = match self
+                .first
+                .flush(&mut staging[self.stage_pos..])
+                .and_then(|d| d.validated(staging.len() - self.stage_pos))
+                .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
+            {
+                Drain::OutputFilled => {
+                    self.stage_pos = staging.len();
+                    false
+                }
+                Drain::Done { written } => {
+                    self.stage_pos += written;
+                    true
+                }
+            };
 
-            // Staged bytes (leftovers, or what `first.flush` below just
-            // produced) go through `second` first — `second.flush` may
-            // only run once everything staged has passed through its
-            // `process`.
-            if self.drained < self.filled {
+            if self.stage_pos > 0 {
                 let staging = self.staging.as_mut();
-                let moved = transfer(
-                    &mut self.second,
-                    &staging[self.drained..self.filled],
-                    &mut output[out_pos..],
-                )
+                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                self.drained += moved.consumed;
                 out_pos += moved.written;
-                match moved.end {
-                    ProgressEnd::InputExhausted => {
-                        continue;
-                    }
-                    ProgressEnd::OutputExhausted => {
-                        return Ok(Drain::OutputFilled);
-                    }
-                    ProgressEnd::StreamEnd => {
-                        // `second` ended in-band mid-flush: nothing
-                        // more can ever come out, so the flush is
-                        // trivially complete.
-                        return Ok(Drain::Done { written: out_pos });
-                    }
+                if moved.end == ProgressEnd::StreamEnd {
+                    // `second` ended in-band mid-flush: nothing more
+                    // can ever come out, so the flush is trivially
+                    // complete.
+                    return Ok(Drain::Done { written: out_pos });
                 }
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
             }
 
-            if !self.flushing_second {
-                if self.first_ended {
-                    // Nothing left in `first` to flush.
-                    self.flushing_second = true;
-                    continue;
+            if !(first_done && self.stage_pos == 0) {
+                if out_pos == output.len() {
+                    return Ok(Drain::OutputFilled);
                 }
-                let staging = self.staging.as_mut();
-                match self
-                    .first
-                    .flush(&mut staging[self.filled..])
-                    .and_then(|d| d.validated(staging.len() - self.filled))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => {
-                        self.filled = staging.len();
-                    }
-                    Drain::Done { written } => {
-                        self.filled += written;
-                        self.flushing_second = true;
-                    }
-                }
+                // Otherwise staging came up empty but `first` isn't
+                // done flushing yet — run another pass.
                 continue;
             }
 
@@ -360,13 +323,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 .and_then(|d| d.validated(output.len() - out_pos))
                 .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
             {
-                // `flushing_second` stays set: an interrupted flush
-                // resumes here, not at `first`.
                 Drain::OutputFilled => Ok(Drain::OutputFilled),
-                Drain::Done { written } => {
-                    self.flushing_second = false;
-                    Ok(Drain::Done { written: out_pos + written })
-                }
+                Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
             };
         }
     }

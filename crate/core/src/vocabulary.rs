@@ -115,11 +115,39 @@ impl Drain {
 
 /// A stateful byte-rewrite transform.
 ///
-/// The contract:
+/// # The contract
 ///
+/// 1)
 /// - a call fully consumes its input,
 /// - or it fully fills its output,
 /// - or it ends the stream.
+///
+/// 2)
+/// Each call addresses `input` and `output` from byte 0 of the slices
+/// it was given — there is no notion of a "leftover" position carried
+/// over from the previous call's buffers. If a call didn't consume
+/// all of `input`, those unconsumed bytes are gone once the call
+/// returns: it is the caller's job to fold them into the front of
+/// whatever `input` it passes next, if it wants them processed at
+/// all.
+///
+/// 3)
+/// `finish` and `flush` are idempotent once they reach
+/// [`Drain::Done`]: calling either again, with no intervening
+/// `process` call supplying new input, must report `Drain::Done {
+/// written: 0 }` again rather than repeating whatever format-level
+/// side effect produced that `Done` — no second trailer, no second
+/// sync marker. A caller is free to call `finish`/`flush` again after
+/// `Done` (e.g. to resume a call that was interrupted elsewhere in a
+/// composition) and must see a no-op, not a repeat.
+///
+/// 4)
+/// `process` is idempotent once it reaches
+/// [`Progress::StreamEnd`]: calling it again, on any `input`, must
+/// report `StreamEnd { consumed: 0, written: 0 }` again rather than
+/// re-running whatever ended the stream. A caller (or a combinator
+/// built on top of `Codec`) is free to call `process` again after
+/// `StreamEnd` and must see a no-op, not a second ending.
 ///
 /// # Why full consumption, not partial — a codec must always make progress
 ///
@@ -160,20 +188,22 @@ impl Drain {
 /// See `CREATING-CODECS.md` for how to write one.
 ///
 pub trait Codec {
-    /// Push input bytes and pull output bytes.
+    /// Push input bytes and pull output bytes. Idempotent once
+    /// `StreamEnd`: see contract point 4.
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
 
     /// Signal "no more input is coming": flush any buffered state and,
     /// for formats with one, write the trailer/checksum. Call
     /// repeatedly (draining `output` between calls) until it reports
-    /// [`Drain::Done`].
+    /// [`Drain::Done`]. Idempotent once `Done`: see contract point 3.
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error>;
 
     /// Drain any bytes this codec is withholding to a sync boundary,
     /// *without* ending the stream — unlike `finish`, the stream
     /// continues afterward. Only meaningful for codecs that buffer
     /// output for a format-defined in-band sync marker
-    /// (deflate/zlib/gzip do); the default owes nothing.
+    /// (deflate/zlib/gzip do); the default owes nothing. Idempotent
+    /// once `Done`: see contract point 3.
     fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }
