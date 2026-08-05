@@ -70,7 +70,11 @@ pub struct Error {
 
 impl Error {
     pub fn new(kind: ErrorKind, consumed: usize, written: usize) -> Self {
-        Self { kind, consumed, written }
+        Self {
+            kind,
+            consumed,
+            written,
+        }
     }
 }
 
@@ -109,20 +113,52 @@ impl Drain {
     }
 }
 
-/// A stateful byte-rewrite transform. See `CREATING-CODECS.md` for how
-/// to write one.
+/// A stateful byte-rewrite transform.
 ///
-/// The contract, in one sentence: **every call fully consumes its
-/// input, fully fills its output, or ends the stream** — a codec never
-/// declines a buffer as too small. Codecs with a minimum atomic output
-/// unit uphold this with a [`Carry`](crate::Carry): write what fits,
-/// hold the tail, deliver it first on the next call. Consequently any
-/// non-empty buffer works on either side, no matter how small.
+/// The contract:
 ///
-/// Degenerate buffers: with empty `input`, `process` drains pending
-/// output (if any) and reports `InputConsumed`; with empty `output`,
-/// `OutputFilled` is trivially true — drivers should avoid the
-/// empty-output call, since it can't progress.
+/// - a call fully consumes its input,
+/// - or it fully fills its output,
+/// - or it ends the stream.
+///
+/// # Why full consumption, not partial — a codec must always make progress
+///
+/// A tempting alternative: let one call report partial progress on
+/// *both* sides at once — consume some input, write some output, and
+/// leave the rest for later. This sounds more flexible, but it causes
+/// a problem.
+///
+/// Imagine an encoder that needs several more input bytes, or several
+/// more bytes of free output space, before it can produce anything.
+/// What happens when neither side has enough room to make progress?
+///
+/// If the caller has to handle this, it must call `process` again,
+/// hoping that more input or output space will be available next
+/// time. But the caller has no way to know how many retries are
+/// normal, and how many mean the codec is stuck or broken.
+///
+/// This is not an imaginary edge case: a [`Source`](crate::Source)
+/// reading from a network socket may hand over data one byte at a
+/// time, so the caller could easily need many retries just to gather
+/// enough input for the codec to do anything.
+///
+/// Beyond that corner case, there is a broader question of where the
+/// complexity should live: on the codec side or on the caller side.
+/// Putting the burden on the codec has two benefits:
+///
+/// - The caller's code stays less complicated. Handling partial
+///   progress on both sides at once tends to produce messy code,
+///   based on experience.
+/// - This matters beyond this crate: we expect people to build on
+///   top of the `Codec` trait not only new codecs, but also wrappers
+///   around custom [`Source`](crate::Source)s and
+///   [`Sink`](crate::Sink)s — and that caller-side code deserves to
+///   stay less complicated just as much as codec implementations do.
+///
+/// # Creating a codec
+///
+/// See `CREATING-CODECS.md` for how to write one.
+///
 pub trait Codec {
     /// Push input bytes and pull output bytes.
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
@@ -168,23 +204,56 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 mod tests {
     use super::{Drain, Error, ErrorKind, Progress};
 
-    const CV: Error = Error { kind: ErrorKind::ContractViolation, consumed: 0, written: 0 };
+    const CV: Error = Error {
+        kind: ErrorKind::ContractViolation,
+        consumed: 0,
+        written: 0,
+    };
 
     #[test]
     fn validated_accepts_honest_counts() {
-        assert!(Progress::InputConsumed { written: 4 }.validated(10, 4).is_ok());
-        assert!(Progress::OutputFilled { consumed: 10 }.validated(10, 4).is_ok());
-        assert!(Progress::StreamEnd { consumed: 0, written: 0 }.validated(0, 0).is_ok());
+        assert!(Progress::InputConsumed { written: 4 }
+            .validated(10, 4)
+            .is_ok());
+        assert!(Progress::OutputFilled { consumed: 10 }
+            .validated(10, 4)
+            .is_ok());
+        assert!(Progress::StreamEnd {
+            consumed: 0,
+            written: 0
+        }
+        .validated(0, 0)
+        .is_ok());
         assert!(Drain::OutputFilled.validated(0).is_ok());
         assert!(Drain::Done { written: 4 }.validated(4).is_ok());
     }
 
     #[test]
     fn validated_rejects_overclaimed_counts() {
-        assert_eq!(Progress::InputConsumed { written: 5 }.validated(10, 4), Err(CV));
-        assert_eq!(Progress::OutputFilled { consumed: 11 }.validated(10, 4), Err(CV));
-        assert_eq!(Progress::StreamEnd { consumed: 11, written: 0 }.validated(10, 4), Err(CV));
-        assert_eq!(Progress::StreamEnd { consumed: 0, written: 5 }.validated(10, 4), Err(CV));
+        assert_eq!(
+            Progress::InputConsumed { written: 5 }.validated(10, 4),
+            Err(CV)
+        );
+        assert_eq!(
+            Progress::OutputFilled { consumed: 11 }.validated(10, 4),
+            Err(CV)
+        );
+        assert_eq!(
+            Progress::StreamEnd {
+                consumed: 11,
+                written: 0
+            }
+            .validated(10, 4),
+            Err(CV)
+        );
+        assert_eq!(
+            Progress::StreamEnd {
+                consumed: 0,
+                written: 5
+            }
+            .validated(10, 4),
+            Err(CV)
+        );
         assert_eq!(Drain::Done { written: 5 }.validated(4), Err(CV));
     }
 }
