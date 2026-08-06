@@ -1,11 +1,11 @@
-//! `std::io::Read`/`Write` adapters over a [`Codec`](crate::Codec).
+//! `std::io::Read`/`Write` wrappers over a [`Codec`](crate::Codec).
 //!
 //! - [`CodecReader`]: wraps a `Read`, runs the transform on the fly, and
 //!   is itself a `Read` yielding the transformed bytes.
 //! - [`CodecWriter`]: wraps a `Write`; bytes written to it are
 //!   transformed on the fly before reaching the wrapped writer.
 //!
-//! Both use the same adapter-pumping loops as `stream_to_stream`; they
+//! Both use the same pump loops as `stream_to_stream`; they
 //! retain only the lifecycle policy imposed by `Read` or `Write`. The reader owns input
 //! scratch and writes directly into its caller's output; the writer
 //! reads directly from its caller and owns output scratch. Both take a
@@ -14,7 +14,7 @@
 //! rather than allocating one internally: batching policy already has
 //! a canonical, composable expression in `BufReader`/`BufWriter`
 //! placement in the client's own stack, so a knob inside these
-//! adapters would just duplicate that.
+//! wrappers would just duplicate that.
 
 use std::io::{self, Read, Write};
 
@@ -24,7 +24,7 @@ use crate::pump::{Pump, PumpEnd};
 use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
 use crate::{Codec, DriveError, Error, Sink};
 
-use super::bridge::{StdSource, StdSink};
+use super::adapter::{StdSource, StdSink};
 
 fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
@@ -113,7 +113,7 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     }
 }
 
-/// Wraps a `Write`; bytes written to this adapter are run through `C`
+/// Wraps a `Write`; bytes written to this wrapper are run through `C`
 /// before being written to the wrapped writer.
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,

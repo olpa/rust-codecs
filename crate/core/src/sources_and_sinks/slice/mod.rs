@@ -1,3 +1,3 @@
-mod bridge;
+mod adapter;
 
-pub(crate) use bridge::{SliceSource, SliceSink};
+pub(crate) use adapter::{SliceSource, SliceSink};

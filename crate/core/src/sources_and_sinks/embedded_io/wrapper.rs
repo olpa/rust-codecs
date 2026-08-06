@@ -1,4 +1,4 @@
-//! `embedded_io::Read`/`Write` adapters over a [`Codec`](crate::Codec).
+//! `embedded_io::Read`/`Write` wrappers over a [`Codec`](crate::Codec).
 //!
 //! The ownership is directional and zero-copy at the codec boundary:
 //! [`CodecReader`] owns input scratch and writes directly into
@@ -13,9 +13,9 @@ use crate::pump::{Pump, PumpEnd};
 use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
 use crate::{Codec, DriveError, Error, Sink};
 
-use super::bridge::{EmbeddedSource, EmbeddedSink};
+use super::adapter::{EmbeddedSource, EmbeddedSink};
 
-/// An endpoint error or a codec error from an embedded I/O adapter.
+/// An endpoint error or a codec error from an embedded I/O wrapper.
 #[derive(Debug)]
 pub enum EmbeddedError<E> {
     Io(E),

@@ -1,9 +1,9 @@
-//! `Vec<u8>` backend: bridges an owned vector into the driver's
+//! `Vec<u8>` backend: adapts an owned vector into the driver's
 //! [`Source`](crate::Source)/[`Sink`](crate::Sink) traits. Fully
-//! in-memory, so there's no `std::io`/`embedded_io`-style stream wrapper
+//! in-memory, so there's no `std::io`/`embedded_io`-style wrapper
 //! to build on top — [`stream_to_stream`](crate::stream_to_stream) is
 //! the entry point.
 
-mod bridge;
+mod adapter;
 
-pub use bridge::{VecSource, VecSink};
+pub use adapter::{VecSource, VecSink};

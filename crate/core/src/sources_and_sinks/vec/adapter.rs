@@ -1,4 +1,4 @@
-//! Allocation-backed bridge for the lending stream driver.
+//! Allocation-backed adapter for the lending stream driver.
 
 #[cfg(feature = "alloc")]
 use core::convert::Infallible;
