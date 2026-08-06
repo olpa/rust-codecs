@@ -201,6 +201,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
                 out_pos += moved.written;
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
                 if moved.end == ProgressEnd::StreamEnd {
                     self.end = EndState::SecondEnded;
                     // `second` ending is only clean if it consumed
@@ -210,19 +216,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     // past the end" case (which is about *your* input,
                     // not already-staged bytes `second` was actually
                     // handed).
-                    if moved.consumed < self.stage_pos {
-                        self.stage_pos -= moved.consumed;
+                    if leftover > 0 {
                         return Err(Error::new(ErrorKind::UnexpectedEnd, in_pos, out_pos));
                     }
-                    self.stage_pos = 0;
                     return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
                 }
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
             }
 
             // Case: `first`'s stream ended in-band and everything it
@@ -314,21 +312,19 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
                 out_pos += moved.written;
-                if moved.end == ProgressEnd::StreamEnd {
-                    self.end = EndState::SecondEnded;
-                    if moved.consumed < self.stage_pos {
-                        self.stage_pos -= moved.consumed;
-                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
-                    }
-                    self.stage_pos = 0;
-                    return Ok(Drain::Done { written: out_pos });
-                }
                 let leftover = self.stage_pos - moved.consumed;
                 if leftover > 0 {
                     let staging = self.staging.as_mut();
                     staging.copy_within(moved.consumed..self.stage_pos, 0);
                 }
                 self.stage_pos = leftover;
+                if moved.end == ProgressEnd::StreamEnd {
+                    self.end = EndState::SecondEnded;
+                    if leftover > 0 {
+                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
+                    }
+                    return Ok(Drain::Done { written: out_pos });
+                }
             }
 
             if nothing_more_from_first && self.stage_pos == 0 {
@@ -399,6 +395,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
                 out_pos += moved.written;
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
                 if moved.end == ProgressEnd::StreamEnd {
                     // `second` ended in-band mid-flush: nothing more
                     // can ever come out, so the flush is trivially
@@ -406,19 +408,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     // unconsumed, which is `UnexpectedEnd` rather than
                     // a clean end.
                     self.end = EndState::SecondEnded;
-                    if moved.consumed < self.stage_pos {
-                        self.stage_pos -= moved.consumed;
+                    if leftover > 0 {
                         return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
                     }
-                    self.stage_pos = 0;
                     return Ok(Drain::Done { written: out_pos });
                 }
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
             }
 
             if !(nothing_more_from_first && self.stage_pos == 0) {
