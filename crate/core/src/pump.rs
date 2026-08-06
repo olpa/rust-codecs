@@ -1,12 +1,170 @@
-//! Bufferless codec lifecycle shared by directional frontends.
+//! Bufferless codec lifecycle, the codec trust boundary it's built on,
+//! and the lending stream driver ([`stream_to_stream`]) that ties a
+//! codec to a pair of endpoints.
 //!
 //! Endpoint adapters retain the buffers dictated by their direction:
 //! readers own input storage, writers own output storage, and chunked
-//! frontends lend both current windows. This pump owns only codec
+//! frontends lend both current windows. [`Pump`] owns only codec
 //! lifecycle, so using it never introduces a byte copy.
+//!
+//! [`Codec::process`](crate::Codec::process) reports only the counts
+//! not already implied by its outcome: all input was consumed, all
+//! output was filled, or the stream ended. `step` validates that
+//! report and normalizes it into exact progress on both sides — the
+//! trust boundary every `Pump::process` call and [`stream_to_stream`]
+//! call goes through.
 
-use crate::step::{step, ProgressStep};
-use crate::{Codec, Drain, DriveError, Error, Sink, Source};
+use crate::{Codec, Drain, Error, Progress};
+
+/// A byte source which lends its current input chunk to the pump.
+pub trait Source {
+    type Error;
+
+    /// Return the current non-empty chunk, or `None` at end of input.
+    ///
+    /// "Current" is load-bearing: this is whatever hasn't been
+    /// released by `consume` yet, not necessarily fresh bytes. A
+    /// caller is never required to consume a whole chunk in one call
+    /// (a codec may only take part of it, e.g. when output runs out
+    /// first) — the unconsumed remainder is exactly what the next
+    /// `chunk()` call returns, so consecutive chunks can overlap.
+    /// Implementations must not hand out new bytes ahead of `pos`
+    /// until the old ones are released.
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
+
+    /// Release the first `amount` bytes of the current chunk.
+    fn consume(&mut self, amount: usize);
+}
+
+/// A byte destination which lends writable space to the pump.
+pub trait Sink {
+    type Error;
+
+    /// Return writable space, or `None` when the destination is full.
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
+
+    /// Commit the first `amount` bytes of the space returned by `spare`.
+    fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
+
+    /// Complete the destination after the codec stream has ended.
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// How much moved through [`stream_to_stream`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Totals {
+    pub consumed: usize,
+    pub written: usize,
+}
+
+/// Why [`stream_to_stream`] stopped before the codec finished its stream.
+#[derive(Debug)]
+pub enum DriveError<EI, EO> {
+    Source(EI),
+    Sink(EO),
+    Codec(crate::Error),
+    SinkExhausted,
+    /// A call moved zero bytes on both sides without ending the
+    /// stream — the pump refuses to spin forever on a stalled
+    /// codec/endpoint pair.
+    NoProgress,
+}
+
+/// Drive one codec between any pair of lending stream adapters.
+pub fn stream_to_stream<I, O, C>(
+    input: &mut I,
+    codec: C,
+    output: &mut O,
+) -> Result<Totals, DriveError<I::Error, O::Error>>
+where
+    I: Source,
+    O: Sink,
+    C: Codec,
+{
+    let mut pump = Pump::new(codec);
+    let mut totals = Totals { consumed: 0, written: 0 };
+
+    let moved = pump.transfer_from(input, output)?;
+    totals.consumed += moved.consumed;
+    totals.written += moved.written;
+    match moved.end {
+        PumpEnd::StreamEnd => {
+            output.finish().map_err(DriveError::Sink)?;
+            return Ok(totals);
+        }
+        PumpEnd::SinkExhausted => return Err(DriveError::SinkExhausted),
+        PumpEnd::SourceExhausted => {}
+    }
+
+    let drained = pump.finish_to(output).map_err(|error| match error {
+        DriveError::Source(never) => match never {},
+        DriveError::Sink(error) => DriveError::Sink(error),
+        DriveError::Codec(error) => DriveError::Codec(error),
+        DriveError::SinkExhausted => DriveError::SinkExhausted,
+        DriveError::NoProgress => DriveError::NoProgress,
+    })?;
+    totals.written += drained.written;
+    match drained.end {
+        DrainEnd::Done => {
+            output.finish().map_err(DriveError::Sink)?;
+            Ok(totals)
+        }
+        DrainEnd::SinkExhausted => Err(DriveError::SinkExhausted),
+    }
+}
+
+/// Why one step between the current input and output windows stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgressEnd {
+    /// The complete input window was consumed.
+    InputExhausted,
+    /// The complete output window was filled.
+    OutputExhausted,
+    /// The codec ended its stream in-band.
+    StreamEnd,
+}
+
+/// Exact progress made by one validated [`Codec::process`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProgressStep {
+    pub(crate) consumed: usize,
+    pub(crate) written: usize,
+    pub(crate) end: ProgressEnd,
+}
+
+/// Run one step between the current windows until the codec reaches the
+/// boundary guaranteed by its contract.
+pub(crate) fn step<C: Codec + ?Sized>(
+    codec: &mut C,
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<ProgressStep, Error> {
+    let input_len = input.len();
+    let output_len = output.len();
+    let outcome = codec
+        .process(input, output)?
+        .validated(input_len, output_len)?;
+
+    Ok(match outcome {
+        Progress::InputConsumed { written } => ProgressStep {
+            consumed: input_len,
+            written,
+            end: ProgressEnd::InputExhausted,
+        },
+        Progress::OutputFilled { consumed } => ProgressStep {
+            consumed,
+            written: output_len,
+            end: ProgressEnd::OutputExhausted,
+        },
+        Progress::StreamEnd { consumed, written } => ProgressStep {
+            consumed,
+            written,
+            end: ProgressEnd::StreamEnd,
+        },
+    })
+}
 
 /// Exact progress and boundary of one validated `finish` or `flush`
 /// call.
@@ -81,11 +239,11 @@ impl<C: Codec> Pump<C> {
             return Ok(ProgressStep {
                 consumed: 0,
                 written: 0,
-                end: crate::step::ProgressEnd::StreamEnd,
+                end: ProgressEnd::StreamEnd,
             });
         }
         let moved = step(&mut self.codec, input, output)?;
-        if moved.end == crate::step::ProgressEnd::StreamEnd {
+        if moved.end == ProgressEnd::StreamEnd {
             self.done = true;
         }
         Ok(moved)
@@ -141,7 +299,7 @@ impl<C: Codec> Pump<C> {
                 Ok(moved)
                     if moved.consumed > 0
                         || moved.written > 0
-                        || moved.end == crate::step::ProgressEnd::StreamEnd =>
+                        || moved.end == ProgressEnd::StreamEnd =>
                 {
                     moved
                 }
@@ -162,7 +320,7 @@ impl<C: Codec> Pump<C> {
             output.commit(moved.written).map_err(DriveError::Sink)?;
             consumed += moved.consumed;
             written += moved.written;
-            if moved.end == crate::step::ProgressEnd::StreamEnd {
+            if moved.end == ProgressEnd::StreamEnd {
                 return Ok(PumpTransfer { consumed, written, end: PumpEnd::StreamEnd });
             }
         }
@@ -314,8 +472,7 @@ fn normalize_drain(
 
 #[cfg(test)]
 mod tests {
-    use super::{DrainEnd, Pump, PumpEnd};
-    use crate::step::ProgressEnd;
+    use super::{step, DrainEnd, Pump, ProgressEnd, ProgressStep, PumpEnd};
     use crate::{Codec, Drain, DriveError, Error, ErrorKind, Progress, Sink, Source};
 
     struct Scripted {
@@ -489,6 +646,132 @@ mod tests {
         assert_eq!(
             pump.finish(&mut [0; 3]),
             Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+        );
+    }
+
+    struct Reports(Progress);
+
+    impl Codec for Reports {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            Ok(self.0)
+        }
+
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    #[test]
+    fn input_exhaustion_implies_all_input_was_consumed() {
+        let mut codec = Reports(Progress::InputConsumed { written: 2 });
+        let mut output = [0; 5];
+
+        assert_eq!(
+            step(&mut codec, b"abc", &mut output),
+            Ok(ProgressStep {
+                consumed: 3,
+                written: 2,
+                end: ProgressEnd::InputExhausted,
+            })
+        );
+    }
+
+    #[test]
+    fn output_exhaustion_implies_all_output_was_written() {
+        let mut codec = Reports(Progress::OutputFilled { consumed: 2 });
+        let mut output = [0; 5];
+
+        assert_eq!(
+            step(&mut codec, b"abc", &mut output),
+            Ok(ProgressStep {
+                consumed: 2,
+                written: 5,
+                end: ProgressEnd::OutputExhausted,
+            })
+        );
+    }
+
+    #[test]
+    fn stream_end_preserves_both_explicit_counts() {
+        let mut codec = Reports(Progress::StreamEnd {
+            consumed: 2,
+            written: 4,
+        });
+        let mut output = [0; 5];
+
+        assert_eq!(
+            step(&mut codec, b"abc", &mut output),
+            Ok(ProgressStep {
+                consumed: 2,
+                written: 4,
+                end: ProgressEnd::StreamEnd
+            })
+        );
+    }
+
+    #[test]
+    fn degenerate_windows_remain_well_defined() {
+        let mut input_done = Reports(Progress::InputConsumed { written: 0 });
+        assert_eq!(
+            step(&mut input_done, b"", &mut []),
+            Ok(ProgressStep {
+                consumed: 0,
+                written: 0,
+                end: ProgressEnd::InputExhausted,
+            })
+        );
+
+        let mut output_done = Reports(Progress::OutputFilled { consumed: 0 });
+        assert_eq!(
+            step(&mut output_done, b"abc", &mut []),
+            Ok(ProgressStep {
+                consumed: 0,
+                written: 0,
+                end: ProgressEnd::OutputExhausted,
+            })
+        );
+    }
+
+    #[test]
+    fn overclaims_are_rejected_at_the_shared_boundary() {
+        let violation = Error::new(ErrorKind::ContractViolation, 0, 0);
+
+        let mut input_done = Reports(Progress::InputConsumed { written: 6 });
+        assert_eq!(
+            step(&mut input_done, b"abc", &mut [0; 5]),
+            Err(violation)
+        );
+
+        let mut output_done = Reports(Progress::OutputFilled { consumed: 4 });
+        assert_eq!(
+            step(&mut output_done, b"abc", &mut [0; 5]),
+            Err(violation)
+        );
+
+        let mut ended = Reports(Progress::StreamEnd {
+            consumed: 4,
+            written: 6,
+        });
+        assert_eq!(step(&mut ended, b"abc", &mut [0; 5]), Err(violation));
+    }
+
+    struct Fails;
+
+    impl Codec for Fails {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            Err(Error::new(ErrorKind::Corrupt, 1, 2))
+        }
+
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    #[test]
+    fn codec_errors_are_preserved() {
+        assert_eq!(
+            step(&mut Fails, b"abc", &mut [0; 5]),
+            Err(Error::new(ErrorKind::Corrupt, 1, 2))
         );
     }
 }

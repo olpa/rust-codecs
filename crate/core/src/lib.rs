@@ -23,14 +23,11 @@ pub use vocabulary::{Codec, Drain, Error, ErrorKind, Progress};
 mod carry;
 pub use carry::Carry;
 
-mod step;
 mod pump;
+pub use pump::{stream_to_stream, DriveError, Source, Sink, Totals};
 
 mod chain;
 pub use chain::Chain;
-
-mod stream_to_stream;
-pub use stream_to_stream::{stream_to_stream, DriveError, Source, Sink, Totals};
 
 pub mod sources_and_sinks;
 

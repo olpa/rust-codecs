@@ -5,7 +5,7 @@
 //! `io` (or a client's own) gets chaining for free without knowing
 //! anything about it.
 
-use crate::step::{step, ProgressEnd};
+use crate::pump::{step, ProgressEnd};
 use crate::{Codec, Drain, Error, ErrorKind, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
