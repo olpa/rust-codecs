@@ -122,6 +122,13 @@ impl Drain {
 /// - or it fully fills its output,
 /// - or it ends the stream.
 ///
+/// [`Progress::StreamEnd`] is a special case: it means the format
+/// itself demands a stop, even though the input isn't fully consumed
+/// (a self-terminating format saying "I am finished" mid-stream). It
+/// is not a normal-completion report — a codec that simply ran out of
+/// input to consume reports that via `InputConsumed`, never
+/// `StreamEnd`.
+///
 /// 2)
 /// Each call addresses `input` and `output` from byte 0 of the slices
 /// it was given — there is no notion of a "leftover" position carried
@@ -132,22 +139,68 @@ impl Drain {
 /// all.
 ///
 /// 3)
-/// `finish` and `flush` are idempotent once they reach
-/// [`Drain::Done`]: calling either again, with no intervening
-/// `process` call supplying new input, must report `Drain::Done {
-/// written: 0 }` again rather than repeating whatever format-level
-/// side effect produced that `Done` — no second trailer, no second
-/// sync marker. A caller is free to call `finish`/`flush` again after
-/// `Done` (e.g. to resume a call that was interrupted elsewhere in a
-/// composition) and must see a no-op, not a repeat.
+/// `finish` and `flush` are each idempotent once *that same method*
+/// reaches [`Drain::Done`]: calling `finish` again after `finish` was
+/// `Done` (or `flush` again after `flush` was `Done`), with no
+/// intervening `process` call supplying new input, must report
+/// `Drain::Done { written: 0 }` again rather than repeating whatever
+/// format-level side effect produced that `Done` — no second trailer,
+/// no second sync marker. A caller is free to call `finish`/`flush`
+/// again after `Done` (e.g. to resume a call that was interrupted
+/// elsewhere in a composition) and must see a no-op, not a repeat.
+///
+/// `finish` and `flush` are independent of each other, though: a
+/// `Done` from one does not make the other idempotent. `flush`
+/// reaching `Done` only means a sync point was reached — the stream
+/// stays open — so a `finish` called afterward (with no new `process`
+/// input) does its real work, producing the actual trailer, not a
+/// no-op.
 ///
 /// 4)
-/// `process` is idempotent once it reaches
-/// [`Progress::StreamEnd`]: calling it again, on any `input`, must
-/// report `StreamEnd { consumed: 0, written: 0 }` again rather than
-/// re-running whatever ended the stream. A caller (or a combinator
-/// built on top of `Codec`) is free to call `process` again after
-/// `StreamEnd` and must see a no-op, not a second ending.
+/// Once `process` reaches [`Progress::StreamEnd`], the stream has
+/// ended for good: every later call, of any of the three methods,
+/// must keep reporting that, forever, for the rest of the codec's
+/// lifetime — `process` answers `StreamEnd { consumed: 0, written: 0
+/// }` again on any `input`, `finish`/`flush` answer `Drain::Done {
+/// written: 0 }`. None of them re-run whatever ended the stream. A
+/// caller (or a combinator built on top of `Codec`, like `Chain`) is
+/// free to call any of the three again after `StreamEnd` and must see
+/// a no-op every time, not a second ending. This is the one case where
+/// `finish` and `flush` stop being independent (point 3): past
+/// `StreamEnd`, both are pinned to `Done { written: 0 }` together, not
+/// just idempotent against repeats of themselves.
+///
+/// 5)
+/// A call that returns `Err` does not leave the codec in a defined
+/// failure state. A later call is not required to keep failing — it
+/// may make ordinary progress, as if the error had never happened.
+/// (Point 4 is the one documented exception: past `StreamEnd`, every
+/// later call is pinned to reporting the end, never an `Err`.) A
+/// caller that wants "this codec is dead after an error" semantics
+/// has to enforce that itself; the contract doesn't give it that for
+/// free.
+///
+/// 6)
+/// Calling `process` or `flush` after `finish` is not defined by this
+/// contract, *unless* the codec has already reported `StreamEnd` at
+/// some point — that case is point 4's, not this one, and point 4
+/// wins: the answer is pinned to reporting the end. Absent any
+/// `StreamEnd`, a codec with no real trailer/terminal state is free to
+/// just keep processing as if `finish` had never been called; one
+/// with a hard terminal state (already wrote a final checksum,
+/// already closed out the format) should report an `Err` instead of
+/// doing something silently wrong. Either is a valid `Codec` impl; a
+/// caller can't rely on which one it's talking to.
+///
+/// 7)
+/// `finish` and `flush` must always resolve one of three ways, the
+/// `Drain` counterpart of point 1: [`Drain::OutputFilled`],
+/// [`Drain::Done`], or `Err`. `Drain::OutputFilled` carries no count —
+/// unlike `Progress::OutputFilled`, it isn't a partial-progress
+/// report, it commits to having filled the *entire* non-empty
+/// `output` it was given. There's no fourth option where a call
+/// stalls, reporting `OutputFilled` without having actually written
+/// all of a non-empty buffer.
 ///
 /// # Why full consumption, not partial — a codec must always make progress
 ///
@@ -188,14 +241,19 @@ impl Drain {
 /// See `CREATING-CODECS.md` for how to write one.
 ///
 pub trait Codec {
-    /// Push input bytes and pull output bytes. Idempotent once
-    /// `StreamEnd`: see contract point 4.
+    /// Push input bytes and pull output bytes. Pinned to reporting
+    /// `StreamEnd` forever once it's reached: see contract point 4.
+    /// Calling this after `finish`: see contract point 6.
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
 
     /// Signal "no more input is coming": flush any buffered state and,
     /// for formats with one, write the trailer/checksum. Call
     /// repeatedly (draining `output` between calls) until it reports
     /// [`Drain::Done`]. Idempotent once `Done`: see contract point 3.
+    /// Pinned to reporting `Done` forever once `StreamEnd` has been
+    /// reported via `process`: see contract point 4. Must always
+    /// resolve to `OutputFilled`, `Done`, or `Err`: see contract
+    /// point 7.
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error>;
 
     /// Drain any bytes this codec is withholding to a sync boundary,
@@ -203,7 +261,12 @@ pub trait Codec {
     /// continues afterward. Only meaningful for codecs that buffer
     /// output for a format-defined in-band sync marker
     /// (deflate/zlib/gzip do); the default owes nothing. Idempotent
-    /// once `Done`: see contract point 3.
+    /// once `Done`: see contract point 3. Pinned to reporting `Done`
+    /// forever once `StreamEnd` has been reported via `process`: see
+    /// contract point 4. Must always resolve to `OutputFilled`,
+    /// `Done`, or `Err`: see contract point 7. Calling this after
+    /// `finish`: see contract
+    /// point 6.
     fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }
