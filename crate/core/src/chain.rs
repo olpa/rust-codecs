@@ -123,8 +123,14 @@ enum EndState {
     /// waiting to drain through `second`.
     FirstEnded,
     /// `second` has permanently ended — via `Progress::StreamEnd` from
-    /// `process`, or by completing `second.finish`/`second.flush`
-    /// after `first` ended — so the whole chain is over: neither side
+    /// `second.process`, or by `process` itself finishing `second`
+    /// after `first` ended and, in doing so, reporting the chain's own
+    /// `Progress::StreamEnd` (point 4 then applies to the chain as a
+    /// `Codec` in its own right, same as `FirstEnded`). Never set from
+    /// `finish`'s or `flush`'s own final call to `second.finish`/
+    /// `second.flush` reaching `Done`: that's governed by point 3
+    /// only, not point 4 — it doesn't pin every later call the way a
+    /// real `StreamEnd` does. So the whole chain is over: neither side
     /// is called again, every method just reports the end. There's no
     /// separate `BothEnded` arm: once `second` has ended, the chain's
     /// behavior no longer depends on whether `first` also ended, so
@@ -328,7 +334,19 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             }
 
             if nothing_more_from_first && self.stage_pos == 0 {
-                // `first` is fully drained through `second`; finish `second`.
+                // `first` is fully drained through `second`; finish
+                // `second`. Unlike `process`'s equivalent step, this
+                // doesn't set `EndState::SecondEnded` on `Done`: this
+                // `Drain::Done` is governed by contract point 3
+                // (finish/flush idempotent against repeats of
+                // themselves), not point 4 (process pinned forever on
+                // `StreamEnd`) — `nothing_more_from_first` can be true
+                // here purely because `first.finish` just returned
+                // `Done` this call, not because `first` ever reported
+                // a genuine `StreamEnd`, so neither side is provably
+                // exhausted forever. A later `process` call is free to
+                // feed `first` normally again (point 6); latching
+                // `SecondEnded` here would wrongly foreclose on that.
                 return match self
                     .second
                     .finish(&mut output[out_pos..])
@@ -336,10 +354,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
                 {
                     Drain::OutputFilled => Ok(Drain::OutputFilled),
-                    Drain::Done { written } => {
-                        self.end = EndState::SecondEnded;
-                        Ok(Drain::Done { written: out_pos + written })
-                    }
+                    Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
                 };
             }
             if out_pos == output.len() {
