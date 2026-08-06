@@ -156,6 +156,91 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             end: EndState::Normal,
         }
     }
+
+    /// Shared engine behind `finish` and `flush`: both drive `first`
+    /// through staging into `second`, one pass at a time (same pass
+    /// structure as `process`), and differ only in which step they
+    /// call on each side — `A::finish`/`B::finish` or `A::flush`/
+    /// `B::flush`, passed in by the caller.
+    fn drain_through(
+        &mut self,
+        output: &mut [u8],
+        first_step: fn(&mut A, &mut [u8]) -> Result<Drain, Error>,
+        second_step: fn(&mut B, &mut [u8]) -> Result<Drain, Error>,
+    ) -> Result<Drain, Error> {
+        if self.end == EndState::SecondEnded {
+            if self.stage_pos != 0 {
+                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
+            }
+            return Ok(Drain::Done { written: 0 });
+        }
+
+        let mut out_pos = 0;
+        // A `Done` from `first_step` only makes *this* call idempotent
+        // from here on (contract point 3) — it doesn't pin `first`
+        // forever the way `Progress::StreamEnd` does (point 4) — so
+        // this stays a call-local flag, never written to `self.end`.
+        let mut nothing_more_from_first = self.end == EndState::FirstEnded;
+
+        loop {
+            if !nothing_more_from_first {
+                let staging = self.staging.as_mut();
+                match first_step(&mut self.first, &mut staging[self.stage_pos..])
+                    .and_then(|d| d.validated(staging.len() - self.stage_pos))
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
+                {
+                    Drain::OutputFilled => {
+                        self.stage_pos = staging.len();
+                    }
+                    Drain::Done { written } => {
+                        self.stage_pos += written;
+                        nothing_more_from_first = true;
+                    }
+                }
+            }
+
+            if self.stage_pos > 0 {
+                let staging = self.staging.as_mut();
+                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                out_pos += moved.written;
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
+                if moved.end == ProgressEnd::StreamEnd {
+                    // A genuine `StreamEnd` from `second.process` —
+                    // point 4 pins the chain's end forever.
+                    self.end = EndState::SecondEnded;
+                    if leftover > 0 {
+                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
+                    }
+                    return Ok(Drain::Done { written: out_pos });
+                }
+            }
+
+            if nothing_more_from_first && self.stage_pos == 0 {
+                // `first` is fully drained through `second`; run
+                // `second`'s own step. Its `Done` here is point 3 only,
+                // not a `StreamEnd`, so `self.end` stays untouched — a
+                // later `process` call may still feed `first` normally.
+                return match second_step(&mut self.second, &mut output[out_pos..])
+                    .and_then(|d| d.validated(output.len() - out_pos))
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
+                {
+                    Drain::OutputFilled => Ok(Drain::OutputFilled),
+                    Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
+                };
+            }
+            if out_pos == output.len() {
+                return Ok(Drain::OutputFilled);
+            }
+            // Otherwise staging came up empty but `first` isn't done
+            // yet — run another pass.
+        }
+    }
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
@@ -266,189 +351,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     }
 
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        if self.end == EndState::SecondEnded {
-            if self.stage_pos != 0 {
-                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
-            }
-            return Ok(Drain::Done { written: 0 });
-        }
-
-        let mut out_pos = 0;
-        // Persists across passes *within this call* (not stored in
-        // `self.end` — see the note below on why that would overreach).
-        // Once `first.finish` reaches `Done`, there is no need to ask
-        // it again on a later pass of this same loop.
-        let mut nothing_more_from_first = self.end == EndState::FirstEnded;
-
-        // Same pass structure as `process`: one pass calls `first`,
-        // then `second`, then checks the exit conditions. Pulling
-        // from `first.finish` instead of `first.process` — but unlike
-        // `process`, reaching `Drain::Done` here does *not* set
-        // `EndState::FirstEnded`: that variant means `first` is pinned
-        // to reporting its end on *any* later call, of any method
-        // (contract point 4), a guarantee only `Progress::StreamEnd`
-        // carries. `finish` reaching `Done` only guarantees `finish`
-        // itself is idempotent from here (point 3) — calling `process`
-        // or `flush` afterward is undefined (point 6), so `first` may
-        // legitimately still expect to be called normally on a *later
-        // call* to `finish`. If `first` is already `FirstEnded` (a
-        // genuine prior `StreamEnd`), it's skipped — that skip is
-        // backed by point 4, not assumed here.
-        loop {
-            if !nothing_more_from_first {
-                let staging = self.staging.as_mut();
-                match self
-                    .first
-                    .finish(&mut staging[self.stage_pos..])
-                    .and_then(|d| d.validated(staging.len() - self.stage_pos))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => {
-                        self.stage_pos = staging.len();
-                    }
-                    Drain::Done { written } => {
-                        self.stage_pos += written;
-                        nothing_more_from_first = true;
-                    }
-                }
-            }
-
-            if self.stage_pos > 0 {
-                let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                out_pos += moved.written;
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
-                if moved.end == ProgressEnd::StreamEnd {
-                    self.end = EndState::SecondEnded;
-                    if leftover > 0 {
-                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
-                    }
-                    return Ok(Drain::Done { written: out_pos });
-                }
-            }
-
-            if nothing_more_from_first && self.stage_pos == 0 {
-                // `first` is fully drained through `second`; finish
-                // `second`. Unlike `process`'s equivalent step, this
-                // doesn't set `EndState::SecondEnded` on `Done`: this
-                // `Drain::Done` is governed by contract point 3
-                // (finish/flush idempotent against repeats of
-                // themselves), not point 4 (process pinned forever on
-                // `StreamEnd`) — `nothing_more_from_first` can be true
-                // here purely because `first.finish` just returned
-                // `Done` this call, not because `first` ever reported
-                // a genuine `StreamEnd`, so neither side is provably
-                // exhausted forever. A later `process` call is free to
-                // feed `first` normally again (point 6); latching
-                // `SecondEnded` here would wrongly foreclose on that.
-                return match self
-                    .second
-                    .finish(&mut output[out_pos..])
-                    .and_then(|d| d.validated(output.len() - out_pos))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => Ok(Drain::OutputFilled),
-                    Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
-                };
-            }
-            if out_pos == output.len() {
-                return Ok(Drain::OutputFilled);
-            }
-            // Otherwise staging came up empty but `first` isn't `Done`
-            // yet — run another pass.
-        }
+        self.drain_through(output, A::finish, B::finish)
     }
 
     fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        if self.end == EndState::SecondEnded {
-            if self.stage_pos != 0 {
-                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
-            }
-            return Ok(Drain::Done { written: 0 });
-        }
-
-        let mut out_pos = 0;
-        // Persists across passes *within this call* only — once
-        // `first.flush` reaches `Done` there's no need to ask it again
-        // on a later pass of this same loop. Not stored in `self.end`:
-        // a completed `flush` only means a sync point was reached, the
-        // stream stays open, so `first` must still be called on the
-        // *next* `flush`/`process` call. If `first` is already
-        // `FirstEnded` (from an earlier `process` or `finish`), there's
-        // nothing left to flush from it, so it starts out skipped.
-        let mut nothing_more_from_first = self.end == EndState::FirstEnded;
-
-        // Same pass structure as `finish`, pulling from `first.flush`
-        // instead of `first.finish`.
-        loop {
-            if !nothing_more_from_first {
-                let staging = self.staging.as_mut();
-                match self
-                    .first
-                    .flush(&mut staging[self.stage_pos..])
-                    .and_then(|d| d.validated(staging.len() - self.stage_pos))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => {
-                        self.stage_pos = staging.len();
-                    }
-                    Drain::Done { written } => {
-                        self.stage_pos += written;
-                        nothing_more_from_first = true;
-                    }
-                }
-            }
-
-            if self.stage_pos > 0 {
-                let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                out_pos += moved.written;
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
-                if moved.end == ProgressEnd::StreamEnd {
-                    // `second` ended in-band mid-flush: nothing more
-                    // can ever come out, so the flush is trivially
-                    // complete — unless bytes it was offered went
-                    // unconsumed, which is `UnexpectedEnd` rather than
-                    // a clean end.
-                    self.end = EndState::SecondEnded;
-                    if leftover > 0 {
-                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
-                    }
-                    return Ok(Drain::Done { written: out_pos });
-                }
-            }
-
-            if nothing_more_from_first && self.stage_pos == 0 {
-                // Everything `first` owed has passed through `second`;
-                // now `second`'s own flush.
-                return match self
-                    .second
-                    .flush(&mut output[out_pos..])
-                    .and_then(|d| d.validated(output.len() - out_pos))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => Ok(Drain::OutputFilled),
-                    Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
-                };
-            }
-            if out_pos == output.len() {
-                return Ok(Drain::OutputFilled);
-            }
-            // Otherwise staging came up empty but `first` isn't `Done`
-            // flushing yet — run another pass.
-        }
+        self.drain_through(output, A::flush, B::flush)
     }
 }
 
