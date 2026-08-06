@@ -39,8 +39,16 @@ pub enum Drain {
 pub enum ErrorKind {
     /// The encoded stream is malformed.
     Corrupt,
-    /// The stream was cut off mid-symbol: `finish` was called while
-    /// the codec still needed more input to complete a unit.
+    /// The stream ended somewhere it shouldn't have. Either direction:
+    /// too little data — `finish` was called while the codec still
+    /// needed more input to complete a unit — or too much — a
+    /// downstream codec in a composition (e.g. `second` in
+    /// [`Chain`](crate::Chain)) ended its stream while bytes an
+    /// upstream codec had already handed it were still unconsumed,
+    /// which would otherwise be silently lost. Neither case has a
+    /// reasonable recovery beyond surfacing it: there's no more input
+    /// to give in the first, and no way to un-lose the bytes in the
+    /// second.
     UnexpectedEnd,
     /// The codec's internal carry buffer couldn't hold an atomic
     /// output unit — a codec bug (the carry is sized statically to the

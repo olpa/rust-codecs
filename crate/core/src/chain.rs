@@ -6,7 +6,7 @@
 //! anything about it.
 
 use crate::transfer::{transfer, ProgressEnd};
-use crate::{Codec, Drain, Error, Progress};
+use crate::{Codec, Drain, Error, ErrorKind, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
 /// `staging`) into a single [`Codec`].
@@ -33,17 +33,23 @@ use crate::{Codec, Drain, Error, Progress};
 /// `second` is being finished, the call reports `OutputFilled` and the
 /// next `process` call continues from that point.
 ///
-/// **`second` ends its stream early.** The chain ends too. Bytes that
-/// `first` had already produced but `second` never read — waiting in
-/// the staging buffer, or still inside `first` — are dropped. This is
-/// the same policy as for unread input: bytes past the end of a
-/// stream are not the stream's to deliver. Note one honest wrinkle:
-/// the reported `consumed` counts what `first` took from your input,
-/// even if some of the resulting bytes died on the way to the output.
+/// **`second` ends its stream early.** The chain ends too — but only
+/// cleanly if `second` consumed everything it was actually handed.
+/// Bytes still inside `first` (never even staged) are fine to drop:
+/// that's the same policy as unread input, bytes past the end of a
+/// stream are not the stream's to deliver. But bytes that *were*
+/// staged and offered to `second`, which it then left unconsumed
+/// before ending, would be silently lost rather than merely unread —
+/// that's [`ErrorKind::UnexpectedEnd`](crate::ErrorKind::UnexpectedEnd),
+/// not a `StreamEnd`, and it stays reported on every later call too.
+/// Note one honest wrinkle in the clean case: the reported `consumed`
+/// counts what `first` took from your input, even if some of the
+/// resulting bytes died on the way to the output.
 ///
 /// **`second` ends during `finish` or `flush`.** Both simply report
 /// `Done`: nothing more can ever come out, so the operation is
-/// complete by definition.
+/// complete by definition — again, only if `second` consumed
+/// everything staged; otherwise it's `UnexpectedEnd` there too.
 ///
 /// **Calling again after the end.** Once the chain has ended — `second`
 /// itself ended, or `first` ended and `second.finish` then reached
@@ -145,8 +151,14 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         // The chain is already over: report it without touching
-        // either side again.
+        // either side again. A non-empty `staging` here means `second`
+        // ended while bytes it had already been offered were still
+        // unconsumed — see the `UnexpectedEnd` branch below — and that
+        // stays reported on every later call too.
         if self.end == EndState::SecondEnded {
+            if self.stage_pos != 0 {
+                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
+            }
             return Ok(Progress::StreamEnd { consumed: 0, written: 0 });
         }
 
@@ -186,6 +198,17 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             out_pos += moved.written;
             if moved.end == ProgressEnd::StreamEnd {
                 self.end = EndState::SecondEnded;
+                // `second` ending is only clean if it consumed
+                // everything it was offered. Bytes it left unconsumed
+                // would otherwise be silently lost — that's an error,
+                // not the normal "unread input past the end" case
+                // (which is about *your* input, not already-staged
+                // bytes `second` was actually handed).
+                if moved.consumed < self.stage_pos {
+                    self.stage_pos -= moved.consumed;
+                    return Err(Error::new(ErrorKind::UnexpectedEnd, in_pos, out_pos));
+                }
+                self.stage_pos = 0;
                 return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
             }
             let leftover = self.stage_pos - moved.consumed;
@@ -233,6 +256,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
 
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         if self.end == EndState::SecondEnded {
+            if self.stage_pos != 0 {
+                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
+            }
             return Ok(Drain::Done { written: 0 });
         }
 
@@ -274,6 +300,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             out_pos += moved.written;
             if moved.end == ProgressEnd::StreamEnd {
                 self.end = EndState::SecondEnded;
+                if moved.consumed < self.stage_pos {
+                    self.stage_pos -= moved.consumed;
+                    return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
+                }
+                self.stage_pos = 0;
                 return Ok(Drain::Done { written: out_pos });
             }
             let leftover = self.stage_pos - moved.consumed;
@@ -308,6 +339,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
 
     fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         if self.end == EndState::SecondEnded {
+            if self.stage_pos != 0 {
+                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
+            }
             return Ok(Drain::Done { written: 0 });
         }
 
@@ -348,10 +382,16 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
             out_pos += moved.written;
             if moved.end == ProgressEnd::StreamEnd {
-                // `second` ended in-band mid-flush: nothing more
-                // can ever come out, so the flush is trivially
-                // complete.
+                // `second` ended in-band mid-flush: nothing more can
+                // ever come out, so the flush is trivially complete —
+                // unless bytes it was offered went unconsumed, which
+                // is `UnexpectedEnd` rather than a clean end.
                 self.end = EndState::SecondEnded;
+                if moved.consumed < self.stage_pos {
+                    self.stage_pos -= moved.consumed;
+                    return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
+                }
+                self.stage_pos = 0;
                 return Ok(Drain::Done { written: out_pos });
             }
             let leftover = self.stage_pos - moved.consumed;
@@ -728,5 +768,24 @@ mod tests {
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
         let result = collect(chain, INPUT);
         assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ContractViolation);
+    }
+
+    #[test]
+    fn second_ending_with_unconsumed_staged_bytes_is_unexpected_end() {
+        // `identity` stages all of `INPUT` (11 bytes) in one pass;
+        // `EarlyEnd { limit: 3 }` is then offered all 11 but only
+        // consumes 3 before ending — the other 8 would be silently
+        // lost, which is `UnexpectedEnd`, not a clean `StreamEnd`.
+        let mut chain = Chain::new(identity(), EarlyEnd { limit: 3, done: 0 }, vec![0u8; 64]);
+        let mut out = [0u8; 64];
+        let error = chain.process(INPUT, &mut out).unwrap_err();
+        assert_eq!(error.kind, crate::ErrorKind::UnexpectedEnd);
+
+        // The error is latched: a later call reports the same thing
+        // without touching `first` or `second` again.
+        let error = chain.process(INPUT, &mut out).unwrap_err();
+        assert_eq!(error.kind, crate::ErrorKind::UnexpectedEnd);
+        assert_eq!(error.consumed, 0);
+        assert_eq!(error.written, 0);
     }
 }
