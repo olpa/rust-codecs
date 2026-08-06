@@ -254,6 +254,13 @@ impl<C: Codec> Driver<C> {
         }
     }
 
+    /// `self.done` is only ever set by [`Driver::process`] reaching a
+    /// genuine `Progress::StreamEnd` (contract point 4 — pinned
+    /// forever, across every method). Reaching `Drain::Done` here is
+    /// governed by point 3 instead: `finish` is idempotent against
+    /// repeats of itself, but that doesn't license skipping `process`
+    /// or `flush` afterward (point 6), so a `Done` from `self.codec`
+    /// is never latched into `self.done` — only reported.
     pub(crate) fn finish(&mut self, output: &mut [u8]) -> Result<DrainStep, Error> {
         if self.done {
             return Ok(DrainStep {
@@ -262,11 +269,7 @@ impl<C: Codec> Driver<C> {
             });
         }
         let output_len = output.len();
-        let moved = normalize_drain(self.codec.finish(output), output_len)?;
-        if moved.end == DrainEnd::Done {
-            self.done = true;
-        }
-        Ok(moved)
+        normalize_drain(self.codec.finish(output), output_len)
     }
 
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
@@ -438,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_normalizes_output_progress_and_latches_done() {
+    fn finish_normalizes_output_progress_without_latching_done() {
         let mut filled = Driver::new(Scripted {
             process: Progress::InputConsumed { written: 0 },
             drain: Drain::OutputFilled,
@@ -448,14 +451,21 @@ mod tests {
         assert_eq!(moved.end, DrainEnd::SinkExhausted);
         assert!(!filled.is_done());
 
+        // `finish` reaching `Done` is only point-3 self-idempotency,
+        // not a point-4 pin — `process` must still be free to run
+        // normally afterward (point 6), so `is_done()` stays false and
+        // the codec, not a synthetic `StreamEnd`, answers the next
+        // `process` call.
         let mut done = Driver::new(Scripted {
-            process: Progress::InputConsumed { written: 0 },
+            process: Progress::InputConsumed { written: 5 },
             drain: Drain::Done { written: 2 },
         });
         let moved = done.finish(&mut [0; 3]).unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, DrainEnd::Done);
-        assert!(done.is_done());
+        assert!(!done.is_done());
+        let resumed = done.process(b"abc", &mut [0; 8]).unwrap();
+        assert_eq!(resumed.written, 5);
     }
 
     #[test]
