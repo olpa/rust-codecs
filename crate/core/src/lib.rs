@@ -24,7 +24,7 @@ mod carry;
 pub use carry::Carry;
 
 mod transfer;
-mod driver;
+mod pump;
 
 mod chain;
 pub use chain::Chain;

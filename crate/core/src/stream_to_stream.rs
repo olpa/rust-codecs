@@ -1,9 +1,9 @@
-//! The shared driver for lending input and output stream adapters.
+//! The shared pump for lending input and output stream adapters.
 
-use crate::driver::{DrainEnd, Driver, PumpEnd};
+use crate::pump::{DrainEnd, Pump, PumpEnd};
 use crate::Codec;
 
-/// A byte source which lends its current input chunk to the driver.
+/// A byte source which lends its current input chunk to the pump.
 pub trait Source {
     type Error;
 
@@ -23,7 +23,7 @@ pub trait Source {
     fn consume(&mut self, amount: usize);
 }
 
-/// A byte destination which lends writable space to the driver.
+/// A byte destination which lends writable space to the pump.
 pub trait Sink {
     type Error;
 
@@ -54,7 +54,7 @@ pub enum DriveError<EI, EO> {
     Codec(crate::Error),
     SinkExhausted,
     /// A call moved zero bytes on both sides without ending the
-    /// stream — the driver refuses to spin forever on a stalled
+    /// stream — the pump refuses to spin forever on a stalled
     /// codec/endpoint pair.
     NoProgress,
 }
@@ -70,10 +70,10 @@ where
     O: Sink,
     C: Codec,
 {
-    let mut driver = Driver::new(codec);
+    let mut pump = Pump::new(codec);
     let mut totals = Totals { consumed: 0, written: 0 };
 
-    let moved = driver.transfer_from(input, output)?;
+    let moved = pump.transfer_from(input, output)?;
     totals.consumed += moved.consumed;
     totals.written += moved.written;
     match moved.end {
@@ -85,7 +85,7 @@ where
         PumpEnd::SourceExhausted => {}
     }
 
-    let drained = driver.finish_to(output).map_err(|error| match error {
+    let drained = pump.finish_to(output).map_err(|error| match error {
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => DriveError::Sink(error),
         DriveError::Codec(error) => DriveError::Codec(error),

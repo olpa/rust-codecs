@@ -115,7 +115,7 @@ mod tests {
     use crate::stream_to_stream;
 
     #[test]
-    fn vec_to_vec_uses_the_shared_driver() {
+    fn vec_to_vec_uses_the_shared_pump() {
         let data = alloc::vec![1, 2, 3, 4, 5];
         let mut input = VecSource::new(data.clone());
         let mut output = VecSink::with_growth(alloc::vec::Vec::new(), 2);

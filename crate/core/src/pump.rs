@@ -2,7 +2,7 @@
 //!
 //! Endpoint adapters retain the buffers dictated by their direction:
 //! readers own input storage, writers own output storage, and chunked
-//! frontends lend both current windows. This driver owns only codec
+//! frontends lend both current windows. This pump owns only codec
 //! lifecycle, so using it never introduces a byte copy.
 
 use crate::transfer::{transfer, ProgressStep};
@@ -52,21 +52,21 @@ enum DrainKind {
 }
 
 impl DrainKind {
-    fn drive<C: Codec>(self, driver: &mut Driver<C>, output: &mut [u8]) -> Result<DrainStep, Error> {
+    fn drive<C: Codec>(self, pump: &mut Pump<C>, output: &mut [u8]) -> Result<DrainStep, Error> {
         match self {
-            DrainKind::Finish => driver.finish(output),
-            DrainKind::Flush => driver.flush(output),
+            DrainKind::Finish => pump.finish(output),
+            DrainKind::Flush => pump.flush(output),
         }
     }
 }
 
 /// A bufferless lifecycle wrapper around a codec.
-pub(crate) struct Driver<C> {
+pub(crate) struct Pump<C> {
     codec: C,
     done: bool,
 }
 
-impl<C: Codec> Driver<C> {
+impl<C: Codec> Pump<C> {
     pub(crate) fn new(codec: C) -> Self {
         Self { codec, done: false }
     }
@@ -97,7 +97,7 @@ impl<C: Codec> Driver<C> {
     /// offer.
     ///
     /// Each loop iteration fetches one chunk from `input`, then one
-    /// spare slice from `output`, calls [`Driver::process`] once, then
+    /// spare slice from `output`, calls [`Pump::process`] once, then
     /// feeds the result back (`input.consume`, `output.commit`).
     ///
     /// Returns once one of three things happens: the source is
@@ -169,7 +169,7 @@ impl<C: Codec> Driver<C> {
     }
 
     /// Drain the codec's trailing output by repeatedly calling
-    /// [`Driver::finish`] against spare space taken from `output`,
+    /// [`Pump::finish`] against spare space taken from `output`,
     /// until the codec reports `Done`.
     ///
     /// This is the finalizing counterpart to `transfer_from`: it is
@@ -195,8 +195,8 @@ impl<C: Codec> Driver<C> {
     }
 
     /// Shared loop behind `finish_to`/`flush_to`: repeatedly obtain
-    /// spare space from `output` and hand it to [`Driver::finish`] (if
-    /// `kind` is `DrainKind::Finish`) or [`Driver::flush`] (otherwise),
+    /// spare space from `output` and hand it to [`Pump::finish`] (if
+    /// `kind` is `DrainKind::Finish`) or [`Pump::flush`] (otherwise),
     /// committing what was written, until the codec reports `Done`.
     ///
     /// When `output.spare()` returns `None`, the sink has no room —
@@ -254,7 +254,7 @@ impl<C: Codec> Driver<C> {
         }
     }
 
-    /// `self.done` is only ever set by [`Driver::process`] reaching a
+    /// `self.done` is only ever set by [`Pump::process`] reaching a
     /// genuine `Progress::StreamEnd` (contract point 4 — pinned
     /// forever, across every method). Reaching `Drain::Done` here is
     /// governed by point 3 instead: `finish` is idempotent against
@@ -295,7 +295,7 @@ impl<C: Codec> Driver<C> {
 /// filled case, since by contract that must be the whole buffer. This
 /// fills that in: `OutputFilled` becomes `written: output_len`, so
 /// both variants collapse into the uniform `{ written, end }` shape
-/// `Driver::finish`/`Driver::flush` and their callers work with.
+/// `Pump::finish`/`Pump::flush` and their callers work with.
 fn normalize_drain(
     result: Result<Drain, Error>,
     output_len: usize,
@@ -314,7 +314,7 @@ fn normalize_drain(
 
 #[cfg(test)]
 mod tests {
-    use super::{DrainEnd, Driver, PumpEnd};
+    use super::{DrainEnd, Pump, PumpEnd};
     use crate::transfer::ProgressEnd;
     use crate::{Codec, Drain, DriveError, Error, ErrorKind, Progress, Sink, Source};
 
@@ -391,8 +391,8 @@ mod tests {
     fn codec_that_only_consumes_input_needs_no_output_room() {
         let mut input = SliceSource { bytes: b"abcdef", pos: 0 };
         let mut output = NullSink;
-        let mut driver = Driver::new(DropEverything);
-        let moved = driver.transfer_from(&mut input, &mut output).unwrap();
+        let mut pump = Pump::new(DropEverything);
+        let moved = pump.transfer_from(&mut input, &mut output).unwrap();
         assert_eq!(moved.consumed, 6);
         assert_eq!(moved.written, 0);
         assert_eq!(moved.end, PumpEnd::SourceExhausted);
@@ -402,21 +402,21 @@ mod tests {
     fn a_pair_that_truly_cannot_progress_reports_no_progress() {
         let mut input = SliceSource { bytes: b"x", pos: 0 };
         let mut output = NullSink;
-        let mut driver = Driver::new(Scripted {
+        let mut pump = Pump::new(Scripted {
             process: Progress::OutputFilled { consumed: 0 },
             drain: Drain::Done { written: 0 },
         });
-        let error = driver.transfer_from(&mut input, &mut output).unwrap_err();
+        let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
         assert!(matches!(error, DriveError::NoProgress));
     }
 
     #[test]
     fn process_uses_the_shared_transfer_boundary() {
-        let mut driver = Driver::new(Scripted {
+        let mut pump = Pump::new(Scripted {
             process: Progress::OutputFilled { consumed: 2 },
             drain: Drain::Done { written: 0 },
         });
-        let moved = driver.process(b"abc", &mut [0; 4]).unwrap();
+        let moved = pump.process(b"abc", &mut [0; 4]).unwrap();
         assert_eq!(moved.consumed, 2);
         assert_eq!(moved.written, 4);
         assert_eq!(moved.end, ProgressEnd::OutputExhausted);
@@ -424,17 +424,17 @@ mod tests {
 
     #[test]
     fn in_band_end_latches_completion() {
-        let mut driver = Driver::new(Scripted {
+        let mut pump = Pump::new(Scripted {
             process: Progress::StreamEnd {
                 consumed: 1,
                 written: 2,
             },
             drain: Drain::OutputFilled,
         });
-        driver.process(b"abc", &mut [0; 4]).unwrap();
-        assert!(driver.is_done());
-        assert_eq!(driver.finish(&mut []).unwrap().end, DrainEnd::Done);
-        let repeated = driver.process(b"trailing", &mut [0; 4]).unwrap();
+        pump.process(b"abc", &mut [0; 4]).unwrap();
+        assert!(pump.is_done());
+        assert_eq!(pump.finish(&mut []).unwrap().end, DrainEnd::Done);
+        let repeated = pump.process(b"trailing", &mut [0; 4]).unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
         assert_eq!(repeated.end, ProgressEnd::StreamEnd);
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn finish_normalizes_output_progress_without_latching_done() {
-        let mut filled = Driver::new(Scripted {
+        let mut filled = Pump::new(Scripted {
             process: Progress::InputConsumed { written: 0 },
             drain: Drain::OutputFilled,
         });
@@ -456,7 +456,7 @@ mod tests {
         // normally afterward (point 6), so `is_done()` stays false and
         // the codec, not a synthetic `StreamEnd`, answers the next
         // `process` call.
-        let mut done = Driver::new(Scripted {
+        let mut done = Pump::new(Scripted {
             process: Progress::InputConsumed { written: 5 },
             drain: Drain::Done { written: 2 },
         });
@@ -470,24 +470,24 @@ mod tests {
 
     #[test]
     fn flush_does_not_end_the_stream() {
-        let mut driver = Driver::new(Scripted {
+        let mut pump = Pump::new(Scripted {
             process: Progress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 2 },
         });
-        let moved = driver.flush(&mut [0; 3]).unwrap();
+        let moved = pump.flush(&mut [0; 3]).unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, DrainEnd::Done);
-        assert!(!driver.is_done());
+        assert!(!pump.is_done());
     }
 
     #[test]
     fn drain_overclaims_are_contract_violations() {
-        let mut driver = Driver::new(Scripted {
+        let mut pump = Pump::new(Scripted {
             process: Progress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 4 },
         });
         assert_eq!(
-            driver.finish(&mut [0; 3]),
+            pump.finish(&mut [0; 3]),
             Err(Error::new(ErrorKind::ContractViolation, 0, 0))
         );
     }

@@ -20,7 +20,7 @@ use std::io::{self, Read, Write};
 
 use core::convert::Infallible;
 
-use crate::driver::{Driver, PumpEnd};
+use crate::pump::{Pump, PumpEnd};
 use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
 use crate::{Codec, DriveError, Error, Sink};
 
@@ -72,7 +72,7 @@ fn slice_error(err: DriveError<Infallible, Infallible>) -> io::Error {
 /// are lost.
 pub struct CodecReader<R, C: Codec, S> {
     input: StdSource<R, S>,
-    driver: Driver<C>,
+    pump: Pump<C>,
 }
 
 impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
@@ -84,7 +84,7 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// from `inner`, so the codec could never see any input — a caller
     /// bug, not a runtime condition.
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
-        Self { input: StdSource::new(inner, inbuf), driver: Driver::new(codec) }
+        Self { input: StdSource::new(inner, inbuf), pump: Pump::new(codec) }
     }
 
     /// Unwrap this reader, discarding the codec, and return the wrapped
@@ -101,13 +101,13 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
             return Ok(0);
         }
 
-        if self.driver.is_done() {
+        if self.pump.is_done() {
             return Ok(0);
         }
         let mut output = SliceSink::new(buf);
-        let moved = self.driver.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
+        let moved = self.pump.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
         if moved.end == PumpEnd::SourceExhausted {
-            self.driver.finish_to(&mut output).map_err(slice_error)?;
+            self.pump.finish_to(&mut output).map_err(slice_error)?;
         }
         Ok(output.written())
     }
@@ -117,7 +117,7 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
 /// before being written to the wrapped writer.
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,
-    driver: Driver<C>,
+    pump: Pump<C>,
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
@@ -129,14 +129,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// [`CodecReader::new`] does: it could never hold a byte for
     /// `inner` to receive.
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
-        Self { output: StdSink::new(inner, outbuf), driver: Driver::new(codec) }
+        Self { output: StdSink::new(inner, outbuf), pump: Pump::new(codec) }
     }
 
     /// Flush any bytes the codec was still holding, finalize the stream
     /// (trailer, checksum, padding — for a stateful codec), and hand back
     /// ownership of the wrapped writer.
     pub fn finish(mut self) -> io::Result<W> {
-        self.driver.finish_to(&mut self.output).map_err(writer_error)?;
+        self.pump.finish_to(&mut self.output).map_err(writer_error)?;
         self.output.finish()?;
         Ok(self.output.into_inner())
     }
@@ -145,12 +145,12 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut input = SliceSource::new(buf);
-        self.driver.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
+        self.pump.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
         Ok(input.consumed())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.driver.flush_to(&mut self.output).map_err(writer_error)?;
+        self.pump.flush_to(&mut self.output).map_err(writer_error)?;
         self.output.finish()
     }
 }
