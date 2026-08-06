@@ -113,10 +113,14 @@ enum EndState {
     /// Neither side has ended; `first` and `second` are both called
     /// normally.
     Normal,
-    /// `first` has permanently ended — reported via `Progress::StreamEnd`
-    /// from `process`, or `Drain::Done` from `finish` — so it is never
-    /// called again. `staging` may still hold bytes it already
-    /// produced, waiting to drain through `second`.
+    /// `first` has permanently ended, reported via `Progress::StreamEnd`
+    /// from `process` — never set from `finish` reaching `Drain::Done`,
+    /// since that only guarantees `finish` itself is idempotent
+    /// (contract point 3), not that every later call of any method is
+    /// pinned to reporting the end (that's point 4, and only
+    /// `StreamEnd` carries it). Once set, `first` is never called
+    /// again. `staging` may still hold bytes it already produced,
+    /// waiting to drain through `second`.
     FirstEnded,
     /// `second` has permanently ended — via `Progress::StreamEnd` from
     /// `process`, or by completing `second.finish`/`second.flush`
@@ -187,36 +191,39 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 }
             }
 
-            // `second` always reads staging from offset 0 — called
-            // unconditionally, even against an empty staging window,
-            // per the `Codec` contract's empty-input case. A partial
+            // `second` always reads staging from offset 0. A partial
             // drain is compacted to the front so the invariant holds
-            // for the next pass (or the next call).
-            let staging = self.staging.as_mut();
-            let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-            out_pos += moved.written;
-            if moved.end == ProgressEnd::StreamEnd {
-                self.end = EndState::SecondEnded;
-                // `second` ending is only clean if it consumed
-                // everything it was offered. Bytes it left unconsumed
-                // would otherwise be silently lost — that's an error,
-                // not the normal "unread input past the end" case
-                // (which is about *your* input, not already-staged
-                // bytes `second` was actually handed).
-                if moved.consumed < self.stage_pos {
-                    self.stage_pos -= moved.consumed;
-                    return Err(Error::new(ErrorKind::UnexpectedEnd, in_pos, out_pos));
-                }
-                self.stage_pos = 0;
-                return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
-            }
-            let leftover = self.stage_pos - moved.consumed;
-            if leftover > 0 {
+            // for the next pass (or the next call). Skipped entirely
+            // when there's nothing staged — an empty-input call to
+            // `second` can't do anything a caller needs to see.
+            if self.stage_pos > 0 {
                 let staging = self.staging.as_mut();
-                staging.copy_within(moved.consumed..self.stage_pos, 0);
+                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                    .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
+                out_pos += moved.written;
+                if moved.end == ProgressEnd::StreamEnd {
+                    self.end = EndState::SecondEnded;
+                    // `second` ending is only clean if it consumed
+                    // everything it was offered. Bytes it left
+                    // unconsumed would otherwise be silently lost —
+                    // that's an error, not the normal "unread input
+                    // past the end" case (which is about *your* input,
+                    // not already-staged bytes `second` was actually
+                    // handed).
+                    if moved.consumed < self.stage_pos {
+                        self.stage_pos -= moved.consumed;
+                        return Err(Error::new(ErrorKind::UnexpectedEnd, in_pos, out_pos));
+                    }
+                    self.stage_pos = 0;
+                    return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
+                }
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
             }
-            self.stage_pos = leftover;
 
             // Case: `first`'s stream ended in-band and everything it
             // had already staged has passed through `second` — no more
@@ -263,18 +270,28 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
         }
 
         let mut out_pos = 0;
+        // Persists across passes *within this call* (not stored in
+        // `self.end` — see the note below on why that would overreach).
+        // Once `first.finish` reaches `Done`, there is no need to ask
+        // it again on a later pass of this same loop.
+        let mut nothing_more_from_first = self.end == EndState::FirstEnded;
 
-        // Same pass structure as `process`, but pulling from
-        // `first.finish` instead of `first.process`: every pass asks
-        // `first` for whatever it still owes (unless it's already
-        // `FirstEnded`, in which case there's nothing left to ask for),
-        // drains staging into `second` (always from offset 0,
-        // compacting any leftover to the front), and finishes `second`
-        // once `first` is done and staging is empty.
+        // Same pass structure as `process`: one pass calls `first`,
+        // then `second`, then checks the exit conditions. Pulling
+        // from `first.finish` instead of `first.process` — but unlike
+        // `process`, reaching `Drain::Done` here does *not* set
+        // `EndState::FirstEnded`: that variant means `first` is pinned
+        // to reporting its end on *any* later call, of any method
+        // (contract point 4), a guarantee only `Progress::StreamEnd`
+        // carries. `finish` reaching `Done` only guarantees `finish`
+        // itself is idempotent from here (point 3) — calling `process`
+        // or `flush` afterward is undefined (point 6), so `first` may
+        // legitimately still expect to be called normally on a *later
+        // call* to `finish`. If `first` is already `FirstEnded` (a
+        // genuine prior `StreamEnd`), it's skipped — that skip is
+        // backed by point 4, not assumed here.
         loop {
-            let first_done = if self.end == EndState::FirstEnded {
-                true
-            } else {
+            if !nothing_more_from_first {
                 let staging = self.staging.as_mut();
                 match self
                     .first
@@ -284,37 +301,37 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 {
                     Drain::OutputFilled => {
                         self.stage_pos = staging.len();
-                        false
                     }
                     Drain::Done { written } => {
                         self.stage_pos += written;
-                        self.end = EndState::FirstEnded;
-                        true
+                        nothing_more_from_first = true;
                     }
                 }
-            };
-
-            let staging = self.staging.as_mut();
-            let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-            out_pos += moved.written;
-            if moved.end == ProgressEnd::StreamEnd {
-                self.end = EndState::SecondEnded;
-                if moved.consumed < self.stage_pos {
-                    self.stage_pos -= moved.consumed;
-                    return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
-                }
-                self.stage_pos = 0;
-                return Ok(Drain::Done { written: out_pos });
             }
-            let leftover = self.stage_pos - moved.consumed;
-            if leftover > 0 {
+
+            if self.stage_pos > 0 {
                 let staging = self.staging.as_mut();
-                staging.copy_within(moved.consumed..self.stage_pos, 0);
+                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                out_pos += moved.written;
+                if moved.end == ProgressEnd::StreamEnd {
+                    self.end = EndState::SecondEnded;
+                    if moved.consumed < self.stage_pos {
+                        self.stage_pos -= moved.consumed;
+                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
+                    }
+                    self.stage_pos = 0;
+                    return Ok(Drain::Done { written: out_pos });
+                }
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
             }
-            self.stage_pos = leftover;
 
-            if first_done && self.stage_pos == 0 {
+            if nothing_more_from_first && self.stage_pos == 0 {
                 // `first` is fully drained through `second`; finish `second`.
                 return match self
                     .second
@@ -346,19 +363,20 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
         }
 
         let mut out_pos = 0;
+        // Persists across passes *within this call* only — once
+        // `first.flush` reaches `Done` there's no need to ask it again
+        // on a later pass of this same loop. Not stored in `self.end`:
+        // a completed `flush` only means a sync point was reached, the
+        // stream stays open, so `first` must still be called on the
+        // *next* `flush`/`process` call. If `first` is already
+        // `FirstEnded` (from an earlier `process` or `finish`), there's
+        // nothing left to flush from it, so it starts out skipped.
+        let mut nothing_more_from_first = self.end == EndState::FirstEnded;
 
         // Same pass structure as `finish`, pulling from `first.flush`
-        // instead of `first.finish` — except reaching `Done` here does
-        // *not* set `FirstEnded`: unlike `finish`, a completed `flush`
-        // only means a sync point was reached, the stream stays open,
-        // so `first` must still be called on the next `flush`/`process`.
-        // If `first` is already `FirstEnded` (from an earlier `process`
-        // or `finish`), there's nothing left to flush from it, so it's
-        // skipped and treated as trivially done.
+        // instead of `first.finish`.
         loop {
-            let first_done = if self.end == EndState::FirstEnded {
-                true
-            } else {
+            if !nothing_more_from_first {
                 let staging = self.staging.as_mut();
                 match self
                     .first
@@ -368,40 +386,42 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 {
                     Drain::OutputFilled => {
                         self.stage_pos = staging.len();
-                        false
                     }
                     Drain::Done { written } => {
                         self.stage_pos += written;
-                        true
+                        nothing_more_from_first = true;
                     }
                 }
-            };
-
-            let staging = self.staging.as_mut();
-            let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-            out_pos += moved.written;
-            if moved.end == ProgressEnd::StreamEnd {
-                // `second` ended in-band mid-flush: nothing more can
-                // ever come out, so the flush is trivially complete —
-                // unless bytes it was offered went unconsumed, which
-                // is `UnexpectedEnd` rather than a clean end.
-                self.end = EndState::SecondEnded;
-                if moved.consumed < self.stage_pos {
-                    self.stage_pos -= moved.consumed;
-                    return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
-                }
-                self.stage_pos = 0;
-                return Ok(Drain::Done { written: out_pos });
             }
-            let leftover = self.stage_pos - moved.consumed;
-            if leftover > 0 {
+
+            if self.stage_pos > 0 {
                 let staging = self.staging.as_mut();
-                staging.copy_within(moved.consumed..self.stage_pos, 0);
+                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                out_pos += moved.written;
+                if moved.end == ProgressEnd::StreamEnd {
+                    // `second` ended in-band mid-flush: nothing more
+                    // can ever come out, so the flush is trivially
+                    // complete — unless bytes it was offered went
+                    // unconsumed, which is `UnexpectedEnd` rather than
+                    // a clean end.
+                    self.end = EndState::SecondEnded;
+                    if moved.consumed < self.stage_pos {
+                        self.stage_pos -= moved.consumed;
+                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
+                    }
+                    self.stage_pos = 0;
+                    return Ok(Drain::Done { written: out_pos });
+                }
+                let leftover = self.stage_pos - moved.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(moved.consumed..self.stage_pos, 0);
+                }
+                self.stage_pos = leftover;
             }
-            self.stage_pos = leftover;
 
-            if !(first_done && self.stage_pos == 0) {
+            if !(nothing_more_from_first && self.stage_pos == 0) {
                 if out_pos == output.len() {
                     return Ok(Drain::OutputFilled);
                 }
