@@ -2,12 +2,12 @@
 //!
 //! [`Codec::process`](crate::Codec::process) reports only the counts
 //! not already implied by its outcome: all input was consumed, all
-//! output was filled, or the stream ended. `transfer` validates that
+//! output was filled, or the stream ended. `step` validates that
 //! report and normalizes it into exact progress on both sides.
 
 use crate::{Codec, Error, Progress};
 
-/// Why one transfer between the current input and output windows stopped.
+/// Why one step between the current input and output windows stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProgressEnd {
     /// The complete input window was consumed.
@@ -26,9 +26,9 @@ pub(crate) struct ProgressStep {
     pub(crate) end: ProgressEnd,
 }
 
-/// Transfer between the current windows until the codec reaches the
+/// Run one step between the current windows until the codec reaches the
 /// boundary guaranteed by its contract.
-pub(crate) fn transfer<C: Codec + ?Sized>(
+pub(crate) fn step<C: Codec + ?Sized>(
     codec: &mut C,
     input: &[u8],
     output: &mut [u8],
@@ -60,7 +60,7 @@ pub(crate) fn transfer<C: Codec + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::{transfer, ProgressStep, ProgressEnd};
+    use super::{step, ProgressStep, ProgressEnd};
     use crate::{Codec, Drain, Error, ErrorKind, Progress};
 
     struct Reports(Progress);
@@ -81,7 +81,7 @@ mod tests {
         let mut output = [0; 5];
 
         assert_eq!(
-            transfer(&mut codec, b"abc", &mut output),
+            step(&mut codec, b"abc", &mut output),
             Ok(ProgressStep {
                 consumed: 3,
                 written: 2,
@@ -96,7 +96,7 @@ mod tests {
         let mut output = [0; 5];
 
         assert_eq!(
-            transfer(&mut codec, b"abc", &mut output),
+            step(&mut codec, b"abc", &mut output),
             Ok(ProgressStep {
                 consumed: 2,
                 written: 5,
@@ -114,7 +114,7 @@ mod tests {
         let mut output = [0; 5];
 
         assert_eq!(
-            transfer(&mut codec, b"abc", &mut output),
+            step(&mut codec, b"abc", &mut output),
             Ok(ProgressStep {
                 consumed: 2,
                 written: 4,
@@ -127,7 +127,7 @@ mod tests {
     fn degenerate_windows_remain_well_defined() {
         let mut input_done = Reports(Progress::InputConsumed { written: 0 });
         assert_eq!(
-            transfer(&mut input_done, b"", &mut []),
+            step(&mut input_done, b"", &mut []),
             Ok(ProgressStep {
                 consumed: 0,
                 written: 0,
@@ -137,7 +137,7 @@ mod tests {
 
         let mut output_done = Reports(Progress::OutputFilled { consumed: 0 });
         assert_eq!(
-            transfer(&mut output_done, b"abc", &mut []),
+            step(&mut output_done, b"abc", &mut []),
             Ok(ProgressStep {
                 consumed: 0,
                 written: 0,
@@ -152,13 +152,13 @@ mod tests {
 
         let mut input_done = Reports(Progress::InputConsumed { written: 6 });
         assert_eq!(
-            transfer(&mut input_done, b"abc", &mut [0; 5]),
+            step(&mut input_done, b"abc", &mut [0; 5]),
             Err(violation)
         );
 
         let mut output_done = Reports(Progress::OutputFilled { consumed: 4 });
         assert_eq!(
-            transfer(&mut output_done, b"abc", &mut [0; 5]),
+            step(&mut output_done, b"abc", &mut [0; 5]),
             Err(violation)
         );
 
@@ -166,7 +166,7 @@ mod tests {
             consumed: 4,
             written: 6,
         });
-        assert_eq!(transfer(&mut ended, b"abc", &mut [0; 5]), Err(violation));
+        assert_eq!(step(&mut ended, b"abc", &mut [0; 5]), Err(violation));
     }
 
     struct Fails;
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn codec_errors_are_preserved() {
         assert_eq!(
-            transfer(&mut Fails, b"abc", &mut [0; 5]),
+            step(&mut Fails, b"abc", &mut [0; 5]),
             Err(Error::new(ErrorKind::Corrupt, 1, 2))
         );
     }

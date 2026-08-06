@@ -5,7 +5,7 @@
 //! `io` (or a client's own) gets chaining for free without knowing
 //! anything about it.
 
-use crate::transfer::{transfer, ProgressEnd};
+use crate::step::{step, ProgressEnd};
 use crate::{Codec, Drain, Error, ErrorKind, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
@@ -201,7 +201,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 
             if self.stage_pos > 0 {
                 let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                let moved = step(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
                 out_pos += moved.written;
                 let leftover = self.stage_pos - moved.consumed;
@@ -273,7 +273,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // slice.
             if self.end == EndState::Normal && in_pos < input.len() {
                 let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
+                let moved = step(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
                 in_pos += moved.consumed;
                 self.stage_pos += moved.written;
@@ -289,7 +289,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // `second` can't do anything a caller needs to see.
             if self.stage_pos > 0 {
                 let staging = self.staging.as_mut();
-                let moved = transfer(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
+                let moved = step(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
                 out_pos += moved.written;
                 let leftover = self.stage_pos - moved.consumed;

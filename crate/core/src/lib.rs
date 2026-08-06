@@ -23,7 +23,7 @@ pub use vocabulary::{Codec, Drain, Error, ErrorKind, Progress};
 mod carry;
 pub use carry::Carry;
 
-mod transfer;
+mod step;
 mod pump;
 
 mod chain;

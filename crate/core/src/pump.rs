@@ -5,7 +5,7 @@
 //! frontends lend both current windows. This pump owns only codec
 //! lifecycle, so using it never introduces a byte copy.
 
-use crate::transfer::{transfer, ProgressStep};
+use crate::step::{step, ProgressStep};
 use crate::{Codec, Drain, DriveError, Error, Sink, Source};
 
 /// Exact progress and boundary of one validated `finish` or `flush`
@@ -81,11 +81,11 @@ impl<C: Codec> Pump<C> {
             return Ok(ProgressStep {
                 consumed: 0,
                 written: 0,
-                end: crate::transfer::ProgressEnd::StreamEnd,
+                end: crate::step::ProgressEnd::StreamEnd,
             });
         }
-        let moved = transfer(&mut self.codec, input, output)?;
-        if moved.end == crate::transfer::ProgressEnd::StreamEnd {
+        let moved = step(&mut self.codec, input, output)?;
+        if moved.end == crate::step::ProgressEnd::StreamEnd {
             self.done = true;
         }
         Ok(moved)
@@ -141,7 +141,7 @@ impl<C: Codec> Pump<C> {
                 Ok(moved)
                     if moved.consumed > 0
                         || moved.written > 0
-                        || moved.end == crate::transfer::ProgressEnd::StreamEnd =>
+                        || moved.end == crate::step::ProgressEnd::StreamEnd =>
                 {
                     moved
                 }
@@ -162,7 +162,7 @@ impl<C: Codec> Pump<C> {
             output.commit(moved.written).map_err(DriveError::Sink)?;
             consumed += moved.consumed;
             written += moved.written;
-            if moved.end == crate::transfer::ProgressEnd::StreamEnd {
+            if moved.end == crate::step::ProgressEnd::StreamEnd {
                 return Ok(PumpTransfer { consumed, written, end: PumpEnd::StreamEnd });
             }
         }
@@ -315,7 +315,7 @@ fn normalize_drain(
 #[cfg(test)]
 mod tests {
     use super::{DrainEnd, Pump, PumpEnd};
-    use crate::transfer::ProgressEnd;
+    use crate::step::ProgressEnd;
     use crate::{Codec, Drain, DriveError, Error, ErrorKind, Progress, Sink, Source};
 
     struct Scripted {
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn process_uses_the_shared_transfer_boundary() {
+    fn process_uses_the_shared_step() {
         let mut pump = Pump::new(Scripted {
             process: Progress::OutputFilled { consumed: 2 },
             drain: Drain::Done { written: 0 },
