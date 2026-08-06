@@ -430,26 +430,24 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 }
             }
 
-            if !(nothing_more_from_first && self.stage_pos == 0) {
-                if out_pos == output.len() {
-                    return Ok(Drain::OutputFilled);
-                }
-                // Otherwise staging came up empty but `first` isn't
-                // done flushing yet — run another pass.
-                continue;
+            if nothing_more_from_first && self.stage_pos == 0 {
+                // Everything `first` owed has passed through `second`;
+                // now `second`'s own flush.
+                return match self
+                    .second
+                    .flush(&mut output[out_pos..])
+                    .and_then(|d| d.validated(output.len() - out_pos))
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
+                {
+                    Drain::OutputFilled => Ok(Drain::OutputFilled),
+                    Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
+                };
             }
-
-            // Everything `first` owed has passed through `second`; now
-            // `second`'s own flush.
-            return match self
-                .second
-                .flush(&mut output[out_pos..])
-                .and_then(|d| d.validated(output.len() - out_pos))
-                .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-            {
-                Drain::OutputFilled => Ok(Drain::OutputFilled),
-                Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
-            };
+            if out_pos == output.len() {
+                return Ok(Drain::OutputFilled);
+            }
+            // Otherwise staging came up empty but `first` isn't `Done`
+            // flushing yet — run another pass.
         }
     }
 }
