@@ -51,7 +51,11 @@ pub struct VecSink {
 
 #[cfg(feature = "alloc")]
 impl VecSink {
-    pub const DEFAULT_GROWTH: usize = 64 * 1024;
+    // The minimum extra capacity requested each time the vec runs out of
+    // spare space. `Vec::reserve`'s underlying allocator still amortizes
+    // growth on top of this (roughly doubling capacity once it's past a
+    // small size), so this value is a floor, not the actual step size.
+    pub const DEFAULT_GROWTH: usize = 1024;
 
     pub fn new(inner: alloc::vec::Vec<u8>) -> Self {
         Self::with_growth(inner, Self::DEFAULT_GROWTH)
