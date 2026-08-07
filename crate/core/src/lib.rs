@@ -60,7 +60,7 @@
 //!
 //! // Arrange
 //! let base64_codec = base64_dec();
-//! let scratch_buffer = [0u8; 8];
+//! let scratch_buffer = [0u8; 64];
 //! let mut read_buffer = [0u8; 4];
 //!
 //! // Act
