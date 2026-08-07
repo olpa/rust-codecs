@@ -93,6 +93,13 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     pub fn into_inner(self) -> R {
         self.input.into_inner()
     }
+
+    /// Direct access to the wrapped reader, bypassing the codec.
+    /// Bytes already pulled from it into this reader's scratch buffer,
+    /// but not yet yielded to the caller, aren't visible here.
+    pub fn get_mut(&mut self) -> &mut R {
+        self.input.get_mut()
+    }
 }
 
 impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
@@ -130,6 +137,16 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// `inner` to receive.
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
         Self { output: StdSink::new(inner, outbuf), pump: Pump::new(codec) }
+    }
+
+    /// Direct access to the wrapped writer, bypassing the codec — e.g.
+    /// to interleave raw framing bytes with codec output. Safe to use
+    /// any time the codec has no output still owed from a prior
+    /// `write`/`flush` (fresh, or right after `flush`/`finish`);
+    /// writing here while the codec is mid-unit reorders bytes ahead of
+    /// whatever it's still holding.
+    pub fn get_mut(&mut self) -> &mut W {
+        self.output.get_mut()
     }
 
     /// Flush any bytes the codec was still holding, finalize the stream

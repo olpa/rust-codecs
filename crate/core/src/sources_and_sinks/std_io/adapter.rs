@@ -28,6 +28,10 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
     pub fn into_inner(self) -> R {
         self.inner
     }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
 }
 
 impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
@@ -71,6 +75,10 @@ impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
 
     pub fn into_inner(self) -> W {
         self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.inner
     }
 }
 

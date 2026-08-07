@@ -28,6 +28,10 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     pub fn into_inner(self) -> R {
         self.inner
     }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
 }
 
 impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
@@ -71,6 +75,10 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
 
     pub fn into_inner(self) -> W {
         self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.inner
     }
 }
 
