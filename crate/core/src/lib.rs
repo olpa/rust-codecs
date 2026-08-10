@@ -111,6 +111,33 @@
 //!   [`stream_to_stream`] becomes a generic "copy" function between
 //!   streams that are otherwise incompatible, for example `std::io`
 //!   and `embedded_io`.
+//!
+//! ## Chain of codecs
+//!
+//! [`Chain`] composes two codecs into one.
+//!
+//! TODO: implement example gzip + base64 after we have gzip (from `compcol`).
+//!
+//! ```ignore
+//! // TODO: gzip_enc() doesn't exist yet.
+//! use rust_codecs_core::base64::base64_enc;
+//! use rust_codecs_core::gzip::gzip_enc;
+//! use rust_codecs_core::Chain;
+//! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
+//! use rust_codecs_core::sources_and_sinks::vec::VecSink;
+//! use rust_codecs_core::stream_to_stream;
+//!
+//! let chain = Chain::new(gzip_enc(), base64_enc(), vec![0u8; 64]);
+//! let mut source = SliceSource::new(b"hello");
+//! let mut sink = VecSink::default();
+//! stream_to_stream(&mut source, chain, &mut sink).unwrap();
+//! ```
+//!
+//! TODO: it's the sort of same, explain the fine difference between:
+//!
+//! - `std::io::copy` over `(codec1`-wrapped input, `codec2`-wrapped
+//!   output)
+//! - `stream_to_stream(input, output)` with `Chain(codec1, codec2)`
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
