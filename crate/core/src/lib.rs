@@ -100,6 +100,17 @@
 //! let output = String::from_utf8(sink.into_inner()).unwrap();
 //! assert_eq!(output, "uryyb");
 //! ```
+//!
+//! Notes:
+//!
+//! - This slice-to-`Vec` wiring is a simplified re-implementation of
+//!   [`encode_str`](sources_and_sinks::vec::encode_str)/
+//!   [`encode_string`](sources_and_sinks::vec::encode_string); reach for
+//!   those instead of hand-rolling this pattern.
+//! - Side usage: with the [`identity`](identity::identity) codec,
+//!   [`stream_to_stream`] becomes a generic "copy" function between
+//!   streams that are otherwise incompatible, for example `std::io`
+//!   and `embedded_io`.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
