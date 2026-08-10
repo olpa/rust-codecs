@@ -162,7 +162,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.pump.flush_to(&mut self.output).map_err(writer_error)?;
-        self.output.finish().map_err(EmbeddedError::Io)
+        self.output.get_mut().flush().map_err(EmbeddedError::Io)
     }
 }
 
