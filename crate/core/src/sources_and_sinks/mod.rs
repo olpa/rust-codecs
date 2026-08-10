@@ -15,7 +15,6 @@
 pub mod embedded_io;
 #[cfg(feature = "std")]
 pub mod std_io;
-#[cfg(any(feature = "std", feature = "embedded-io"))]
 pub mod slice;
 #[cfg(feature = "alloc")]
 pub mod vec;
