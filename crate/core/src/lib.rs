@@ -73,6 +73,33 @@
 //! let text = std::str::from_utf8(&read_buffer).unwrap();
 //! assert_eq!(text, "🦀");
 //! ```
+//!
+//! ## Any stream to any stream
+//!
+//! [`stream_to_stream`] applies a codec straight from a [`Source`] to a
+//! [`Sink`], with no reader/writer wrapper in between. Here the source
+//! borrows a `&str`'s bytes and the sink grows a `Vec<u8>`.
+//!
+//! ```
+//! use rust_codecs_core::rot13::rot13;
+//! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
+//! use rust_codecs_core::sources_and_sinks::vec::VecSink;
+//! use rust_codecs_core::stream_to_stream;
+//!
+//! // Arrange
+//! let rot13_codec = rot13();
+//! let mut sink = VecSink::default();
+//!
+//! // Act
+//! let input: &str = "hello";
+//! let mut source = SliceSource::new(input.as_bytes());
+//!
+//! stream_to_stream(&mut source, rot13_codec, &mut sink).unwrap();
+//!
+//! // Assert
+//! let output = String::from_utf8(sink.into_inner()).unwrap();
+//! assert_eq!(output, "uryyb");
+//! ```
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
