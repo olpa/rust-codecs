@@ -114,6 +114,15 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
 
 /// Wraps an [`embedded_io::Write`], transforming bytes before writing
 /// them to the wrapped endpoint.
+///
+/// End-of-stream: if the codec ends its stream in-band before the
+/// caller stops writing, that `write` call returns a short count —
+/// only the bytes consumed up to the codec's `StreamEnd` — and every
+/// later `write` with a non-empty buffer returns
+/// `Err(EmbeddedError::WriteZero)` without touching the codec again.
+/// `flush`/`finish` stay safe to call afterward: both see the codec
+/// already done and become no-ops on it, only still touching the
+/// wrapped writer/sink.
 pub struct CodecWriter<W, C: Codec, S> {
     output: EmbeddedSink<W, S>,
     pump: Pump<C>,
@@ -233,5 +242,51 @@ mod tests {
         let mut output = [0u8; 1];
         let mut writer = CodecWriter::new(&mut output[..], identity(), [0u8; 2]);
         assert!(matches!(writer.write(b"ab"), Err(EmbeddedError::Io(_))));
+    }
+
+    /// Copies bytes 1:1 but ends its stream after `limit` bytes, like
+    /// a self-describing format with an in-band terminator.
+    struct EarlyEnd {
+        limit: usize,
+        done: usize,
+    }
+
+    impl Codec for EarlyEnd {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+            let remaining = self.limit - self.done;
+            let n = input.len().min(output.len()).min(remaining);
+            output[..n].copy_from_slice(&input[..n]);
+            self.done += n;
+            if self.done >= self.limit {
+                Ok(Progress::StreamEnd { consumed: n, written: n })
+            } else if n == input.len() {
+                Ok(Progress::InputConsumed { written: n })
+            } else {
+                Ok(Progress::OutputFilled { consumed: n })
+            }
+        }
+
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    #[test]
+    fn writer_stops_at_in_band_stream_end() {
+        // The codec ends after 3 bytes; the first write is short (only
+        // the bytes consumed before StreamEnd), and every later write
+        // of a non-empty buffer errors with WriteZero without
+        // touching the codec again. finish() afterward is still safe
+        // and idempotent.
+        let mut output = [0u8; 8];
+        let remaining = {
+            let mut writer = CodecWriter::new(&mut output[..], EarlyEnd { limit: 3, done: 0 }, [0u8; 8]);
+            assert_eq!(writer.write(b"Hello World").unwrap(), 3);
+            let error = writer.write(b"more").unwrap_err();
+            assert!(matches!(error, EmbeddedError::WriteZero));
+            writer.finish().unwrap().len()
+        };
+        let written = output.len() - remaining;
+        assert_eq!(&output[..written], b"Hel");
     }
 }

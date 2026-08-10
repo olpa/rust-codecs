@@ -122,6 +122,16 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
 
 /// Wraps a `Write`; bytes written to this wrapper are run through `C`
 /// before being written to the wrapped writer.
+///
+/// End-of-stream: if the codec ends its stream in-band before the
+/// caller stops writing, that `write` call returns a short count —
+/// only the bytes consumed up to the codec's `StreamEnd` — and every
+/// later `write` with a non-empty buffer returns `Ok(0)` without
+/// touching the codec again (a plain `write_all` turns that `Ok(0)`
+/// into `ErrorKind::WriteZero`, since it treats a zero-length write
+/// against non-empty input as failure). `flush`/`finish` stay safe to
+/// call afterward: both see the codec already done and become no-ops
+/// on it, only still touching the wrapped writer/sink.
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,
     pump: Pump<C>,
@@ -174,7 +184,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 
 #[cfg(all(test, feature = "rot13"))]
 mod tests {
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor, Read, Write};
 
     use super::{CodecReader, CodecWriter};
     use crate::rot13::rot13;
@@ -231,5 +241,18 @@ mod tests {
         assert_eq!(out, b"Hel");
         let mut buf = [0u8; 4];
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn writer_stops_at_in_band_stream_end() {
+        // The codec ends after 3 bytes; the first write is short (only
+        // the bytes consumed before StreamEnd), and every later write
+        // of a non-empty buffer returns 0 without touching the codec
+        // again. finish() afterward is still safe and idempotent.
+        let mut writer = CodecWriter::new(Vec::new(), EarlyEnd { limit: 3, done: 0 }, vec![0u8; 8]);
+        assert_eq!(writer.write(b"Hello World").unwrap(), 3);
+        assert_eq!(writer.write(b"more").unwrap(), 0);
+        let out = writer.finish().unwrap();
+        assert_eq!(out, b"Hel");
     }
 }
