@@ -248,12 +248,7 @@ impl Drain {
 ///
 /// See `CREATING-CODECS.md` for how to write one.
 ///
-pub trait Codec {
-    /// Push input bytes and pull output bytes. Pinned to reporting
-    /// `StreamEnd` forever once it's reached: see contract point 4.
-    /// Calling this after `finish`: see contract point 6.
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
-
+pub trait DrainCodec {
     /// Signal "no more input is coming": flush any buffered state and,
     /// for formats with one, write the trailer/checksum. Call
     /// repeatedly (draining `output` between calls) until it reports
@@ -280,6 +275,13 @@ pub trait Codec {
     }
 }
 
+pub trait Codec: DrainCodec {
+    /// Push input bytes and pull output bytes. Pinned to reporting
+    /// `StreamEnd` forever once it's reached: see contract point 4.
+    /// Calling this after `finish`: see contract point 6.
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
+}
+
 // Mirrors std's `impl<R: Read + ?Sized> Read for Box<R>`: lets a `Box<dyn
 // Codec>` (or a boxed concrete codec) stand in anywhere a `Codec` is
 // expected, e.g. to build a runtime-determined chain of codecs.
@@ -287,17 +289,20 @@ pub trait Codec {
 use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
-impl<C: Codec + ?Sized> Codec for Box<C> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-        (**self).process(input, output)
-    }
-
+impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         (**self).finish(output)
     }
 
     fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         (**self).flush(output)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<C: Codec + ?Sized> Codec for Box<C> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+        (**self).process(input, output)
     }
 }
 

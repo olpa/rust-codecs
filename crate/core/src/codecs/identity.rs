@@ -1,10 +1,16 @@
 //! Example [`Codec`]: passes bytes through unchanged.
 
-use crate::{Codec, Drain, Error, Progress};
+use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
 /// A no-op codec: output is identical to input.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Identity;
+
+impl DrainCodec for Identity {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
+    }
+}
 
 impl Codec for Identity {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
@@ -17,10 +23,6 @@ impl Codec for Identity {
         } else {
             Ok(Progress::OutputFilled { consumed: n })
         }
-    }
-
-    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
     }
 }
 

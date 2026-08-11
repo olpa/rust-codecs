@@ -48,7 +48,7 @@
 
 use json_escape::explicit::escape_bytes;
 
-use crate::{Carry, Codec, Drain, Error, ErrorKind, Progress};
+use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
 /// Longest escape sequence `escape_bytes` ever emits: `\uXXXX`.
 const MAX_ESCAPE: usize = 6;
@@ -104,6 +104,31 @@ impl JsonEnc {
     }
 }
 
+impl DrainCodec for JsonEnc {
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        // A well-behaved driver never reaches this with pending_literal
+        // nonzero: as long as it's nonzero, `process` reports less than
+        // full input consumed, which keeps the driver calling `process`
+        // again instead of `finish`. But those leftover literal bytes
+        // only ever existed in a previous `process` call's `input`,
+        // which `finish` has no access to — so a caller that violates
+        // the convention gets an error here instead of an out-of-bounds
+        // panic from indexing `&[]` in the shared helper below.
+        // `pending_literal` nonzero also means `carry` is guaranteed
+        // empty (nothing is ever handed to it until the literal ahead
+        // of it has fully drained), so skipping straight to an error
+        // here never strands bytes `carry` was already holding.
+        if self.pending_literal > 0 {
+            return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
+        }
+        let (_, written) = self.flush_pending(&[], output);
+        if !self.carry.is_empty() {
+            return Ok(Drain::OutputFilled);
+        }
+        Ok(Drain::Done { written })
+    }
+}
+
 impl Codec for JsonEnc {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let (mut consumed, mut written) = self.flush_pending(input, output);
@@ -145,29 +170,6 @@ impl Codec for JsonEnc {
         // yielded — i.e. all of `input` — was fully written.
         Ok(Progress::InputConsumed { written })
     }
-
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        // A well-behaved driver never reaches this with pending_literal
-        // nonzero: as long as it's nonzero, `process` reports less than
-        // full input consumed, which keeps the driver calling `process`
-        // again instead of `finish`. But those leftover literal bytes
-        // only ever existed in a previous `process` call's `input`,
-        // which `finish` has no access to — so a caller that violates
-        // the convention gets an error here instead of an out-of-bounds
-        // panic from indexing `&[]` in the shared helper below.
-        // `pending_literal` nonzero also means `carry` is guaranteed
-        // empty (nothing is ever handed to it until the literal ahead
-        // of it has fully drained), so skipping straight to an error
-        // here never strands bytes `carry` was already holding.
-        if self.pending_literal > 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
-        }
-        let (_, written) = self.flush_pending(&[], output);
-        if !self.carry.is_empty() {
-            return Ok(Drain::OutputFilled);
-        }
-        Ok(Drain::Done { written })
-    }
 }
 
 /// Build a [`JsonEnc`] codec.
@@ -182,7 +184,7 @@ mod tests {
     use super::{escape_bytes, json_enc, JsonEnc};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{VecSink, VecSource};
-    use crate::{Codec, Drain, DriveError, ErrorKind, Progress};
+    use crate::{Codec, Drain, DrainCodec, DriveError, ErrorKind, Progress};
 
     const INPUT: &[u8] = b"He said \"hi\"\n\tBack\\slash\x01\x1f\x7f\xc3\xa9";
     const ESCAPED: &[u8] =

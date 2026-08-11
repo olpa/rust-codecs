@@ -188,7 +188,7 @@ mod tests {
 
     use super::{CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::{Codec, Drain, Error, Progress};
+    use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
     #[test]
     #[should_panic(expected = "buffer must be non-empty")]
@@ -209,6 +209,12 @@ mod tests {
         done: usize,
     }
 
+    impl DrainCodec for EarlyEnd {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
     impl Codec for EarlyEnd {
         fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             let remaining = self.limit - self.done;
@@ -222,10 +228,6 @@ mod tests {
             } else {
                 Ok(Progress::OutputFilled { consumed: n })
             }
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
         }
     }
 

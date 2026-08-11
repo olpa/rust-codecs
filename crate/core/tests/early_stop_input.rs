@@ -15,10 +15,18 @@ use core::convert::Infallible;
 
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
-use rust_codecs_core::{stream_to_stream, Codec, Drain, Error, Progress, Source};
+use rust_codecs_core::{stream_to_stream, Codec, Drain, DrainCodec, Error, Progress, Source};
 
 struct QuoteEnd;
 
+impl DrainCodec for QuoteEnd {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
+    }
+}
+
+// TODO(step 7): convert to `TerminatingCodec::process` returning
+// `TerminatingProgress::End` once that trait exists.
 impl Codec for QuoteEnd {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let quote_pos = input.iter().position(|&b| b == b'"');
@@ -35,10 +43,6 @@ impl Codec for QuoteEnd {
             // Consumed all of input; no quote in sight.
             Ok(Progress::InputConsumed { written: n })
         }
-    }
-
-    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
     }
 }
 

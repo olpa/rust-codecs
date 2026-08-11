@@ -1,6 +1,6 @@
 //! Example [`Codec`]: ROT13 letter substitution.
 
-use crate::{Codec, Drain, Error, Progress};
+use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
 fn rot13_byte(b: u8) -> u8 {
     match b {
@@ -13,6 +13,12 @@ fn rot13_byte(b: u8) -> u8 {
 /// A stateless, self-inverse ROT13 codec.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Rot13;
+
+impl DrainCodec for Rot13 {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
+    }
+}
 
 impl Codec for Rot13 {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
@@ -27,10 +33,6 @@ impl Codec for Rot13 {
         } else {
             Ok(Progress::OutputFilled { consumed: n })
         }
-    }
-
-    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
     }
 }
 

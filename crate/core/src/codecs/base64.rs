@@ -21,7 +21,7 @@
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
-use crate::{Carry, Codec, Drain, Error, ErrorKind, Progress};
+use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
 // of the base64 algorithm itself, not a detail of any one alphabet or
@@ -86,6 +86,34 @@ impl<E: Engine> Base64Enc<E> {
             .encode_slice(group, &mut scratch)
             .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
         Ok((scratch, n))
+    }
+}
+
+impl<E: Engine> DrainCodec for Base64Enc<E> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        let mut out_pos = self.carry.drain(output);
+        if !self.carry.is_empty() {
+            return Ok(Drain::OutputFilled);
+        }
+        if self.len > 0 {
+            // The engine pads a final short group itself — that's why
+            // partial groups are deferred to finish and never encoded
+            // in process.
+            let (scratch, n) = {
+                let mut scratch = [0u8; ENCODED_GROUP];
+                let n = self
+                    .engine
+                    .encode_slice(&self.pending_group[..self.len], &mut scratch)
+                    .map_err(|_| Error::new(ErrorKind::Corrupt, 0, out_pos))?;
+                (scratch, n)
+            };
+            self.len = 0;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+            if !self.carry.is_empty() {
+                return Ok(Drain::OutputFilled);
+            }
+        }
+        Ok(Drain::Done { written: out_pos })
     }
 }
 
@@ -160,32 +188,6 @@ impl<E: Engine> Codec for Base64Enc<E> {
         }
         Ok(Progress::InputConsumed { written: out_pos })
     }
-
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        let mut out_pos = self.carry.drain(output);
-        if !self.carry.is_empty() {
-            return Ok(Drain::OutputFilled);
-        }
-        if self.len > 0 {
-            // The engine pads a final short group itself — that's why
-            // partial groups are deferred to finish and never encoded
-            // in process.
-            let (scratch, n) = {
-                let mut scratch = [0u8; ENCODED_GROUP];
-                let n = self
-                    .engine
-                    .encode_slice(&self.pending_group[..self.len], &mut scratch)
-                    .map_err(|_| Error::new(ErrorKind::Corrupt, 0, out_pos))?;
-                (scratch, n)
-            };
-            self.len = 0;
-            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
-            if !self.carry.is_empty() {
-                return Ok(Drain::OutputFilled);
-            }
-        }
-        Ok(Drain::Done { written: out_pos })
-    }
 }
 
 /// Build a [`Base64Enc`] codec using the standard base64 alphabet with
@@ -223,6 +225,36 @@ impl<E: Engine> Base64Dec<E> {
             .decode_slice(group, &mut scratch)
             .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
         Ok((scratch, n))
+    }
+}
+
+impl<E: Engine> DrainCodec for Base64Dec<E> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        let mut out_pos = self.carry.drain(output);
+        if !self.carry.is_empty() {
+            return Ok(Drain::OutputFilled);
+        }
+        if self.len > 0 {
+            // A short trailing group is only valid at true
+            // end-of-stream, and only for engines that don't require
+            // padding (e.g. URL_SAFE_NO_PAD); the engine itself
+            // enforces that — a padded engine like STANDARD rejects an
+            // unpadded partial group here.
+            let (scratch, n) = {
+                let mut scratch = [0u8; GROUP];
+                let n = self
+                    .engine
+                    .decode_slice(&self.pending_group[..self.len], &mut scratch)
+                    .map_err(|_| Error::new(ErrorKind::UnexpectedEnd, 0, out_pos))?;
+                (scratch, n)
+            };
+            self.len = 0;
+            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
+            if !self.carry.is_empty() {
+                return Ok(Drain::OutputFilled);
+            }
+        }
+        Ok(Drain::Done { written: out_pos })
     }
 }
 
@@ -332,34 +364,6 @@ impl<E: Engine> Codec for Base64Dec<E> {
         }
         Ok(Progress::InputConsumed { written: out_pos })
     }
-
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        let mut out_pos = self.carry.drain(output);
-        if !self.carry.is_empty() {
-            return Ok(Drain::OutputFilled);
-        }
-        if self.len > 0 {
-            // A short trailing group is only valid at true
-            // end-of-stream, and only for engines that don't require
-            // padding (e.g. URL_SAFE_NO_PAD); the engine itself
-            // enforces that — a padded engine like STANDARD rejects an
-            // unpadded partial group here.
-            let (scratch, n) = {
-                let mut scratch = [0u8; GROUP];
-                let n = self
-                    .engine
-                    .decode_slice(&self.pending_group[..self.len], &mut scratch)
-                    .map_err(|_| Error::new(ErrorKind::UnexpectedEnd, 0, out_pos))?;
-                (scratch, n)
-            };
-            self.len = 0;
-            out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
-            if !self.carry.is_empty() {
-                return Ok(Drain::OutputFilled);
-            }
-        }
-        Ok(Drain::Done { written: out_pos })
-    }
 }
 
 /// Build a [`Base64Dec`] codec using the standard base64 alphabet with
@@ -376,7 +380,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
-    use crate::{stream_to_stream, Codec, DriveError, Drain, Progress};
+    use crate::{stream_to_stream, Codec, DrainCodec, DriveError, Drain, Progress};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
 

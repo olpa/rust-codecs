@@ -473,24 +473,26 @@ fn normalize_drain(
 #[cfg(test)]
 mod tests {
     use super::{step, DrainEnd, Pump, ProgressEnd, ProgressStep, PumpEnd};
-    use crate::{Codec, Drain, DriveError, Error, ErrorKind, Progress, Sink, Source};
+    use crate::{Codec, Drain, DrainCodec, DriveError, Error, ErrorKind, Progress, Sink, Source};
 
     struct Scripted {
         process: Progress,
         drain: Drain,
     }
 
-    impl Codec for Scripted {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
-            Ok(self.process)
-        }
-
+    impl DrainCodec for Scripted {
         fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
             Ok(self.drain)
         }
 
         fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
             Ok(self.drain)
+        }
+    }
+
+    impl Codec for Scripted {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            Ok(self.process)
         }
     }
 
@@ -534,13 +536,15 @@ mod tests {
     /// pass with no output stream at all.
     struct DropEverything;
 
+    impl DrainCodec for DropEverything {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
     impl Codec for DropEverything {
         fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(Progress::InputConsumed { written: 0 })
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
         }
     }
 
@@ -651,13 +655,15 @@ mod tests {
 
     struct Reports(Progress);
 
+    impl DrainCodec for Reports {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
     impl Codec for Reports {
         fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(self.0)
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
         }
     }
 
@@ -757,13 +763,15 @@ mod tests {
 
     struct Fails;
 
+    impl DrainCodec for Fails {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
     impl Codec for Fails {
         fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Err(Error::new(ErrorKind::Corrupt, 1, 2))
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
         }
     }
 

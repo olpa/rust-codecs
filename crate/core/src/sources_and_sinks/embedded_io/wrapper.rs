@@ -181,7 +181,7 @@ mod tests {
 
     use super::{CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
-    use crate::{Codec, Drain, Error, Progress};
+    use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
     const INPUT: &[u8] = b"embedded io";
 
@@ -215,16 +215,18 @@ mod tests {
 
     struct EndsImmediately;
 
+    impl DrainCodec for EndsImmediately {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            unreachable!()
+        }
+    }
+
     impl Codec for EndsImmediately {
         fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(Progress::StreamEnd {
                 consumed: 0,
                 written: 0,
             })
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            unreachable!()
         }
     }
 
@@ -251,6 +253,12 @@ mod tests {
         done: usize,
     }
 
+    impl DrainCodec for EarlyEnd {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
     impl Codec for EarlyEnd {
         fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             let remaining = self.limit - self.done;
@@ -264,10 +272,6 @@ mod tests {
             } else {
                 Ok(Progress::OutputFilled { consumed: n })
             }
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
         }
     }
 

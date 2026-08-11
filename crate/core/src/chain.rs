@@ -6,7 +6,7 @@
 //! anything about it.
 
 use crate::pump::{step, ProgressEnd};
-use crate::{Codec, Drain, Error, ErrorKind, Progress};
+use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
 /// `staging`) into a single [`Codec`].
@@ -294,6 +294,16 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     }
 }
 
+impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        self.drain_through(output, A::finish, B::finish)
+    }
+
+    fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        self.drain_through(output, A::flush, B::flush)
+    }
+}
+
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         // The chain is already over: report it without touching
@@ -400,14 +410,6 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // `output` is finished — run another pass.
         }
     }
-
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        self.drain_through(output, A::finish, B::finish)
-    }
-
-    fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        self.drain_through(output, A::flush, B::flush)
-    }
 }
 
 #[cfg(all(
@@ -426,7 +428,7 @@ mod tests {
     use crate::{stream_to_stream, DriveError};
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
     use crate::rot13::rot13;
-    use crate::{Codec, Drain, Error, Progress};
+    use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
     const INPUT: &[u8] = b"Hello, World! 123";
 
@@ -451,6 +453,12 @@ mod tests {
         done: usize,
     }
 
+    impl DrainCodec for EarlyEnd {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
     impl Codec for EarlyEnd {
         fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             let remaining = self.limit - self.done;
@@ -464,10 +472,6 @@ mod tests {
             } else {
                 Ok(Progress::OutputFilled { consumed: n })
             }
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
         }
     }
 
@@ -655,18 +659,20 @@ mod tests {
         }
     }
 
-    impl Codec for Hoarder {
-        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
-            self.buf.extend_from_slice(input);
-            Ok(Progress::InputConsumed { written: 0 })
-        }
-
+    impl DrainCodec for Hoarder {
         fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
             self.emit(output)
         }
 
         fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
             self.emit(output)
+        }
+    }
+
+    impl Codec for Hoarder {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            self.buf.extend_from_slice(input);
+            Ok(Progress::InputConsumed { written: 0 })
         }
     }
 
@@ -734,13 +740,15 @@ mod tests {
     /// Claims to have consumed more input than it was given.
     struct Overclaimer;
 
+    impl DrainCodec for Overclaimer {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
     impl Codec for Overclaimer {
         fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(Progress::OutputFilled { consumed: input.len() + 1 })
-        }
-
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
         }
     }
 
