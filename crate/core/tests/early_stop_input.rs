@@ -42,11 +42,20 @@ impl Codec for QuoteEnd {
     }
 }
 
+/// Build a fresh [`QuoteEnd`]. Even though it happens to hold no
+/// state, call sites that hand a codec to `stream_to_stream` — which
+/// takes it by value and consumes it — should still go through a
+/// constructor rather than writing the unit struct's name directly,
+/// the same as every other codec in this crate (e.g. `rot13()`).
+fn quote_end() -> QuoteEnd {
+    QuoteEnd
+}
+
 #[test]
 fn drives_three_segments_across_two_early_stops() {
     let input = b"let s = \"Hello, world!\";".to_vec();
     let mut pos = 0;
-    let mut codec = QuoteEnd;
+    let mut codec = quote_end();
     let mut output = [0u8; 64];
 
     // First call: copies everything up to (not including) the opening
@@ -135,7 +144,7 @@ fn tokenizes_a_string_array_literal() {
         // stream_to_stream instead of by hand.
         let mut source = SliceSource::new(&input[pos..]);
         let mut sink = VecSink::default();
-        let totals = stream_to_stream(&mut source, QuoteEnd, &mut sink).unwrap();
+        let totals = stream_to_stream(&mut source, quote_end(), &mut sink).unwrap();
         let string_token = String::from_utf8(sink.into_inner()).unwrap();
         tokens.push(("string", string_token));
         pos += totals.consumed;
@@ -275,7 +284,7 @@ fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
 
         // Same source, handed to stream_to_stream just for this span.
         let mut sink = VecSink::default();
-        stream_to_stream(&mut source, QuoteEnd, &mut sink).unwrap();
+        stream_to_stream(&mut source, quote_end(), &mut sink).unwrap();
         let string_token = String::from_utf8(sink.into_inner()).unwrap();
         tokens.push(("string", string_token));
 
