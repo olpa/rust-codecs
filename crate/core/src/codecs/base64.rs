@@ -555,7 +555,6 @@ mod tests {
                     collected.extend_from_slice(&out);
                     in_pos += consumed;
                 }
-                Progress::StreamEnd { .. } => unreachable!("base64 never self-terminates"),
             }
         }
         loop {

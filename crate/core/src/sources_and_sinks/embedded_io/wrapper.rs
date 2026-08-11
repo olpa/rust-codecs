@@ -1,4 +1,5 @@
-//! `embedded_io::Read`/`Write` wrappers over a [`Codec`](crate::Codec).
+//! `embedded_io::Read`/`Write` wrappers over a [`Codec`](crate::Codec)
+//! or [`TerminatingCodec`](crate::TerminatingCodec).
 //!
 //! The ownership is directional and zero-copy at the codec boundary:
 //! [`CodecReader`] owns input scratch and writes directly into
@@ -11,7 +12,7 @@ use embedded_io::{ErrorType, Read, Write};
 
 use crate::pump::{Pump, PumpEnd};
 use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
-use crate::{Codec, DriveError, Error, Sink};
+use crate::{Codec, DriveError, Error, Sink, TerminatingCodec};
 
 use super::adapter::{EmbeddedSource, EmbeddedSink};
 
@@ -69,12 +70,14 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 }
 
 /// Wraps an [`embedded_io::Read`], yielding bytes transformed by `C`.
-pub struct CodecReader<R, C: Codec, S> {
+///
+/// `C` may be an ordinary [`Codec`] or a [`TerminatingCodec`].
+pub struct CodecReader<R, C: TerminatingCodec, S> {
     input: EmbeddedSource<R, S>,
     pump: Pump<C>,
 }
 
-impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
         Self { input: EmbeddedSource::new(inner, inbuf), pump: Pump::new(codec) }
     }
@@ -93,11 +96,11 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     }
 }
 
-impl<R: Read, C: Codec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
+impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
     type Error = EmbeddedError<R::Error>;
 }
 
-impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
+impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         if buf.is_empty() || self.pump.is_done() {
             return Ok(0);
@@ -115,14 +118,11 @@ impl<R: Read, C: Codec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
 /// Wraps an [`embedded_io::Write`], transforming bytes before writing
 /// them to the wrapped endpoint.
 ///
-/// End-of-stream: if the codec ends its stream in-band before the
-/// caller stops writing, that `write` call returns a short count —
-/// only the bytes consumed up to the codec's `StreamEnd` — and every
-/// later `write` with a non-empty buffer returns
-/// `Err(EmbeddedError::WriteZero)` without touching the codec again.
-/// `flush`/`finish` stay safe to call afterward: both see the codec
-/// already done and become no-ops on it, only still touching the
-/// wrapped writer/sink.
+/// `C` is bound to [`Codec`], not [`TerminatingCodec`]: an in-band end
+/// would otherwise become a permanent `Err(EmbeddedError::WriteZero)`
+/// from `write`. The caller must explicitly call
+/// [`CodecWriter::finish`] to finalize the codec; `Write::flush` is a
+/// resumable synchronization point, not a substitute for it.
 pub struct CodecWriter<W, C: Codec, S> {
     output: EmbeddedSink<W, S>,
     pump: Pump<C>,
@@ -177,11 +177,11 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 
 #[cfg(all(test, feature = "identity"))]
 mod tests {
-    use embedded_io::{Error as _, ErrorKind, Read, Write};
+    use embedded_io::{Read, Write};
 
     use super::{CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
-    use crate::{Codec, Drain, DrainCodec, Error, Progress};
+    use crate::{Drain, DrainCodec, Error, TerminatingCodec, TerminatingProgress};
 
     const INPUT: &[u8] = b"embedded io";
 
@@ -213,32 +213,6 @@ mod tests {
         assert_eq!(&output[..written], INPUT);
     }
 
-    struct EndsImmediately;
-
-    impl DrainCodec for EndsImmediately {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            unreachable!()
-        }
-    }
-
-    impl Codec for EndsImmediately {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
-            Ok(Progress::StreamEnd {
-                consumed: 0,
-                written: 0,
-            })
-        }
-    }
-
-    #[test]
-    fn nonempty_write_never_returns_zero() {
-        let mut output = [0u8; 1];
-        let mut writer = CodecWriter::new(&mut output[..], EndsImmediately, [0u8; 1]);
-        let error = writer.write(b"x").unwrap_err();
-        assert!(matches!(error, EmbeddedError::WriteZero));
-        assert_eq!(error.kind(), ErrorKind::WriteZero);
-    }
-
     #[test]
     fn endpoint_errors_remain_distinguishable() {
         let mut output = [0u8; 1];
@@ -247,7 +221,10 @@ mod tests {
     }
 
     /// Copies bytes 1:1 but ends its stream after `limit` bytes, like
-    /// a self-describing format with an in-band terminator.
+    /// a self-describing format with an in-band terminator. A genuine
+    /// `TerminatingCodec` (not `Codec`), so only `CodecReader` can
+    /// drive it — `CodecWriter` is bound to `Codec` and rejects it at
+    /// compile time.
     struct EarlyEnd {
         limit: usize,
         done: usize,
@@ -259,38 +236,37 @@ mod tests {
         }
     }
 
-    impl Codec for EarlyEnd {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+    impl TerminatingCodec for EarlyEnd {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
             output[..n].copy_from_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
-                Ok(Progress::StreamEnd { consumed: n, written: n })
+                Ok(TerminatingProgress::End { consumed: n, written: n })
             } else if n == input.len() {
-                Ok(Progress::InputConsumed { written: n })
+                Ok(TerminatingProgress::InputConsumed { written: n })
             } else {
-                Ok(Progress::OutputFilled { consumed: n })
+                Ok(TerminatingProgress::OutputFilled { consumed: n })
             }
         }
     }
 
     #[test]
-    fn writer_stops_at_in_band_stream_end() {
-        // The codec ends after 3 bytes; the first write is short (only
-        // the bytes consumed before StreamEnd), and every later write
-        // of a non-empty buffer errors with WriteZero without
-        // touching the codec again. finish() afterward is still safe
-        // and idempotent.
-        let mut output = [0u8; 8];
-        let remaining = {
-            let mut writer = CodecWriter::new(&mut output[..], EarlyEnd { limit: 3, done: 0 }, [0u8; 8]);
-            assert_eq!(writer.write(b"Hello World").unwrap(), 3);
-            let error = writer.write(b"more").unwrap_err();
-            assert!(matches!(error, EmbeddedError::WriteZero));
-            writer.finish().unwrap().len()
-        };
-        let written = output.len() - remaining;
-        assert_eq!(&output[..written], b"Hel");
+    fn reader_stops_at_in_band_end() {
+        // The codec ends after 3 bytes; the reader must yield exactly
+        // those and then report EOF (0) on every later call, without
+        // touching the codec again.
+        let mut reader = CodecReader::new(b"Hello World".as_slice(), EarlyEnd { limit: 3, done: 0 }, [0u8; 8]);
+        let mut out = [0u8; 8];
+        let mut pos = 0;
+        loop {
+            let n = reader.read(&mut out[pos..]).unwrap();
+            if n == 0 {
+                break;
+            }
+            pos += n;
+        }
+        assert_eq!(&out[..pos], b"Hel");
     }
 }

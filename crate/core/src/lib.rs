@@ -142,7 +142,9 @@
 extern crate alloc;
 
 mod vocabulary;
-pub use vocabulary::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
+pub use vocabulary::{
+    Codec, Drain, DrainCodec, Error, ErrorKind, Progress, TerminatingCodec, TerminatingProgress,
+};
 
 mod carry;
 pub use carry::Carry;

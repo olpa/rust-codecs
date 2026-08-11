@@ -4,9 +4,15 @@
 //! at the `Codec` level (`Chain` is itself a `Codec`), so every driver in
 //! `io` (or a client's own) gets chaining for free without knowing
 //! anything about it.
+//!
+//! Both members are bound to [`Codec`], not [`TerminatingCodec`](crate::TerminatingCodec):
+//! neither can ever report an in-band end, so `Chain` doesn't need a
+//! policy for propagating one, finalizing `second` early, or discarding
+//! bytes an ended `second` never got to. A future terminating
+//! composition would need its own, separate design.
 
-use crate::pump::{step, ProgressEnd};
-use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
+use crate::pump::step;
+use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
 /// `staging`) into a single [`Codec`].
@@ -21,50 +27,11 @@ use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 /// The interesting behavior of a chain lives in its corners. All of
 /// them are tested; this list is the contract.
 ///
-/// **`first` ends its stream early.** Some formats can say "I am
-/// finished" in the middle of the input. When `first` does this, no
-/// more data can ever reach `second` — so `process` itself finishes
-/// `second` (its final bytes, e.g. base64 padding, come out right
-/// there) and then reports `StreamEnd` for the whole chain. The
-/// composed codec is self-terminating exactly when `first` is. The
-/// unread rest of the input stays unconsumed, and the `StreamEnd`
-/// counts say so — those bytes belong to whatever comes after the
-/// stream, not to this codec. If the output buffer fills while
-/// `second` is being finished, the call reports `OutputFilled` and the
-/// next `process` call continues from that point.
-///
-/// **`second` ends its stream early.** The chain ends too — but only
-/// cleanly if `second` consumed everything it was actually handed.
-/// Bytes still inside `first` (never even staged) are fine to drop:
-/// that's the same policy as unread input, bytes past the end of a
-/// stream are not the stream's to deliver. But bytes that *were*
-/// staged and offered to `second`, which it then left unconsumed
-/// before ending, would be silently lost rather than merely unread —
-/// that's [`ErrorKind::UnexpectedEnd`](crate::ErrorKind::UnexpectedEnd),
-/// not a `StreamEnd`, and it stays reported on every later call too.
-/// Note one honest wrinkle in the clean case: the reported `consumed`
-/// counts what `first` took from your input, even if some of the
-/// resulting bytes died on the way to the output.
-///
-/// **`second` ends during `finish` or `flush`.** Both simply report
-/// `Done`: nothing more can ever come out, so the operation is
-/// complete by definition — again, only if `second` consumed
-/// everything staged; otherwise it's `UnexpectedEnd` there too.
-///
-/// **Calling again after the end.** Once the chain has ended — `second`
-/// itself ended, or `first` ended and `second.finish` then reached
-/// `Done` — that's latched: every later `process`/`finish`/`flush`
-/// call reports the end with zero counts, without touching `first` or
-/// `second` again at all.
-///
 /// **Interrupted `flush`.** A flush that returns `OutputFilled` is
-/// resumed by calling `flush` again with fresh output room. If
-/// `first` hasn't ended, it's asked to flush again on resume — the
-/// `Codec` contract requires that to be a no-op once `first` already
-/// reached `Done` for this sync point, so no second sync marker comes
-/// out. (If `first` *has* already ended — via an earlier `process` or
-/// `finish` — there's nothing left to flush from it, so it's skipped
-/// entirely rather than relying on that no-op.) If you call `process`
+/// resumed by calling `flush` again with fresh output room — `first` is
+/// asked to flush again on resume, and the `Codec` contract requires
+/// that to be a no-op once `first` already reached `Done` for this sync
+/// point, so no second sync marker comes out. If you call `process`
 /// between the two flush calls, `first` sees new input and is expected
 /// to treat the next `flush` as a fresh one: new input opens a new
 /// sync boundary.
@@ -100,9 +67,8 @@ use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 /// `stream_to_stream(input, Chain::new(a, b, staging), output)` and
 /// `io::copy` over an `a`-wrapped reader into a `b`-wrapped writer
 /// have the same effect only for well-behaved, whole-stream codecs.
-/// The large complexity difference comes from `Chain` promising
-/// substantially stronger semantics than that `Read`/`Write`
-/// composition.
+/// The complexity difference comes from `Chain` promising substantially
+/// stronger semantics than that `Read`/`Write` composition.
 ///
 /// With `CodecReader(a)` → `io::copy` → `CodecWriter(b)`:
 ///
@@ -111,15 +77,12 @@ use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 /// - Explicitly finishing the writer finalizes `b` — and *only*
 ///   explicitly: nothing about `Read`/`Write` tells `io::copy` when
 ///   the input is exhausted for good, so this step doesn't happen on
-///   its own. Forget it, even for a plain, well-behaved whole stream
-///   with no early termination in sight, and a stateful codec's
-///   trailer/checksum/padding never gets written — the output is
-///   silently truncated. `Write::flush()` doesn't cover for this
-///   either, since it's a resumable sync point, not a permanent end.
+///   its own. Forget it, even for a plain, well-behaved whole stream,
+///   and a stateful codec's trailer/checksum/padding never gets
+///   written — the output is silently truncated. `Write::flush()`
+///   doesn't cover for this either, since it's a resumable sync point,
+///   not a permanent end.
 /// - Each wrapper only drives one codec, in one direction.
-/// - Early termination is poorly composable on top of that: `CodecReader`
-///   may already have read and lost trailing source bytes, while an
-///   early-ending writer eventually causes a zero-length write/`WriteZero`.
 ///
 /// `Chain`, however, must behave as one correct `Codec` during every
 /// individual call. That means it must:
@@ -128,10 +91,6 @@ use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 /// - Retain and compact intermediate output.
 /// - Translate two codecs' progress into one `Progress`.
 /// - Propagate exact chain-level consumed/written counts.
-/// - Handle either codec ending early.
-/// - Finalize `second` immediately when `first` ends in-band.
-/// - Distinguish unread caller input from bytes already staged and
-///   rejected by `second`.
 /// - Support interrupted and repeated `process`, `flush`, and `finish`
 ///   calls.
 /// - Preserve the `Codec` lifecycle contract even when nested in
@@ -141,10 +100,10 @@ use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 /// `Read` → `copy` → `Write` composes complete stream drivers; `Chain`
 /// composes resumable state machines while exposing a single
 /// state-machine interface. Those are equivalent at the "transform
-/// this ordinary finite stream" level, but not operationally, and not
-/// at early-stream/lifecycle boundaries. The wrappers delegate most
-/// orchestration to `std::io`; `Chain` has to implement that
-/// orchestration itself and make it resumable inside one `Codec`.
+/// this ordinary finite stream" level, but not operationally. The
+/// wrappers delegate most orchestration to `std::io`; `Chain` has to
+/// implement that orchestration itself and make it resumable inside
+/// one `Codec`.
 pub struct Chain<A, B, S> {
     first: A,
     second: B,
@@ -154,39 +113,6 @@ pub struct Chain<A, B, S> {
     /// from offset 0, so a partial drain is compacted to the front
     /// (and `stage_pos` shrunk to match) before `first` appends more.
     stage_pos: usize,
-    end: EndState,
-}
-
-/// Which side of the chain has permanently ended, so `process`/
-/// `finish`/`flush` know when a side no longer needs to be called.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EndState {
-    /// Neither side has ended; `first` and `second` are both called
-    /// normally.
-    Normal,
-    /// `first` has permanently ended, reported via `Progress::StreamEnd`
-    /// from `process` — never set from `finish` reaching `Drain::Done`,
-    /// since that only guarantees `finish` itself is idempotent
-    /// (contract point 3), not that every later call of any method is
-    /// pinned to reporting the end (that's point 4, and only
-    /// `StreamEnd` carries it). Once set, `first` is never called
-    /// again. `staging` may still hold bytes it already produced,
-    /// waiting to drain through `second`.
-    FirstEnded,
-    /// `second` has permanently ended — via `Progress::StreamEnd` from
-    /// `second.process`, or by `process` itself finishing `second`
-    /// after `first` ended and, in doing so, reporting the chain's own
-    /// `Progress::StreamEnd` (point 4 then applies to the chain as a
-    /// `Codec` in its own right, same as `FirstEnded`). Never set from
-    /// `finish`'s or `flush`'s own final call to `second.finish`/
-    /// `second.flush` reaching `Done`: that's governed by point 3
-    /// only, not point 4 — it doesn't pin every later call the way a
-    /// real `StreamEnd` does. So the whole chain is over: neither side
-    /// is called again, every method just reports the end. There's no
-    /// separate `BothEnded` arm: once `second` has ended, the chain's
-    /// behavior no longer depends on whether `first` also ended, so
-    /// tracking that distinction would be dead state.
-    SecondEnded,
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
@@ -204,7 +130,6 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             second,
             staging,
             stage_pos: 0,
-            end: EndState::Normal,
         }
     }
 
@@ -219,19 +144,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         first_step: fn(&mut A, &mut [u8]) -> Result<Drain, Error>,
         second_step: fn(&mut B, &mut [u8]) -> Result<Drain, Error>,
     ) -> Result<Drain, Error> {
-        if self.end == EndState::SecondEnded {
-            if self.stage_pos != 0 {
-                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
-            }
-            return Ok(Drain::Done { written: 0 });
-        }
-
         let mut out_pos = 0;
-        // A `Done` from `first_step` only makes *this* call idempotent
-        // from here on (contract point 3) — it doesn't pin `first`
-        // forever the way `Progress::StreamEnd` does (point 4) — so
-        // this stays a call-local flag, never written to `self.end`.
-        let mut nothing_more_from_first = self.end == EndState::FirstEnded;
+        let mut nothing_more_from_first = false;
 
         loop {
             if !nothing_more_from_first {
@@ -261,22 +175,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     staging.copy_within(moved.consumed..self.stage_pos, 0);
                 }
                 self.stage_pos = leftover;
-                if moved.end == ProgressEnd::StreamEnd {
-                    // A genuine `StreamEnd` from `second.process` —
-                    // point 4 pins the chain's end forever.
-                    self.end = EndState::SecondEnded;
-                    if leftover > 0 {
-                        return Err(Error::new(ErrorKind::UnexpectedEnd, 0, out_pos));
-                    }
-                    return Ok(Drain::Done { written: out_pos });
-                }
             }
 
             if nothing_more_from_first && self.stage_pos == 0 {
                 // `first` is fully drained through `second`; run
-                // `second`'s own step. Its `Done` here is point 3 only,
-                // not a `StreamEnd`, so `self.end` stays untouched — a
-                // later `process` call may still feed `first` normally.
+                // `second`'s own step.
                 return match second_step(&mut self.second, &mut output[out_pos..])
                     .and_then(|d| d.validated(output.len() - out_pos))
                     .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
@@ -306,41 +209,25 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-        // The chain is already over: report it without touching
-        // either side again. A non-empty `staging` here means `second`
-        // ended while bytes it had already been offered were still
-        // unconsumed — see the `UnexpectedEnd` branch below — and that
-        // stays reported on every later call too.
-        if self.end == EndState::SecondEnded {
-            if self.stage_pos != 0 {
-                return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
-            }
-            return Ok(Progress::StreamEnd { consumed: 0, written: 0 });
-        }
-
         let mut in_pos = 0;
         let mut out_pos = 0;
 
         // Each turn is one pass — `first` appends to staging, then
         // staging drains into `output` — followed by a check of the
-        // `Codec` contract's three outcomes: input fully consumed,
-        // output fully filled, or the stream ended. Only when none of
-        // those hold (staging came up empty but both `input` and
-        // `output` still have room) does another pass run.
+        // `Codec` contract's two outcomes: input fully consumed, or
+        // output fully filled. Only when neither holds (staging came
+        // up empty but both `input` and `output` still have room)
+        // does another pass run.
         loop {
-            // `first` is only called while it's still `Normal`, and
-            // only while there's input to offer it — once `input` is
-            // exhausted, calling it again would just feed it an empty
-            // slice.
-            if self.end == EndState::Normal && in_pos < input.len() {
+            // `first` is only called while there's input to offer it —
+            // once `input` is exhausted, calling it again would just
+            // feed it an empty slice.
+            if in_pos < input.len() {
                 let staging = self.staging.as_mut();
                 let moved = step(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
                 in_pos += moved.consumed;
                 self.stage_pos += moved.written;
-                if moved.end == ProgressEnd::StreamEnd {
-                    self.end = EndState::FirstEnded;
-                }
             }
 
             // `second` always reads staging from offset 0. A partial
@@ -359,44 +246,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     staging.copy_within(moved.consumed..self.stage_pos, 0);
                 }
                 self.stage_pos = leftover;
-                if moved.end == ProgressEnd::StreamEnd {
-                    self.end = EndState::SecondEnded;
-                    // `second` ending is only clean if it consumed
-                    // everything it was offered. Bytes it left
-                    // unconsumed would otherwise be silently lost —
-                    // that's an error, not the normal "unread input
-                    // past the end" case (which is about *your* input,
-                    // not already-staged bytes `second` was actually
-                    // handed).
-                    if leftover > 0 {
-                        return Err(Error::new(ErrorKind::UnexpectedEnd, in_pos, out_pos));
-                    }
-                    return Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos });
-                }
             }
 
-            // Case: `first`'s stream ended in-band and everything it
-            // had already staged has passed through `second` — no more
-            // input will ever reach `second`, exactly what `finish`
-            // expresses. Drive it here so the composed codec is
-            // self-terminating exactly when `first` is: `second` being
-            // done reports `StreamEnd`, which leaves the rest of
-            // `input` unconsumed and reported — it's simply not this
-            // stream's to read.
-            if self.end == EndState::FirstEnded && self.stage_pos == 0 {
-                return match self
-                    .second
-                    .finish(&mut output[out_pos..])
-                    .and_then(|d| d.validated(output.len() - out_pos))
-                    .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => Ok(Progress::OutputFilled { consumed: in_pos }),
-                    Drain::Done { written } => {
-                        self.end = EndState::SecondEnded;
-                        Ok(Progress::StreamEnd { consumed: in_pos, written: out_pos + written })
-                    }
-                };
-            }
             // Case: input fully consumed, and nothing is left waiting
             // in staging for `second`.
             if in_pos == input.len() && self.stage_pos == 0 {
@@ -441,38 +292,6 @@ mod tests {
                 _ => unreachable!("infallible Vec adapter"),
             })?;
         Ok(output.into_inner())
-    }
-
-    /// A test-only codec that copies bytes 1:1, like `Identity`, but
-    /// self-terminates: once `limit` bytes have been written, `process`
-    /// reports `StreamEnd` even with more input still in the caller's
-    /// slice. Models a self-describing format that ends before the
-    /// input stream does.
-    struct EarlyEnd {
-        limit: usize,
-        done: usize,
-    }
-
-    impl DrainCodec for EarlyEnd {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-    }
-
-    impl Codec for EarlyEnd {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-            let remaining = self.limit - self.done;
-            let n = input.len().min(output.len()).min(remaining);
-            output[..n].copy_from_slice(&input[..n]);
-            self.done += n;
-            if self.done >= self.limit {
-                Ok(Progress::StreamEnd { consumed: n, written: n })
-            } else if n == input.len() {
-                Ok(Progress::InputConsumed { written: n })
-            } else {
-                Ok(Progress::OutputFilled { consumed: n })
-            }
-        }
     }
 
     #[test]
@@ -552,7 +371,6 @@ mod tests {
                     collected.extend_from_slice(&out);
                     in_pos += consumed;
                 }
-                Progress::StreamEnd { .. } => unreachable!("base64∘rot13 never self-terminates"),
             }
         }
         loop {
@@ -577,42 +395,6 @@ mod tests {
         let expected = collect(rot13(), &collect(base64_enc(), INPUT).unwrap()).unwrap();
         let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
         assert_eq!(collect(chain, INPUT).unwrap(), expected);
-    }
-
-    #[test]
-    fn first_ends_early_mid_stream() {
-        // `first` self-terminates after 3 bytes; `Chain` must latch
-        // that, stop feeding `first` the rest of the input, and still
-        // finish cleanly through `second` (here, identity).
-        let chain = Chain::new(EarlyEnd { limit: 3, done: 0 }, identity(), vec![0u8; 64]);
-        assert_eq!(collect(chain, b"Hello World").unwrap(), b"Hel");
-    }
-
-    #[test]
-    fn first_ending_ends_the_chain_and_leaves_input_unconsumed() {
-        // The composed codec is self-terminating exactly when `first`
-        // is: `first`'s in-band end surfaces as the chain's own
-        // `StreamEnd`, with the unread tail of the input reported as
-        // unconsumed rather than silently swallowed.
-        let mut chain = Chain::new(EarlyEnd { limit: 3, done: 0 }, identity(), vec![0u8; 64]);
-        let mut out = [0u8; 64];
-        let outcome = chain.process(b"Hello World", &mut out).unwrap();
-        assert_eq!(outcome, Progress::StreamEnd { consumed: 3, written: 3 });
-        assert_eq!(&out[..3], b"Hel");
-    }
-
-    #[test]
-    fn first_ending_finishes_second_inside_process() {
-        // `first`'s end means no input will ever reach `second` again,
-        // so `process` itself drives `second.finish`: base64_enc holds
-        // one leftover byte internally, and its padded trailer group
-        // must arrive without the caller ever calling finish().
-        let expected = collect(base64_enc(), b"Hell").unwrap();
-        let mut chain = Chain::new(EarlyEnd { limit: 4, done: 0 }, base64_enc(), vec![0u8; 64]);
-        let mut out = [0u8; 64];
-        let outcome = chain.process(b"Hello World", &mut out).unwrap();
-        assert_eq!(outcome, Progress::StreamEnd { consumed: 4, written: expected.len() });
-        assert_eq!(&out[..expected.len()], expected.as_slice());
     }
 
     #[test]
@@ -761,24 +543,5 @@ mod tests {
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
         let result = collect(chain, INPUT);
         assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ContractViolation);
-    }
-
-    #[test]
-    fn second_ending_with_unconsumed_staged_bytes_is_unexpected_end() {
-        // `identity` stages all of `INPUT` (11 bytes) in one pass;
-        // `EarlyEnd { limit: 3 }` is then offered all 11 but only
-        // consumes 3 before ending — the other 8 would be silently
-        // lost, which is `UnexpectedEnd`, not a clean `StreamEnd`.
-        let mut chain = Chain::new(identity(), EarlyEnd { limit: 3, done: 0 }, vec![0u8; 64]);
-        let mut out = [0u8; 64];
-        let error = chain.process(INPUT, &mut out).unwrap_err();
-        assert_eq!(error.kind, crate::ErrorKind::UnexpectedEnd);
-
-        // The error is latched: a later call reports the same thing
-        // without touching `first` or `second` again.
-        let error = chain.process(INPUT, &mut out).unwrap_err();
-        assert_eq!(error.kind, crate::ErrorKind::UnexpectedEnd);
-        assert_eq!(error.consumed, 0);
-        assert_eq!(error.written, 0);
     }
 }

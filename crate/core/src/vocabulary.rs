@@ -1,6 +1,6 @@
-//! The [`Codec`] trait and the vocabulary its methods speak in:
-//! [`Progress`], [`Drain`], [`Error`]. See `CREATING-CODECS.md` for how
-//! to write a codec.
+//! The [`Codec`]/[`TerminatingCodec`] traits and the vocabulary their
+//! methods speak in: [`Progress`], [`TerminatingProgress`], [`Drain`],
+//! [`Error`]. See `CREATING-CODECS.md` for how to write a codec.
 
 /// Progress of one [`Codec::process`] call. Every variant states an
 /// invariant a driver can rely on without inspecting byte counts —
@@ -16,13 +16,37 @@ pub enum Progress {
     /// filled the buffer by itself). The driver's move: drain the
     /// output and call again.
     OutputFilled { consumed: usize },
+}
+
+/// Progress of one [`TerminatingCodec::process`] call: everything
+/// [`Progress`] can report, plus an in-band end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminatingProgress {
+    /// All of `input` was consumed; `written` bytes were produced
+    /// (possibly zero, when everything went into internal buffering).
+    /// The driver's move: supply more input, or `finish`.
+    InputConsumed { written: usize },
+    /// All of `output` was filled; `consumed` bytes of input were
+    /// taken (possibly zero, when output pending from an earlier call
+    /// filled the buffer by itself). The driver's move: drain the
+    /// output and call again.
+    OutputFilled { consumed: usize },
     /// The stream ended in-band (self-terminating format): nothing
     /// more will ever be produced, and input past the stream's end was
     /// left unconsumed. Neither side is necessarily "full".
-    StreamEnd { consumed: usize, written: usize },
+    End { consumed: usize, written: usize },
 }
 
-/// Progress of one [`Codec::finish`] or [`Codec::flush`] call.
+impl From<Progress> for TerminatingProgress {
+    fn from(progress: Progress) -> Self {
+        match progress {
+            Progress::InputConsumed { written } => Self::InputConsumed { written },
+            Progress::OutputFilled { consumed } => Self::OutputFilled { consumed },
+        }
+    }
+}
+
+/// Progress of one [`DrainCodec::finish`] or [`DrainCodec::flush`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drain {
     /// All of `output` was filled and there is more to come — call
@@ -97,7 +121,23 @@ impl Progress {
         let honest = match self {
             Progress::InputConsumed { written } => written <= output_len,
             Progress::OutputFilled { consumed } => consumed <= input_len,
-            Progress::StreamEnd { consumed, written } => {
+        };
+        if honest {
+            Ok(self)
+        } else {
+            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+        }
+    }
+}
+
+impl TerminatingProgress {
+    /// The [`Progress::validated`] counterpart for
+    /// [`TerminatingCodec::process`].
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<TerminatingProgress, Error> {
+        let honest = match self {
+            TerminatingProgress::InputConsumed { written } => written <= output_len,
+            TerminatingProgress::OutputFilled { consumed } => consumed <= input_len,
+            TerminatingProgress::End { consumed, written } => {
                 consumed <= input_len && written <= output_len
             }
         };
@@ -121,21 +161,45 @@ impl Drain {
     }
 }
 
-/// A stateful byte-rewrite transform.
+/// Lifecycle operations shared by [`Codec`] and [`TerminatingCodec`]:
+/// signalling end-of-input and reaching a sync point.
+pub trait DrainCodec {
+    /// Signal "no more input is coming": flush any buffered state and,
+    /// for formats with one, write the trailer/checksum. Call
+    /// repeatedly (draining `output` between calls) until it reports
+    /// [`Drain::Done`]. Idempotent once `Done`: see [`Codec`] contract
+    /// point 3. For a [`TerminatingCodec`], pinned to reporting `Done`
+    /// forever once `process` has reported
+    /// [`TerminatingProgress::End`]. Must always resolve to
+    /// `OutputFilled`, `Done`, or `Err`: see [`Codec`] contract point 7.
+    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error>;
+
+    /// Drain any bytes this codec is withholding to a sync boundary,
+    /// *without* ending the stream — unlike `finish`, the stream
+    /// continues afterward. Only meaningful for codecs that buffer
+    /// output for a format-defined in-band sync marker
+    /// (deflate/zlib/gzip do); the default owes nothing. Idempotent
+    /// once `Done`: see [`Codec`] contract point 3. Must always resolve
+    /// to `OutputFilled`, `Done`, or `Err`: see [`Codec`] contract
+    /// point 7. Calling this after `finish`: see [`Codec`] contract
+    /// point 6.
+    fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
+    }
+}
+
+/// A stateful, whole-stream byte-rewrite transform: a call never
+/// declares the stream finished. End of input is supplied out of band
+/// by calling `finish`.
 ///
 /// # The contract
 ///
 /// 1)
 /// - a call fully consumes its input,
-/// - or it fully fills its output,
-/// - or it ends the stream.
+/// - or it fully fills its output.
 ///
-/// [`Progress::StreamEnd`] is a special case: it means the format
-/// itself demands a stop, even though the input isn't fully consumed
-/// (a self-terminating format saying "I am finished" mid-stream). It
-/// is not a normal-completion report — a codec that simply ran out of
-/// input to consume reports that via `InputConsumed`, never
-/// `StreamEnd`.
+/// A codec that simply ran out of input to consume reports that via
+/// `InputConsumed`.
 ///
 /// 2)
 /// Each call addresses `input` and `output` from byte 0 of the slices
@@ -165,42 +229,23 @@ impl Drain {
 /// no-op.
 ///
 /// 4)
-/// Once `process` reaches [`Progress::StreamEnd`], the stream has
-/// ended for good: every later call, of any of the three methods,
-/// must keep reporting that, forever, for the rest of the codec's
-/// lifetime — `process` answers `StreamEnd { consumed: 0, written: 0
-/// }` again on any `input`, `finish`/`flush` answer `Drain::Done {
-/// written: 0 }`. None of them re-run whatever ended the stream. A
-/// caller (or a combinator built on top of `Codec`, like `Chain`) is
-/// free to call any of the three again after `StreamEnd` and must see
-/// a no-op every time, not a second ending. This is the one case where
-/// `finish` and `flush` stop being independent (point 3): past
-/// `StreamEnd`, both are pinned to `Done { written: 0 }` together, not
-/// just idempotent against repeats of themselves.
-///
-/// 5)
 /// A call that returns `Err` does not leave the codec in a defined
 /// failure state. A later call is not required to keep failing — it
-/// may make ordinary progress, as if the error had never happened.
-/// (Point 4 is the one documented exception: past `StreamEnd`, every
-/// later call is pinned to reporting the end, never an `Err`.) A
+/// may make ordinary progress, as if the error had never happened. A
 /// caller that wants "this codec is dead after an error" semantics
 /// has to enforce that itself; the contract doesn't give it that for
 /// free.
 ///
-/// 6)
+/// 5)
 /// Calling `process` or `flush` after `finish` is not defined by this
-/// contract, *unless* the codec has already reported `StreamEnd` at
-/// some point — that case is point 4's, not this one, and point 4
-/// wins: the answer is pinned to reporting the end. Absent any
-/// `StreamEnd`, a codec with no real trailer/terminal state is free to
+/// contract. A codec with no real trailer/terminal state is free to
 /// just keep processing as if `finish` had never been called; one
 /// with a hard terminal state (already wrote a final checksum,
 /// already closed out the format) should report an `Err` instead of
 /// doing something silently wrong. Either is a valid `Codec` impl; a
 /// caller can't rely on which one it's talking to.
 ///
-/// 7)
+/// 6)
 /// `finish` and `flush` must always resolve one of three ways, the
 /// `Drain` counterpart of point 1: [`Drain::OutputFilled`],
 /// [`Drain::Done`], or `Err`. `Drain::OutputFilled` carries no count —
@@ -248,38 +293,92 @@ impl Drain {
 ///
 /// See `CREATING-CODECS.md` for how to write one.
 ///
-pub trait DrainCodec {
-    /// Signal "no more input is coming": flush any buffered state and,
-    /// for formats with one, write the trailer/checksum. Call
-    /// repeatedly (draining `output` between calls) until it reports
-    /// [`Drain::Done`]. Idempotent once `Done`: see contract point 3.
-    /// Pinned to reporting `Done` forever once `StreamEnd` has been
-    /// reported via `process`: see contract point 4. Must always
-    /// resolve to `OutputFilled`, `Done`, or `Err`: see contract
-    /// point 7.
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error>;
-
-    /// Drain any bytes this codec is withholding to a sync boundary,
-    /// *without* ending the stream — unlike `finish`, the stream
-    /// continues afterward. Only meaningful for codecs that buffer
-    /// output for a format-defined in-band sync marker
-    /// (deflate/zlib/gzip do); the default owes nothing. Idempotent
-    /// once `Done`: see contract point 3. Pinned to reporting `Done`
-    /// forever once `StreamEnd` has been reported via `process`: see
-    /// contract point 4. Must always resolve to `OutputFilled`,
-    /// `Done`, or `Err`: see contract point 7. Calling this after
-    /// `finish`: see contract
-    /// point 6.
-    fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
-    }
+pub trait Codec: DrainCodec {
+    /// Push input bytes and pull output bytes.
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
 }
 
-pub trait Codec: DrainCodec {
-    /// Push input bytes and pull output bytes. Pinned to reporting
-    /// `StreamEnd` forever once it's reached: see contract point 4.
-    /// Calling this after `finish`: see contract point 6.
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
+/// A stateful byte-rewrite transform that may additionally recognize
+/// its logical stream ending inside an input slice — a self-terminating
+/// format saying "I am finished" mid-stream, not a failure or premature
+/// cancellation.
+///
+/// Accepted by input-side drivers ([`CodecReader`](crate::sources_and_sinks::std_io::CodecReader),
+/// [`stream_to_stream`](crate::stream_to_stream)), which can expose
+/// transformed bytes only up to the reported end and leave the rest of
+/// the source available to whatever comes next. Not accepted by
+/// [`CodecWriter`](crate::sources_and_sinks::std_io::CodecWriter):
+/// `Write` cannot represent a successful permanent short write.
+///
+/// Every [`Codec`] is automatically a `TerminatingCodec` that never
+/// returns `End` — see the blanket implementation below. The
+/// conversion is one-way: a `TerminatingCodec` cannot be used where
+/// `Codec` is required, because it cannot promise to consume the whole
+/// logical input stream. One concrete type also cannot independently
+/// implement both traits with different behavior — a format offering
+/// ordinary and terminating modes should expose distinct types.
+///
+/// # The contract
+///
+/// Same as [`Codec`]'s points 1–6 (`process` may additionally resolve
+/// to [`TerminatingProgress::End`], in which case: `consumed` input
+/// bytes belong to the ended stream, `written` output bytes were
+/// produced by this call, `input[consumed..]` was not consumed and
+/// belongs to whatever follows the terminated stream, and the codec
+/// will never produce more output. A codec may consume or leave
+/// unconsumed the delimiter that establishes the boundary; that
+/// behavior is format-specific and must be documented by the codec.
+///
+/// Once `process` reaches `End`, the stream has ended for good: every
+/// later call, of any of the three methods, must keep reporting that,
+/// forever, for the rest of the codec's lifetime — `process` answers
+/// `End { consumed: 0, written: 0 }` again on any `input`,
+/// `finish`/`flush` answer `Drain::Done { written: 0 }`. None of them
+/// re-run whatever ended the stream. A caller (or a combinator built on
+/// top of `TerminatingCodec`) is free to call any of the three again
+/// after `End` and must see a no-op every time, not a second ending.
+/// This is the one case where `finish` and `flush` stop being
+/// independent of each other: past `End`, both are pinned to `Done {
+/// written: 0 }` together, not just idempotent against repeats of
+/// themselves.
+///
+/// A codec intended to yield several tokens or boundaries from one
+/// instance is not a `TerminatingCodec` in the usual driver sense —
+/// drivers like [`Pump`](crate::pump::Pump) latch permanently after the
+/// first `End`. Driving `process` directly, call by call, still allows
+/// reusing one instance across multiple logical streams (see
+/// `core/tests/early_stop_input.rs`); a driver that shouldn't latch has
+/// to be written with that in mind.
+///
+/// This crate does not impose one universal meaning on EOF before a
+/// terminating codec reports `End`. If the in-band terminator is
+/// required, `finish` should return an `UnexpectedEnd` error when EOF
+/// arrives first; if both an in-band terminator and source EOF are
+/// valid endings, `finish` may drain buffered output and return `Done`.
+/// Each `TerminatingCodec` should document which rule it uses.
+///
+/// # Naming the operation
+///
+/// Both `Codec` and `TerminatingCodec` deliberately name their method
+/// `process`. Because of the blanket implementation, a direct method
+/// call on an ordinary concrete codec can be ambiguous when both traits
+/// are in scope. Use Rust's fully qualified syntax in that case:
+///
+/// ```ignore
+/// Codec::process(&mut codec, input, output);
+/// TerminatingCodec::process(&mut codec, input, output);
+/// ```
+pub trait TerminatingCodec: DrainCodec {
+    /// Push input bytes and pull output bytes, possibly recognizing the
+    /// stream's in-band end. Pinned to reporting `End` forever once
+    /// it's reached. Calling this after `finish` is unsupported.
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error>;
+}
+
+impl<C: Codec> TerminatingCodec for C {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error> {
+        Codec::process(self, input, output).map(Into::into)
+    }
 }
 
 // Mirrors std's `impl<R: Read + ?Sized> Read for Box<R>`: lets a `Box<dyn
@@ -308,7 +407,7 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drain, Error, ErrorKind, Progress};
+    use super::{Drain, Error, ErrorKind, Progress, TerminatingProgress};
 
     const CV: Error = Error {
         kind: ErrorKind::ContractViolation,
@@ -324,7 +423,7 @@ mod tests {
         assert!(Progress::OutputFilled { consumed: 10 }
             .validated(10, 4)
             .is_ok());
-        assert!(Progress::StreamEnd {
+        assert!(TerminatingProgress::End {
             consumed: 0,
             written: 0
         }
@@ -345,7 +444,7 @@ mod tests {
             Err(CV)
         );
         assert_eq!(
-            Progress::StreamEnd {
+            TerminatingProgress::End {
                 consumed: 11,
                 written: 0
             }
@@ -353,7 +452,7 @@ mod tests {
             Err(CV)
         );
         assert_eq!(
-            Progress::StreamEnd {
+            TerminatingProgress::End {
                 consumed: 0,
                 written: 5
             }

@@ -9,7 +9,7 @@ mod adapter;
 pub use adapter::{VecSource, VecSink};
 
 #[cfg(feature = "alloc")]
-use crate::{stream_to_stream, Codec, DriveError};
+use crate::{stream_to_stream, DriveError, TerminatingCodec};
 
 /// Error from [`encode_str`]/[`encode_string`]: the codec failed, the
 /// pump stalled without ending the stream, or (for [`encode_string`])
@@ -55,7 +55,7 @@ impl From<alloc::string::FromUtf8Error> for EncodeError {
 /// [`stream_to_stream`].
 #[cfg(feature = "alloc")]
 pub fn encode_str(
-    codec: impl Codec,
+    codec: impl TerminatingCodec,
     input: impl AsRef<str>,
 ) -> Result<alloc::vec::Vec<u8>, EncodeError> {
     let input = input.as_ref().as_bytes();
@@ -71,7 +71,7 @@ pub fn encode_str(
 /// Built on [`encode_str`], for codecs whose output is text.
 #[cfg(feature = "alloc")]
 pub fn encode_string(
-    codec: impl Codec,
+    codec: impl TerminatingCodec,
     input: impl AsRef<str>,
 ) -> Result<alloc::string::String, EncodeError> {
     Ok(alloc::string::String::from_utf8(encode_str(codec, input)?)?)
