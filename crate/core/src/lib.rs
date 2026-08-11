@@ -152,6 +152,8 @@ pub use vocabulary::{
 mod carry;
 pub use carry::Carry;
 
+mod drive;
+
 mod pump;
 pub use pump::{stream_to_stream, DriveError, Sink, Source, Totals};
 

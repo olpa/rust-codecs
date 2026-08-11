@@ -11,7 +11,7 @@
 //! bytes an ended `second` never got to. A future terminating
 //! composition would need its own, separate design.
 
-use crate::pump::step;
+use crate::drive::{codec_step, DrainOp, DrainStop};
 use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
@@ -149,7 +149,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             return Ok(());
         }
         let staging = self.staging.as_mut();
-        let moved = step(&mut self.second, &staging[..self.stage_pos], &mut output[*out_pos..])
+        let moved = codec_step(&mut self.second, &staging[..self.stage_pos], &mut output[*out_pos..])
             .map_err(|e| Error { consumed: consumed_on_error, written: *out_pos, ..e })?;
         *out_pos += moved.written;
         let leftover = self.stage_pos - moved.consumed;
@@ -163,32 +163,21 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 
     /// Shared engine behind `finish` and `flush`: both drive `first`
     /// through staging into `second`, one pass at a time (same pass
-    /// structure as `process`), and differ only in which step they
-    /// call on each side — `A::finish`/`B::finish` or `A::flush`/
-    /// `B::flush`, passed in by the caller.
-    fn drain_through(
-        &mut self,
-        output: &mut [u8],
-        first_step: fn(&mut A, &mut [u8]) -> Result<Drain, Error>,
-        second_step: fn(&mut B, &mut [u8]) -> Result<Drain, Error>,
-    ) -> Result<Drain, Error> {
+    /// structure as `process`), and differ only in which operation —
+    /// `op` — runs on each side.
+    fn drain_through(&mut self, output: &mut [u8], op: DrainOp) -> Result<Drain, Error> {
         let mut out_pos = 0;
         let mut nothing_more_from_first = false;
 
         loop {
             if !nothing_more_from_first {
                 let staging = self.staging.as_mut();
-                match first_step(&mut self.first, &mut staging[self.stage_pos..])
-                    .and_then(|d| d.validated(staging.len() - self.stage_pos))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => {
-                        self.stage_pos = staging.len();
-                    }
-                    Drain::Done { written } => {
-                        self.stage_pos += written;
-                        nothing_more_from_first = true;
-                    }
+                let moved = op
+                    .step(&mut self.first, &mut staging[self.stage_pos..])
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                self.stage_pos += moved.written;
+                if moved.stop == DrainStop::Done {
+                    nothing_more_from_first = true;
                 }
             }
 
@@ -197,13 +186,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             if nothing_more_from_first && self.stage_pos == 0 {
                 // `first` is fully drained through `second`; run
                 // `second`'s own step.
-                return match second_step(&mut self.second, &mut output[out_pos..])
-                    .and_then(|d| d.validated(output.len() - out_pos))
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?
-                {
-                    Drain::OutputFilled => Ok(Drain::OutputFilled),
-                    Drain::Done { written } => Ok(Drain::Done { written: out_pos + written }),
-                };
+                let moved = op
+                    .step(&mut self.second, &mut output[out_pos..])
+                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                return Ok(match moved.stop {
+                    DrainStop::OutputFilled => Drain::OutputFilled,
+                    DrainStop::Done => Drain::Done { written: out_pos + moved.written },
+                });
             }
             if out_pos == output.len() {
                 return Ok(Drain::OutputFilled);
@@ -216,11 +205,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        self.drain_through(output, A::finish, B::finish)
+        self.drain_through(output, DrainOp::Finish)
     }
 
     fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        self.drain_through(output, A::flush, B::flush)
+        self.drain_through(output, DrainOp::Flush)
     }
 }
 
@@ -241,7 +230,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // feed it an empty slice.
             if in_pos < input.len() {
                 let staging = self.staging.as_mut();
-                let moved = step(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
+                let moved = codec_step(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
                     .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
                 in_pos += moved.consumed;
                 self.stage_pos += moved.written;
@@ -427,7 +416,7 @@ mod tests {
     }
 
     /// A block-buffering codec: hoards all input internally and emits
-    /// it only on `flush`/`finish` — the codec class `Codec::flush`
+    /// it only on `flush`/`finish` — the codec class `DrainCodec::flush`
     /// exists for (deflate-style sync boundaries).
     #[derive(Default)]
     struct Hoarder {
