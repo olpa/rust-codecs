@@ -2,11 +2,14 @@
 //! Core crate for RustCodecs: the [`Codec`] trait, its vocabulary, and
 //! the stream adapters a codec crate and its clients build on.
 //!
-//! - [`Codec`]: implement this to add a codec.
-//! - [`Progress`], [`Drain`], [`Error`], [`ErrorKind`]: the vocabulary
-//!   [`Codec`]'s methods speak in. The contract in one sentence: every
-//!   call fully consumes its input, fully fills its output, or ends
-//!   the stream.
+//! - [`Codec`]: implement this for a whole-stream codec. Every ordinary
+//!   codec is automatically a [`TerminatingCodec`] too, for input-side
+//!   drivers that can use an in-band end.
+//! - [`Progress`], [`TerminatingProgress`], [`Drain`], [`Error`],
+//!   [`ErrorKind`]: the vocabulary these traits' methods speak in. The
+//!   contract in one sentence: every call fully consumes its input,
+//!   fully fills its output, or (for a `TerminatingCodec`) ends the
+//!   stream in-band.
 //! - [`Carry`]: helper for codecs with a minimum atomic output unit,
 //!   letting an emitted unit span output buffers.
 //! - [`Source`]/[`Sink`]/[`stream_to_stream`]: the lending stream

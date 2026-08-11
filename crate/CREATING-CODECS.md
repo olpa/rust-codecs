@@ -7,7 +7,7 @@ one.
 ## 1. Implement `Codec`
 
 ```rust
-use rust_codecs_core::{Codec, Drain, Error, Progress};
+use rust_codecs_core::{Codec, Drain, DrainCodec, Error, Progress};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Rot13;
@@ -17,6 +17,12 @@ fn rot13_byte(b: u8) -> u8 {
         b'A'..=b'M' | b'a'..=b'm' => b + 13,
         b'N'..=b'Z' | b'n'..=b'z' => b - 13,
         _ => b,
+    }
+}
+
+impl DrainCodec for Rot13 {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
     }
 }
 
@@ -32,18 +38,18 @@ impl Codec for Rot13 {
             Ok(Progress::OutputFilled { consumed: n })
         }
     }
-
-    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
-    }
 }
 ```
 
+`finish`/`flush` live on [`DrainCodec`], a supertrait shared by
+`Codec` and `TerminatingCodec` (see below) — implement it first, then
+`Codec` for `process`.
+
 ## The contract
 
-**Every call fully consumes its input, fully fills its output, or ends
-the stream.** That's the whole contract, and the return types make any
-other outcome unrepresentable:
+**Every call fully consumes its input, or fully fills its output.**
+That's the whole contract for an ordinary `Codec`, and the return type
+makes any other outcome unrepresentable:
 
 - `process` returns a [`Progress`]:
   - `InputConsumed { written }` — all of `input` was taken (some
@@ -53,21 +59,32 @@ other outcome unrepresentable:
     `consumed` says how much of `input` that took (possibly zero, when
     output held over from an earlier call filled the buffer by
     itself).
-  - `StreamEnd { consumed, written }` — the format is self-terminating
-    and just ended; input past the stream's end stays unconsumed, and
-    neither side needs to be "full".
 - `finish` (and `flush`) return a [`Drain`]: `OutputFilled` (all of
   `output` written, more to come — the driver will call again) or
   `Done { written }` (everything owed was delivered).
 - Errors carry `kind` plus the `consumed`/`written` progress the call
   made before failing, so no bytes become unaccounted for.
 
+If your format is self-terminating — it can recognize its own end
+inside an input slice, with bytes past that end belonging to whatever
+follows (a delimiter, a length-prefixed frame) — implement
+[`TerminatingCodec`] instead of `Codec`. It's the same shape, except
+`process` returns a [`TerminatingProgress`] that adds a third outcome,
+`End { consumed, written }`. Every `Codec` already gets a
+`TerminatingCodec` impl for free (it just never returns `End`), so
+input-side drivers (`CodecReader`, `stream_to_stream`) accept either
+kind interchangeably; only implement `TerminatingCodec` directly when
+your format actually has an in-band end to report.
+`CodecWriter` accepts only `Codec` — `Write` has no way to represent a
+permanent short write, so a genuinely terminating codec can't be
+wrapped as one.
+
 The drivers do not take your word for it: every reported count is
 checked against the buffer sizes the call was given
-(`Progress::validated`/`Drain::validated`), and an overclaimed count
-surfaces as an `ErrorKind::ContractViolation` error rather than
-corrupting driver state. If you build your own driver, apply the same
-check at your codec boundary.
+(`Progress::validated`/`TerminatingProgress::validated`/`Drain::validated`),
+and an overclaimed count surfaces as an `ErrorKind::ContractViolation`
+error rather than corrupting driver state. If you build your own
+driver, apply the same check at your codec boundary.
 
 Two consequences worth spelling out:
 
@@ -94,7 +111,7 @@ with empty `output`, where `OutputFilled` would be trivially true.
 the codec owes nothing, `OutputFilled` says it owes bytes and needs
 room.
 
-`Codec` also has `flush` (drain pending state to a sync boundary
+`DrainCodec` also has `flush` (drain pending state to a sync boundary
 *without* ending the stream — the stream continues afterward). It has
 a default that owes nothing; only override it if your format defines
 an in-band sync marker (deflate/zlib/gzip do, ROT13 doesn't).
@@ -139,6 +156,16 @@ At minimum, exercise:
   prove the carry spans buffers correctly.
 - `finish()` reaching `Drain::Done`.
 
-That's the whole surface: implement `Codec`, expose constructor
-function(s), and the rest of RustCodecs (stream adapters, `Vec<u8>`
-helper) works with your codec for free.
+If you implemented `TerminatingCodec`, additionally exercise:
+
+- `End` reporting exact consumed/written counts, with the delimiter
+  handled the way you documented (consumed or left for the caller).
+- Input after `End` staying unconsumed when driven through a `Source`.
+- Calls after `End` returning the permanent zero-progress end on every
+  method, forever.
+- EOF arriving before the in-band boundary, per whatever policy you
+  documented for that case.
+
+That's the whole surface: implement `Codec` or `TerminatingCodec`,
+expose constructor function(s), and the rest of RustCodecs (stream
+adapters, `Vec<u8>` helper) works with your codec for free.
