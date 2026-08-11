@@ -133,6 +133,34 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         }
     }
 
+    /// Offer everything currently staged to `second`, advancing
+    /// `out_pos` by what it wrote and compacting whatever it left
+    /// unconsumed to the front of `staging`. Shared by `process` (where
+    /// an error reports `in_pos` as `consumed`) and `drain_through`
+    /// (where it's always 0, since draining doesn't consume caller
+    /// input). A no-op when nothing is staged.
+    fn drain_staging_into(
+        &mut self,
+        output: &mut [u8],
+        out_pos: &mut usize,
+        consumed_on_error: usize,
+    ) -> Result<(), Error> {
+        if self.stage_pos == 0 {
+            return Ok(());
+        }
+        let staging = self.staging.as_mut();
+        let moved = step(&mut self.second, &staging[..self.stage_pos], &mut output[*out_pos..])
+            .map_err(|e| Error { consumed: consumed_on_error, written: *out_pos, ..e })?;
+        *out_pos += moved.written;
+        let leftover = self.stage_pos - moved.consumed;
+        if leftover > 0 {
+            let staging = self.staging.as_mut();
+            staging.copy_within(moved.consumed..self.stage_pos, 0);
+        }
+        self.stage_pos = leftover;
+        Ok(())
+    }
+
     /// Shared engine behind `finish` and `flush`: both drive `first`
     /// through staging into `second`, one pass at a time (same pass
     /// structure as `process`), and differ only in which step they
@@ -164,18 +192,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 }
             }
 
-            if self.stage_pos > 0 {
-                let staging = self.staging.as_mut();
-                let moved = step(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
-                out_pos += moved.written;
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
-            }
+            self.drain_staging_into(output, &mut out_pos, 0)?;
 
             if nothing_more_from_first && self.stage_pos == 0 {
                 // `first` is fully drained through `second`; run
@@ -235,18 +252,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // for the next pass (or the next call). Skipped entirely
             // when there's nothing staged — an empty-input call to
             // `second` can't do anything a caller needs to see.
-            if self.stage_pos > 0 {
-                let staging = self.staging.as_mut();
-                let moved = step(&mut self.second, &staging[..self.stage_pos], &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
-                out_pos += moved.written;
-                let leftover = self.stage_pos - moved.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(moved.consumed..self.stage_pos, 0);
-                }
-                self.stage_pos = leftover;
-            }
+            self.drain_staging_into(output, &mut out_pos, in_pos)?;
 
             // Case: input fully consumed, and nothing is left waiting
             // in staging for `second`.
