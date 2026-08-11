@@ -11,7 +11,9 @@
 //! test) is responsible for skipping the quote byte itself between
 //! calls.
 
-use rust_codecs_core::{Codec, Drain, Error, Progress};
+use rust_codecs_core::sources_and_sinks::slice::SliceSource;
+use rust_codecs_core::sources_and_sinks::vec::VecSink;
+use rust_codecs_core::{stream_to_stream, Codec, Drain, Error, Progress};
 
 struct QuoteEnd;
 
@@ -89,4 +91,74 @@ fn drives_three_segments_across_two_early_stops() {
         panic!("expected InputConsumed, got {progress:?}");
     };
     assert_eq!(&output[..written], b";");
+}
+
+/// A small tokenizer built on the same early-stop pattern above, but
+/// driving `QuoteEnd` through `stream_to_stream` instead of raw
+/// `process()` calls.
+///
+/// The outer loop scans byte by byte for the next quote itself (no
+/// codec involved for that part) — collecting whatever came before it
+/// as a `"span"` token and the quote itself as a `"quote"` token. Once
+/// inside a quoted span, `QuoteEnd` takes over via `stream_to_stream`,
+/// copying bytes into a `Vec` sink until the closing quote, whose byte
+/// count consumed is read back off `Totals` to advance the outer
+/// scan — the closing quote itself is then asserted and pushed the
+/// same way as the opening one.
+#[test]
+fn tokenizes_a_string_array_literal() {
+    let input = br#"let a = ["s1", "s2", "s3"];"#;
+    let mut pos = 0;
+    let mut tokens: Vec<(&str, String)> = Vec::new();
+
+    while pos < input.len() {
+        // Byte-by-byte scan for the next quote — plain Rust, no codec.
+        let start = pos;
+        while pos < input.len() && input[pos] != b'"' {
+            pos += 1;
+        }
+        if pos > start {
+            let text = String::from_utf8(input[start..pos].to_vec()).unwrap();
+            tokens.push(("span", text));
+        }
+        if pos == input.len() {
+            break; // Ran off the end without finding another quote.
+        }
+
+        // Opening quote.
+        tokens.push(("quote", "\"".to_string()));
+        pos += 1;
+
+        // Hand the quoted span to QuoteEnd, driven through
+        // stream_to_stream instead of by hand.
+        let mut source = SliceSource::new(&input[pos..]);
+        let mut sink = VecSink::default();
+        let totals = stream_to_stream(&mut source, QuoteEnd, &mut sink).unwrap();
+        let string_token = String::from_utf8(sink.into_inner()).unwrap();
+        tokens.push(("string", string_token));
+        pos += totals.consumed;
+
+        // Closing quote: QuoteEnd left it unconsumed, exactly like the
+        // raw process() calls above did.
+        assert_eq!(input[pos], b'"');
+        tokens.push(("quote", "\"".to_string()));
+        pos += 1;
+    }
+
+    let expected: Vec<(&str, String)> = vec![
+        ("span", "let a = [".to_string()),
+        ("quote", "\"".to_string()),
+        ("string", "s1".to_string()),
+        ("quote", "\"".to_string()),
+        ("span", ", ".to_string()),
+        ("quote", "\"".to_string()),
+        ("string", "s2".to_string()),
+        ("quote", "\"".to_string()),
+        ("span", ", ".to_string()),
+        ("quote", "\"".to_string()),
+        ("string", "s3".to_string()),
+        ("quote", "\"".to_string()),
+        ("span", "];".to_string()),
+    ];
+    assert_eq!(tokens, expected);
 }
