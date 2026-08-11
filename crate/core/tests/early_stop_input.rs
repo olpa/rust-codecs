@@ -11,9 +11,11 @@
 //! test) is responsible for skipping the quote byte itself between
 //! calls.
 
+use core::convert::Infallible;
+
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
-use rust_codecs_core::{stream_to_stream, Codec, Drain, Error, Progress};
+use rust_codecs_core::{stream_to_stream, Codec, Drain, Error, Progress, Source};
 
 struct QuoteEnd;
 
@@ -143,6 +145,145 @@ fn tokenizes_a_string_array_literal() {
         assert_eq!(input[pos], b'"');
         tokens.push(("quote", "\"".to_string()));
         pos += 1;
+    }
+
+    let expected: Vec<(&str, String)> = vec![
+        ("span", "let a = [".to_string()),
+        ("quote", "\"".to_string()),
+        ("string", "s1".to_string()),
+        ("quote", "\"".to_string()),
+        ("span", ", ".to_string()),
+        ("quote", "\"".to_string()),
+        ("string", "s2".to_string()),
+        ("quote", "\"".to_string()),
+        ("span", ", ".to_string()),
+        ("quote", "\"".to_string()),
+        ("string", "s3".to_string()),
+        ("quote", "\"".to_string()),
+        ("span", "];".to_string()),
+    ];
+    assert_eq!(tokens, expected);
+}
+
+/// A [`Source`] over a `&[u8]` that hands out at most 2 bytes per
+/// `chunk()` call, instead of the whole remaining slice at once like
+/// [`SliceSource`] does — used below to check that `QuoteEnd` doesn't
+/// care how narrow its window onto the input is.
+struct TwoByteSource<'a> {
+    input: &'a [u8],
+    pos: usize,
+    buf: [u8; 2],
+    buf_len: usize,
+    buf_pos: usize,
+}
+
+impl<'a> TwoByteSource<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, pos: 0, buf: [0; 2], buf_len: 0, buf_pos: 0 }
+    }
+}
+
+impl Source for TwoByteSource<'_> {
+    type Error = Infallible;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        if self.buf_pos == self.buf_len {
+            let n = (self.input.len() - self.pos).min(2);
+            self.buf[..n].copy_from_slice(&self.input[self.pos..self.pos + n]);
+            self.pos += n;
+            self.buf_len = n;
+            self.buf_pos = 0;
+        }
+        Ok((self.buf_pos < self.buf_len).then_some(&self.buf[self.buf_pos..self.buf_len]))
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.buf_pos += amount;
+    }
+}
+
+/// How [`read_span`] stopped: at a quote (left unconsumed, exactly
+/// like `QuoteEnd` leaves it), or because the source ran out.
+enum SpanEnd {
+    Quote(String),
+    Eof(String),
+}
+
+/// The outer scan from [`tokenizes_a_string_array_literal`], rewritten
+/// to read through [`Source::chunk`]/[`Source::consume`] instead of
+/// indexing a `&[u8]` directly — so it can share one `Source` instance
+/// with the `stream_to_stream` calls that handle the quoted spans,
+/// instead of each side getting its own fresh slice.
+fn read_span<S: Source>(source: &mut S) -> Result<SpanEnd, S::Error> {
+    let mut span = Vec::new();
+    loop {
+        let Some(chunk) = source.chunk()? else {
+            return Ok(SpanEnd::Eof(String::from_utf8(span).unwrap()));
+        };
+        match chunk.iter().position(|&b| b == b'"') {
+            Some(quote_pos) => {
+                span.extend_from_slice(&chunk[..quote_pos]);
+                source.consume(quote_pos);
+                return Ok(SpanEnd::Quote(String::from_utf8(span).unwrap()));
+            }
+            None => {
+                let n = chunk.len();
+                span.extend_from_slice(chunk);
+                source.consume(n);
+            }
+        }
+    }
+}
+
+/// Same tokenizer as [`tokenizes_a_string_array_literal`], same input
+/// value, but reading through one [`TwoByteSource`] for the *whole*
+/// input — created once, before the loop even starts — instead of a
+/// fresh [`SliceSource`] per quoted span. The outer scan and every
+/// `stream_to_stream` call take turns advancing it: `stream_to_stream`
+/// borrows it just for the quoted content, and because it only ever
+/// takes `&mut Source` (never owns it), control returns to the outer
+/// scan afterward with the source picking up exactly where `QuoteEnd`
+/// left off — the closing quote still sitting unconsumed at the
+/// front, ready for `read_span`'s next `chunk()` call to see. Nothing
+/// about `Source`/`stream_to_stream` needed to change to make this
+/// work.
+#[test]
+fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
+    let input = br#"let a = ["s1", "s2", "s3"];"#;
+    let mut source = TwoByteSource::new(input);
+    let mut tokens: Vec<(&str, String)> = Vec::new();
+
+    loop {
+        let span = match read_span(&mut source).unwrap() {
+            SpanEnd::Quote(span) => span,
+            SpanEnd::Eof(span) => {
+                if !span.is_empty() {
+                    tokens.push(("span", span));
+                }
+                break;
+            }
+        };
+        if !span.is_empty() {
+            tokens.push(("span", span));
+        }
+
+        // Opening quote: read_span left it unconsumed.
+        let chunk = source.chunk().unwrap().unwrap();
+        assert_eq!(chunk[0], b'"');
+        source.consume(1);
+        tokens.push(("quote", "\"".to_string()));
+
+        // Same source, handed to stream_to_stream just for this span.
+        let mut sink = VecSink::default();
+        stream_to_stream(&mut source, QuoteEnd, &mut sink).unwrap();
+        let string_token = String::from_utf8(sink.into_inner()).unwrap();
+        tokens.push(("string", string_token));
+
+        // Closing quote: QuoteEnd left it unconsumed too.
+        let chunk = source.chunk().unwrap().unwrap();
+        assert_eq!(chunk[0], b'"');
+        source.consume(1);
+        tokens.push(("quote", "\"".to_string()));
     }
 
     let expected: Vec<(&str, String)> = vec![
