@@ -133,11 +133,10 @@
 //! stream_to_stream(&mut source, chain, &mut sink).unwrap();
 //! ```
 //!
-//! TODO: it's the sort of same, explain the fine difference between:
-//!
-//! - `std::io::copy` over `(codec1`-wrapped input, `codec2`-wrapped
-//!   output)
-//! - `stream_to_stream(input, output)` with `Chain(codec1, codec2)`
+//! This looks equivalent to wrapping the input in one codec and the
+//! output in the other, then running `std::io::copy` between them —
+//! and for a well-behaved, complete stream it is. See [`Chain`]'s docs
+//! for where that equivalence breaks down.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

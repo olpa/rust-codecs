@@ -94,6 +94,57 @@ use crate::{Codec, Drain, Error, ErrorKind, Progress};
 /// instead of corrupting the staging indices. Error counts are always
 /// chain-level — bytes consumed from *your* input and written to
 /// *your* output in this call — never the inner codec's own numbers.
+///
+/// # `Chain` vs. wrapping input and output separately
+///
+/// `stream_to_stream(input, Chain::new(a, b, staging), output)` and
+/// `io::copy` over an `a`-wrapped reader into a `b`-wrapped writer
+/// have the same effect only for well-behaved, whole-stream codecs.
+/// The large complexity difference comes from `Chain` promising
+/// substantially stronger semantics than that `Read`/`Write`
+/// composition.
+///
+/// With `CodecReader(a)` → `io::copy` → `CodecWriter(b)`:
+///
+/// - `io::copy` is the intermediate buffer and scheduler.
+/// - EOF naturally finalizes `a`.
+/// - Explicitly finishing the writer finalizes `b` — and *only*
+///   explicitly: nothing about `Read`/`Write` tells `io::copy` when
+///   the input is exhausted for good, so this step doesn't happen on
+///   its own. Forget it, even for a plain, well-behaved whole stream
+///   with no early termination in sight, and a stateful codec's
+///   trailer/checksum/padding never gets written — the output is
+///   silently truncated. `Write::flush()` doesn't cover for this
+///   either, since it's a resumable sync point, not a permanent end.
+/// - Each wrapper only drives one codec, in one direction.
+/// - Early termination is poorly composable on top of that: `CodecReader`
+///   may already have read and lost trailing source bytes, while an
+///   early-ending writer eventually causes a zero-length write/`WriteZero`.
+///
+/// `Chain`, however, must behave as one correct `Codec` during every
+/// individual call. That means it must:
+///
+/// - Track partial consumption on both sides.
+/// - Retain and compact intermediate output.
+/// - Translate two codecs' progress into one `Progress`.
+/// - Propagate exact chain-level consumed/written counts.
+/// - Handle either codec ending early.
+/// - Finalize `second` immediately when `first` ends in-band.
+/// - Distinguish unread caller input from bytes already staged and
+///   rejected by `second`.
+/// - Support interrupted and repeated `process`, `flush`, and `finish`
+///   calls.
+/// - Preserve the `Codec` lifecycle contract even when nested in
+///   another `Chain`.
+/// - Validate both codecs' reported counts.
+///
+/// `Read` → `copy` → `Write` composes complete stream drivers; `Chain`
+/// composes resumable state machines while exposing a single
+/// state-machine interface. Those are equivalent at the "transform
+/// this ordinary finite stream" level, but not operationally, and not
+/// at early-stream/lifecycle boundaries. The wrappers delegate most
+/// orchestration to `std::io`; `Chain` has to implement that
+/// orchestration itself and make it resumable inside one `Codec`.
 pub struct Chain<A, B, S> {
     first: A,
     second: B,
