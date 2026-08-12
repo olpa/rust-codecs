@@ -21,8 +21,9 @@ use std::io::{self, Read, Write};
 
 use core::convert::Infallible;
 
-use crate::pump::{Pump, PumpEnd};
-use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
+use crate::pump::Pump;
+use crate::sources_and_sinks::shared_io::pump_read;
+use crate::sources_and_sinks::slice::SliceSource;
 use crate::{Codec, DriveError, Error, Sink, TerminatingCodec};
 
 use super::adapter::{StdSource, StdSink};
@@ -49,16 +50,6 @@ fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
         DriveError::Codec(error) => to_io_error(error),
         DriveError::SinkExhausted | DriveError::NoProgress => {
             io::Error::new(io::ErrorKind::InvalidData, "invalid std output adapter")
-        }
-    }
-}
-
-fn slice_error(err: DriveError<Infallible, Infallible>) -> io::Error {
-    match err {
-        DriveError::Source(never) | DriveError::Sink(never) => match never {},
-        DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
         }
     }
 }
@@ -111,19 +102,7 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
 
 impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
-        if self.pump.is_done() {
-            return Ok(0);
-        }
-        let mut output = SliceSink::new(buf);
-        let moved = self.pump.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
-        if moved.end == PumpEnd::SourceExhausted {
-            self.pump.finish_to(&mut output).map_err(slice_error)?;
-        }
-        Ok(output.written())
+        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
     }
 }
 

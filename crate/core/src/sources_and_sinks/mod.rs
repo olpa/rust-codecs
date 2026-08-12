@@ -18,3 +18,6 @@ pub mod std_io;
 pub mod slice;
 #[cfg(feature = "alloc")]
 pub mod vec;
+
+#[cfg(any(feature = "embedded-io", feature = "std"))]
+mod shared_io;

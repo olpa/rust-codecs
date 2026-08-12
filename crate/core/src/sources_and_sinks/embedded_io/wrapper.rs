@@ -10,8 +10,9 @@ use core::fmt;
 
 use embedded_io::{ErrorType, Read, Write};
 
-use crate::pump::{Pump, PumpEnd};
-use crate::sources_and_sinks::slice::{SliceSource, SliceSink};
+use crate::pump::Pump;
+use crate::sources_and_sinks::shared_io::pump_read;
+use crate::sources_and_sinks::slice::SliceSource;
 use crate::{Codec, DriveError, Error, Sink, TerminatingCodec};
 
 use super::adapter::{EmbeddedSource, EmbeddedSink};
@@ -40,14 +41,6 @@ fn writer_error<E>(error: DriveError<core::convert::Infallible, E>) -> EmbeddedE
         DriveError::Sink(error) => EmbeddedError::Io(error),
         DriveError::Codec(error) => EmbeddedError::Codec(error),
         DriveError::SinkExhausted | DriveError::NoProgress => unreachable!("embedded output adapter"),
-    }
-}
-
-fn slice_error<E>(error: DriveError<core::convert::Infallible, core::convert::Infallible>) -> EmbeddedError<E> {
-    match error {
-        DriveError::Source(never) | DriveError::Sink(never) => match never {},
-        DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => unreachable!("slice output adapter"),
     }
 }
 
@@ -102,16 +95,7 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, 
 
 impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        if buf.is_empty() || self.pump.is_done() {
-            return Ok(0);
-        }
-
-        let mut output = SliceSink::new(buf);
-        let moved = self.pump.transfer_from(&mut self.input, &mut output).map_err(reader_error)?;
-        if moved.end == PumpEnd::SourceExhausted {
-            self.pump.finish_to(&mut output).map_err(slice_error)?;
-        }
-        Ok(output.written())
+        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
     }
 }
 
