@@ -4,3 +4,6 @@
 
 mod read;
 pub(crate) use read::pump_read;
+
+mod write;
+pub(crate) use write::pump_write;

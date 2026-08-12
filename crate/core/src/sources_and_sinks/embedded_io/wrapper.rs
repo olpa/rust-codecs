@@ -11,9 +11,8 @@ use core::fmt;
 use embedded_io::{ErrorType, Read, Write};
 
 use crate::pump::Pump;
-use crate::sources_and_sinks::shared_io::pump_read;
-use crate::sources_and_sinks::slice::SliceSource;
-use crate::{Codec, DriveError, Error, Sink, TerminatingCodec};
+use crate::sources_and_sinks::shared_io::{pump_read, pump_write};
+use crate::{Codec, DriveError, Error, ErrorKind, Sink, TerminatingCodec};
 
 use super::adapter::{EmbeddedSource, EmbeddedSink};
 
@@ -22,8 +21,15 @@ use super::adapter::{EmbeddedSource, EmbeddedSink};
 pub enum EmbeddedError<E> {
     Io(E),
     Codec(Error),
-    /// The codec ended without accepting any of a non-empty write.
-    WriteZero,
+}
+
+/// `SinkExhausted`/`NoProgress` never carry endpoint data of their own
+/// (`DriveError`'s two data-less variants) — they mean the pump/codec
+/// pairing itself is broken, the same class of failure the crate's own
+/// [`ErrorKind::ContractViolation`] already names, so both route
+/// through `EmbeddedError::Codec` like a codec error would.
+fn adapter_contract_violation<E>() -> EmbeddedError<E> {
+    EmbeddedError::Codec(Error::new(ErrorKind::ContractViolation, 0, 0))
 }
 
 fn reader_error<E>(error: DriveError<E, core::convert::Infallible>) -> EmbeddedError<E> {
@@ -31,7 +37,7 @@ fn reader_error<E>(error: DriveError<E, core::convert::Infallible>) -> EmbeddedE
         DriveError::Source(error) => EmbeddedError::Io(error),
         DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => unreachable!("slice output adapter"),
+        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
     }
 }
 
@@ -40,7 +46,7 @@ fn writer_error<E>(error: DriveError<core::convert::Infallible, E>) -> EmbeddedE
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => EmbeddedError::Io(error),
         DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => unreachable!("embedded output adapter"),
+        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
     }
 }
 
@@ -57,7 +63,6 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
         match self {
             Self::Io(error) => error.kind(),
             Self::Codec(_) => embedded_io::ErrorKind::InvalidData,
-            Self::WriteZero => embedded_io::ErrorKind::WriteZero,
         }
     }
 }
@@ -103,10 +108,10 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S>
 /// them to the wrapped endpoint.
 ///
 /// `C` is bound to [`Codec`], not [`TerminatingCodec`]: an in-band end
-/// would otherwise become a permanent `Err(EmbeddedError::WriteZero)`
-/// from `write`. The caller must explicitly call
-/// [`CodecWriter::finish`] to finalize the codec; `Write::flush` is a
-/// resumable synchronization point, not a substitute for it.
+/// would otherwise become a permanent short write from `write`. The
+/// caller must explicitly call [`CodecWriter::finish`] to finalize the
+/// codec; `Write::flush` is a resumable synchronization point, not a
+/// substitute for it.
 pub struct CodecWriter<W, C: Codec, S> {
     output: EmbeddedSink<W, S>,
     pump: Pump<C>,
@@ -141,16 +146,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> ErrorType for CodecWriter<W, C, S> {
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        if !buf.is_empty() && self.pump.is_done() {
-            return Err(EmbeddedError::WriteZero);
-        }
-        let mut input = SliceSource::new(buf);
-        self.pump.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
-        if !buf.is_empty() && input.consumed() == 0 {
-            Err(EmbeddedError::WriteZero)
-        } else {
-            Ok(input.consumed())
-        }
+        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {

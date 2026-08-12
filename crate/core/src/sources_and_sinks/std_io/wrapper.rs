@@ -22,9 +22,8 @@ use std::io::{self, Read, Write};
 use core::convert::Infallible;
 
 use crate::pump::Pump;
-use crate::sources_and_sinks::shared_io::pump_read;
-use crate::sources_and_sinks::slice::SliceSource;
-use crate::{Codec, DriveError, Error, Sink, TerminatingCodec};
+use crate::sources_and_sinks::shared_io::{pump_read, pump_write};
+use crate::{Codec, DriveError, Error, ErrorKind, Sink, TerminatingCodec};
 
 use super::adapter::{StdSource, StdSink};
 
@@ -32,14 +31,21 @@ fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
 }
 
+/// `SinkExhausted`/`NoProgress` never carry endpoint data of their own
+/// (`DriveError`'s two data-less variants) — they mean the pump/codec
+/// pairing itself is broken, the same class of failure the crate's own
+/// [`ErrorKind::ContractViolation`] already names, so both route
+/// through `to_io_error` like a codec error would.
+fn adapter_contract_violation() -> io::Error {
+    to_io_error(Error::new(ErrorKind::ContractViolation, 0, 0))
+}
+
 fn reader_error(err: DriveError<io::Error, Infallible>) -> io::Error {
     match err {
         DriveError::Source(error) => error,
         DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid slice output adapter")
-        }
+        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
     }
 }
 
@@ -48,9 +54,7 @@ fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => error,
         DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid std output adapter")
-        }
+        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
     }
 }
 
@@ -154,9 +158,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut input = SliceSource::new(buf);
-        self.pump.transfer_from(&mut input, &mut self.output).map_err(writer_error)?;
-        Ok(input.consumed())
+        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error)
     }
 
     fn flush(&mut self) -> io::Result<()> {
