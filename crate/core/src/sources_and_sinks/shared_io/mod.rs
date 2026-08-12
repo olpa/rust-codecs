@@ -6,10 +6,4 @@ mod read;
 pub(crate) use read::pump_read;
 
 mod write;
-pub(crate) use write::pump_write;
-
-mod finish;
-pub(crate) use finish::pump_finish;
-
-mod flush;
-pub(crate) use flush::pump_flush;
+pub(crate) use write::{pump_finish, pump_flush, pump_write};
