@@ -22,8 +22,8 @@ use std::io::{self, Read, Write};
 use core::convert::Infallible;
 
 use crate::pump::Pump;
-use crate::sources_and_sinks::shared_io::{pump_read, pump_write};
-use crate::{Codec, DriveError, Error, ErrorKind, Sink, TerminatingCodec};
+use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
+use crate::{Codec, DriveError, Error, ErrorKind, TerminatingCodec};
 
 use super::adapter::{StdSource, StdSink};
 
@@ -150,8 +150,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// (trailer, checksum, padding — for a stateful codec), and hand back
     /// ownership of the wrapped writer.
     pub fn finish(mut self) -> io::Result<W> {
-        self.pump.finish_to(&mut self.output).map_err(writer_error)?;
-        self.output.finish()?;
+        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
         Ok(self.output.into_inner())
     }
 }
@@ -162,7 +161,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.pump.flush_to(&mut self.output).map_err(writer_error)?;
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error)?;
         self.output.get_mut().flush()
     }
 }

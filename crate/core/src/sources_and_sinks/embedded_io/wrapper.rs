@@ -11,8 +11,8 @@ use core::fmt;
 use embedded_io::{ErrorType, Read, Write};
 
 use crate::pump::Pump;
-use crate::sources_and_sinks::shared_io::{pump_read, pump_write};
-use crate::{Codec, DriveError, Error, ErrorKind, Sink, TerminatingCodec};
+use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
+use crate::{Codec, DriveError, Error, ErrorKind, TerminatingCodec};
 
 use super::adapter::{EmbeddedSource, EmbeddedSink};
 
@@ -134,8 +134,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 
     /// Finish the codec stream, flush the endpoint, and return it.
     pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
-        self.pump.finish_to(&mut self.output).map_err(writer_error)?;
-        self.output.finish().map_err(EmbeddedError::Io)?;
+        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
         Ok(self.output.into_inner())
     }
 }
@@ -150,7 +149,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.pump.flush_to(&mut self.output).map_err(writer_error)?;
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error)?;
         self.output.get_mut().flush().map_err(EmbeddedError::Io)
     }
 }
