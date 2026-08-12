@@ -5,10 +5,10 @@ use crate::sources_and_sinks::slice::SliceSource;
 use crate::{Codec, DriveError, Sink};
 
 /// Drive `pump` from `buf`, writing transformed bytes into `output` —
-/// the transport-independent core shared by every `sources_and_sinks`
-/// writer wrapper's `Write::write`. Returns the number of bytes
-/// consumed from `buf`.
-pub(crate) fn pump_write<O: Sink, C: Codec>(
+/// the transport-independent core of a `Write::write` impl, matching
+/// what `std_io`/`embedded_io`'s own `CodecWriter` calls internally.
+/// Returns the number of bytes consumed from `buf`.
+pub fn pump_write<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
     buf: &[u8],
@@ -19,10 +19,11 @@ pub(crate) fn pump_write<O: Sink, C: Codec>(
 }
 
 /// Drain `pump`'s trailing output into `output`, then finalize
-/// `output` itself — the transport-independent core shared by every
-/// `sources_and_sinks` writer wrapper's `finish`. Stops at the first
-/// failure, before finalizing `output` if `pump` didn't fully drain.
-pub(crate) fn pump_finish<O: Sink, C: Codec>(
+/// `output` itself — the transport-independent core of a `finish`
+/// method that consumes the wrapper and hands back its endpoint.
+/// Stops at the first failure, before finalizing `output` if `pump`
+/// didn't fully drain.
+pub fn pump_finish<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
@@ -32,9 +33,9 @@ pub(crate) fn pump_finish<O: Sink, C: Codec>(
 }
 
 /// Drain `pump`'s trailing output into `output` at a sync point,
-/// without ending the stream — the transport-independent core shared
-/// by every `sources_and_sinks` writer wrapper's `flush`.
-pub(crate) fn pump_flush<O: Sink, C: Codec>(
+/// without ending the stream — the transport-independent core of a
+/// `Write::flush` impl.
+pub fn pump_flush<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {

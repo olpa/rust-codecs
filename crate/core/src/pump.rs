@@ -18,6 +18,9 @@ use crate::drive::{terminating_step, DrainOp, DrainStop, TerminatingStep, Termin
 use crate::{Error, TerminatingCodec};
 
 /// A byte source which lends its current input chunk to the pump.
+///
+/// See `CREATING-IO-BACKENDS.md` in the repository root for how to
+/// implement one for a new transport.
 pub trait Source {
     type Error;
 
@@ -38,6 +41,9 @@ pub trait Source {
 }
 
 /// A byte destination which lends writable space to the pump.
+///
+/// See `CREATING-IO-BACKENDS.md` in the repository root for how to
+/// implement one for a new transport.
 pub trait Sink {
     type Error;
 
@@ -154,13 +160,21 @@ pub(crate) struct PumpDrain {
 }
 
 /// A bufferless lifecycle wrapper around a codec.
-pub(crate) struct Pump<C> {
+///
+/// Public so a third-party `Source`/`Sink` backend can build its own
+/// `Read`/`Write`-style wrapper on top of it, the same way this
+/// crate's own `std_io`/`embedded_io` backends do: hold a `Pump<C>`
+/// alongside your adapter, and drive it with
+/// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io)'s
+/// `pump_read`/`pump_write`/`pump_finish`/`pump_flush` rather than
+/// calling its own methods directly — those stay crate-private.
+pub struct Pump<C> {
     codec: C,
     done: bool,
 }
 
 impl<C: TerminatingCodec> Pump<C> {
-    pub(crate) fn new(codec: C) -> Self {
+    pub fn new(codec: C) -> Self {
         Self { codec, done: false }
     }
 

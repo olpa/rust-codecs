@@ -16,6 +16,10 @@
 //!   contract, independent of any particular byte transport.
 //! - [`sources_and_sinks`]: concrete `Source`/`Sink` backends —
 //!   `std::io`, `embedded_io`, and `Vec<u8>`.
+//! - [`Pump`]/[`sources_and_sinks::shared_io`]: the reusable core
+//!   behind this crate's own `CodecReader`/`CodecWriter` wrappers, for
+//!   building an incremental `Read`/`Write`-style wrapper over a
+//!   `Source`/`Sink` backend of your own.
 //!
 //! # Examples
 //!
@@ -155,7 +159,7 @@ pub use carry::Carry;
 mod drive;
 
 mod pump;
-pub use pump::{stream_to_stream, DriveError, Sink, Source, Totals};
+pub use pump::{stream_to_stream, DriveError, Pump, Sink, Source, Totals};
 
 mod chain;
 pub use chain::Chain;

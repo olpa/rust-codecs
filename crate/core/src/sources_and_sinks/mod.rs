@@ -10,6 +10,10 @@
 //!   internally to give `std_io`/`embedded_io`'s `CodecReader`/
 //!   `CodecWriter` a `Source`/`Sink` over the caller's own buffer for
 //!   the duration of one call.
+//! - [`shared_io`][]: the [`Pump`](crate::Pump)-driving core behind
+//!   `std_io`/`embedded_io`'s `CodecReader`/`CodecWriter`, public so a
+//!   third-party backend can build the same kind of wrapper instead of
+//!   reimplementing the drive loop.
 
 #[cfg(feature = "embedded-io")]
 pub mod embedded_io;
@@ -20,4 +24,4 @@ pub mod slice;
 pub mod vec;
 
 #[cfg(any(feature = "embedded-io", feature = "std"))]
-mod shared_io;
+pub mod shared_io;
