@@ -119,6 +119,16 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S>
 /// The caller must explicitly call [`CodecWriter::finish`] to finalize
 /// the codec; `Write::flush` is a resumable synchronization point, not
 /// a substitute for it.
+///
+/// # Don't forget to call `finish`
+///
+/// Dropping a `CodecWriter` without calling `finish` silently drops
+/// any trailer/padding/checksum bytes the codec was still holding —
+/// there is no compiler warning or runtime error, only truncated
+/// output discovered later, on decode. This is the same footgun as
+/// forgetting `std::io::BufWriter::flush`/`into_inner` or
+/// `flate2::write::GzEncoder::finish`: make sure `finish` runs on
+/// every path out of scope, including error paths.
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,
     pump: Pump<C>,
