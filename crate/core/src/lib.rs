@@ -144,6 +144,50 @@
 //! output in the other, then running `std::io::copy` between them —
 //! and for a well-behaved, complete stream it is. See [`Chain`]'s docs
 //! for where that equivalence breaks down.
+//!
+//! ## Parsing using early-stop codecs
+//!
+//! A [`TerminatingCodec`] does not have to run through
+//! [`stream_to_stream`] end to end. It can also power a small
+//! hand-written parser, driven one step at a time. The full source for
+//! this example lives in `core/tests/early_stop_input.rs`, which
+//! tokenizes input made of plain text with quoted strings inside it.
+//!
+//! The codec at the center of that test, `QuoteEnd`, copies bytes
+//! through unchanged until it meets a `"`. It treats that quote as an
+//! in-band end, but doesn't consume the quote byte itself.
+//!
+//! Two ways of moving through the input show up side by side:
+//!
+//! - Inside a span of plain text, or inside a quoted string, the
+//!   codec does the reading. `encode_string` runs it over a
+//!   [`Source`] through [`stream_to_stream`], and the source's
+//!   current position moves forward as a side effect.
+//! - The quote character itself has no codec behind it. The driver loop
+//!   reads it with plain [`Source`] calls, `chunk()` and `consume()`,
+//!   advancing the source's position by hand.
+//!
+//! ```text
+//! while source.chunk().unwrap().is_some() {
+//!     state = match state {
+//!         ...
+//!         State::String => {
+//!             let text = encode_string(source, quote_end()).unwrap();
+//!             tokens.push(("string", text));
+//!             State::QuoteThenTopLevel
+//!         }
+//!         State::QuoteThenString | State::QuoteThenTopLevel => {
+//!             let chunk = source.chunk().unwrap().unwrap();
+//!             assert_eq!(chunk[0], b'"');
+//!             source.consume(1);
+//!             ...
+//!         }
+//!     };
+//! }
+//! ```
+//!
+//! See `tokenize_string_array_literal` in
+//! `core/tests/early_stop_input.rs` for the full working version.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
