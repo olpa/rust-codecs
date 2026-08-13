@@ -20,7 +20,8 @@ use core::convert::Infallible;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
 use rust_codecs_core::{
-    stream_to_stream, Drain, DrainCodec, Error, Source, TerminatingCodec, TerminatingProgress,
+    stream_to_stream, Drain, DrainCodec, DriveError, Error, Source, TerminatingCodec,
+    TerminatingProgress,
 };
 
 struct QuoteEnd;
@@ -240,38 +241,70 @@ impl Source for TwoByteSource<'_> {
     }
 }
 
+/// Run `codec` over the remaining bytes of `source`, collecting its
+/// output into a `String` — the shared-`Source` counterpart to
+/// `rust_codecs_core::sources_and_sinks::vec::encode_string`, which
+/// only ever reads from a borrowed `&str` of its own.
+fn encode_string<S: Source>(
+    source: &mut S,
+    codec: impl TerminatingCodec,
+) -> Result<String, DriveError<S::Error, Infallible>> {
+    let mut sink = VecSink::default();
+    stream_to_stream(source, codec, &mut sink)?;
+    Ok(String::from_utf8(sink.into_inner()).unwrap())
+}
+
+/// What [`tokenize_string_array_literal`] expects to find next: plain
+/// text outside quotes, plain text inside them, or one of the two
+/// quote marks in between — kept as separate states, rather than one
+/// `Quote` parameterized by what follows, since the opening quote
+/// (before a string) and the closing quote (before a span) lead
+/// somewhere different; each is named for where it leads.
+#[derive(Clone, Copy, PartialEq)]
+enum State {
+    Span,
+    QuoteThenString,
+    String,
+    QuoteThenSpan,
+}
+
 /// The tokenizing loop shared by every test below that reads through a
-/// [`Source`] rather than indexing a `&[u8]` directly: scan spans and
-/// quoted content alike with `QuoteEnd` via `stream_to_stream`, and
-/// push the quote bytes themselves in between — `source` picks up
-/// exactly where each step left off, since nothing here ever takes
-/// ownership of it.
+/// [`Source`] rather than indexing a `&[u8]` directly: drive [`State`]
+/// forward one step per iteration — `Span`/`String` scan text with
+/// [`encode_string`], either `Quote*` state consumes the delimiter
+/// itself — with `source` picking up exactly where each step left
+/// off, since nothing here ever takes ownership of it.
 fn tokenize_string_array_literal<S: Source>(source: &mut S) -> Vec<(&'static str, String)>
 where
     S::Error: core::fmt::Debug,
 {
     let mut tokens: Vec<(&str, String)> = Vec::new();
-    let mut label = "span";
+    let mut state = State::Span;
 
-    loop {
-        let mut sink = VecSink::default();
-        stream_to_stream(source, quote_end(), &mut sink).unwrap();
-        let text = String::from_utf8(sink.into_inner()).unwrap();
-        if !text.is_empty() {
-            tokens.push((label, text));
-        }
-
-        // QuoteEnd stopped either at a quote, left unconsumed, or
-        // because the source ran dry — the latter only ever happens
-        // between spans, never mid-string.
-        let Some(chunk) = source.chunk().unwrap() else {
-            break;
+    while source.chunk().unwrap().is_some() {
+        state = match state {
+            State::Span => {
+                let text = encode_string(source, quote_end()).unwrap();
+                tokens.push(("span", text));
+                State::QuoteThenString
+            }
+            State::String => {
+                let text = encode_string(source, quote_end()).unwrap();
+                tokens.push(("string", text));
+                State::QuoteThenSpan
+            }
+            State::QuoteThenString | State::QuoteThenSpan => {
+                let chunk = source.chunk().unwrap().unwrap();
+                assert_eq!(chunk[0], b'"');
+                source.consume(1);
+                tokens.push(("quote", "\"".to_string()));
+                if state == State::QuoteThenString {
+                    State::String
+                } else {
+                    State::Span
+                }
+            }
         };
-        assert_eq!(chunk[0], b'"');
-        source.consume(1);
-        tokens.push(("quote", "\"".to_string()));
-
-        label = if label == "span" { "string" } else { "span" };
     }
 
     tokens
