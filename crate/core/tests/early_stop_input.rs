@@ -240,82 +240,38 @@ impl Source for TwoByteSource<'_> {
     }
 }
 
-/// How [`read_span`] stopped: at a quote (left unconsumed, exactly
-/// like `QuoteEnd` leaves it), or because the source ran out.
-enum SpanEnd {
-    Quote(String),
-    Eof(String),
-}
-
-/// The outer scan from [`tokenizes_a_string_array_literal`], rewritten
-/// to read through [`Source::chunk`]/[`Source::consume`] instead of
-/// indexing a `&[u8]` directly — so it can share one `Source` instance
-/// with the `stream_to_stream` calls that handle the quoted spans,
-/// instead of each side getting its own fresh slice.
-fn read_span<S: Source>(source: &mut S) -> Result<SpanEnd, S::Error> {
-    let mut span = Vec::new();
-    loop {
-        let Some(chunk) = source.chunk()? else {
-            return Ok(SpanEnd::Eof(String::from_utf8(span).unwrap()));
-        };
-        match chunk.iter().position(|&b| b == b'"') {
-            Some(quote_pos) => {
-                span.extend_from_slice(&chunk[..quote_pos]);
-                source.consume(quote_pos);
-                return Ok(SpanEnd::Quote(String::from_utf8(span).unwrap()));
-            }
-            None => {
-                let n = chunk.len();
-                span.extend_from_slice(chunk);
-                source.consume(n);
-            }
-        }
-    }
-}
-
 /// The tokenizing loop shared by every test below that reads through a
-/// [`Source`] rather than indexing a `&[u8]` directly: scan spans with
-/// [`read_span`], hand quoted content to `QuoteEnd` via
-/// `stream_to_stream`, and push the quote bytes themselves in between
-/// — `source` picks up exactly where each step left off, since nothing
-/// here ever takes ownership of it.
+/// [`Source`] rather than indexing a `&[u8]` directly: scan spans and
+/// quoted content alike with `QuoteEnd` via `stream_to_stream`, and
+/// push the quote bytes themselves in between — `source` picks up
+/// exactly where each step left off, since nothing here ever takes
+/// ownership of it.
 fn tokenize_string_array_literal<S: Source>(source: &mut S) -> Vec<(&'static str, String)>
 where
     S::Error: core::fmt::Debug,
 {
     let mut tokens: Vec<(&str, String)> = Vec::new();
+    let mut label = "span";
 
     loop {
-        let span = match read_span(source).unwrap() {
-            SpanEnd::Quote(span) => span,
-            SpanEnd::Eof(span) => {
-                if !span.is_empty() {
-                    tokens.push(("span", span));
-                }
-                break;
-            }
-        };
-        if !span.is_empty() {
-            tokens.push(("span", span));
-        }
-
-        // Opening quote: read_span left it unconsumed.
-        let chunk = source.chunk().unwrap().unwrap();
-        assert_eq!(chunk[0], b'"');
-        source.consume(1);
-        tokens.push(("quote", "\"".to_string()));
-
-        // Same source, handed to stream_to_stream just for this span.
         let mut sink = VecSink::default();
         stream_to_stream(source, quote_end(), &mut sink).unwrap();
-        let string_token = String::from_utf8(sink.into_inner()).unwrap();
-        tokens.push(("string", string_token));
+        let text = String::from_utf8(sink.into_inner()).unwrap();
+        if !text.is_empty() {
+            tokens.push((label, text));
+        }
 
-        // Closing quote: QuoteEnd left it unconsumed too.
-        let chunk = source.chunk().unwrap().unwrap();
+        // QuoteEnd stopped either at a quote, left unconsumed, or
+        // because the source ran dry — the latter only ever happens
+        // between spans, never mid-string.
+        let Some(chunk) = source.chunk().unwrap() else {
+            break;
+        };
         assert_eq!(chunk[0], b'"');
         source.consume(1);
         tokens.push(("quote", "\"".to_string()));
+
+        label = if label == "span" { "string" } else { "span" };
     }
 
     tokens
