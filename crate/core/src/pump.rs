@@ -283,8 +283,12 @@ impl<C: TerminatingCodec> Pump<C> {
             // ran out first); the unconsumed remainder isn't lost —
             // it reappears (overlapping this chunk) on the next
             // `input.chunk()` call.
-            input.consume(moved.consumed);
-            output.commit(moved.written).map_err(DriveError::Sink)?;
+            if moved.consumed > 0 {
+                input.consume(moved.consumed);
+            }
+            if moved.written > 0 {
+                output.commit(moved.written).map_err(DriveError::Sink)?;
+            }
             consumed += moved.consumed;
             written += moved.written;
             if moved.end == EndCapableStepEnd::End {
@@ -374,7 +378,9 @@ impl<C: TerminatingCodec> Pump<C> {
                 }
             }
             .map_err(DriveError::Codec)?;
-            output.commit(moved.written).map_err(DriveError::Sink)?;
+            if moved.written > 0 {
+                output.commit(moved.written).map_err(DriveError::Sink)?;
+            }
             written += moved.written;
             if moved.end == DrainEnd::Done {
                 return Ok(PumpDrainTransfer {
