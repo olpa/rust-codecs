@@ -185,6 +185,9 @@ impl<C: TerminatingCodec> Pump<C> {
         Self { codec, done: false }
     }
 
+    /// Lets a caller like `shared_io::pump_read` short-circuit to a
+    /// no-op once the stream has ended, instead of re-entering
+    /// `transfer_from`/`finish_to` on every repeated call past EOF.
     pub(crate) fn is_done(&self) -> bool {
         self.done
     }
