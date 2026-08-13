@@ -11,7 +11,7 @@
 //! bytes an ended `second` never got to. A future terminating
 //! composition would need its own, separate design.
 
-use crate::drive::{codec_step, DrainOp, DrainStop};
+use crate::step::{codec_step, DrainOp, DrainStop};
 use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of

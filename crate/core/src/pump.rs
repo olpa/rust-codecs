@@ -9,12 +9,12 @@
 //! [`TerminatingCodec::process`](crate::TerminatingCodec::process)
 //! reports only the counts not already implied by its outcome: all
 //! input was consumed, all output was filled, or the stream ended.
-//! [`crate::drive::terminating_step`] validates that report and
+//! [`crate::step::terminating_step`] validates that report and
 //! normalizes it into exact progress on both sides — the trust
 //! boundary every `Pump::process` call and [`stream_to_stream`] call
 //! goes through.
 
-use crate::drive::{terminating_step, DrainOp, DrainStop, TerminatingStep, TerminatingStepEnd};
+use crate::step::{terminating_step, DrainOp, DrainStop, TerminatingStep, TerminatingStepEnd};
 use crate::{Error, TerminatingCodec};
 
 /// A byte source which lends its current input chunk to the pump.
@@ -408,7 +408,7 @@ impl<C: TerminatingCodec> Pump<C> {
 #[cfg(test)]
 mod tests {
     use super::{DrainEnd, Pump, TerminatingStepEnd, TerminatingStep, PumpEnd};
-    use crate::drive::terminating_step;
+    use crate::step::terminating_step;
     use crate::{
         Codec, Drain, DrainCodec, DriveError, Error, ErrorKind, Progress, Sink, Source,
         TerminatingCodec, TerminatingProgress,
