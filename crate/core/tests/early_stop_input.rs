@@ -10,6 +10,10 @@
 //! segments of one input — something `Pump` doesn't allow, since it
 //! latches permanently after the first `End`. The driver (this test)
 //! is responsible for skipping the quote byte itself between calls.
+//!
+//! The last test stresses the same tokenizer over a [`CodecSource`],
+//! a base64 decoder wrapped around [`TwoByteSource`], turning the
+//! codec's own output into a `Source`.
 
 use core::convert::Infallible;
 
@@ -38,7 +42,10 @@ impl TerminatingCodec for QuoteEnd {
             Ok(TerminatingProgress::OutputFilled { consumed: n })
         } else if quote_pos.is_some() {
             // Reached the quote; it's left unconsumed for the driver to deal with.
-            Ok(TerminatingProgress::End { consumed: n, written: n })
+            Ok(TerminatingProgress::End {
+                consumed: n,
+                written: n,
+            })
         } else {
             // Consumed all of input; no quote in sight.
             Ok(TerminatingProgress::InputConsumed { written: n })
@@ -76,7 +83,13 @@ fn drives_three_segments_across_two_early_stops() {
     // Confirm it's actually stuck: calling again with the quote still
     // at the front makes zero progress on either side.
     let progress = codec.process(&input[pos..], &mut output).unwrap();
-    assert_eq!(progress, TerminatingProgress::End { consumed: 0, written: 0 });
+    assert_eq!(
+        progress,
+        TerminatingProgress::End {
+            consumed: 0,
+            written: 0
+        }
+    );
 
     // The driver's move: skip the delimiter itself, since the codec
     // never will.
@@ -95,7 +108,13 @@ fn drives_three_segments_across_two_early_stops() {
 
     // Same check at the closing quote: stuck again, zero progress.
     let progress = codec.process(&input[pos..], &mut output).unwrap();
-    assert_eq!(progress, TerminatingProgress::End { consumed: 0, written: 0 });
+    assert_eq!(
+        progress,
+        TerminatingProgress::End {
+            consumed: 0,
+            written: 0
+        }
+    );
 
     pos += 1;
 
@@ -192,7 +211,13 @@ struct TwoByteSource<'a> {
 
 impl<'a> TwoByteSource<'a> {
     fn new(input: &'a [u8]) -> Self {
-        Self { input, pos: 0, buf: [0; 2], buf_len: 0, buf_pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            buf: [0; 2],
+            buf_len: 0,
+            buf_pos: 0,
+        }
     }
 }
 
@@ -248,26 +273,20 @@ fn read_span<S: Source>(source: &mut S) -> Result<SpanEnd, S::Error> {
     }
 }
 
-/// Same tokenizer as [`tokenizes_a_string_array_literal`], same input
-/// value, but reading through one [`TwoByteSource`] for the *whole*
-/// input — created once, before the loop even starts — instead of a
-/// fresh [`SliceSource`] per quoted span. The outer scan and every
-/// `stream_to_stream` call take turns advancing it: `stream_to_stream`
-/// borrows it just for the quoted content, and because it only ever
-/// takes `&mut Source` (never owns it), control returns to the outer
-/// scan afterward with the source picking up exactly where `QuoteEnd`
-/// left off — the closing quote still sitting unconsumed at the
-/// front, ready for `read_span`'s next `chunk()` call to see. Nothing
-/// about `Source`/`stream_to_stream` needed to change to make this
-/// work.
-#[test]
-fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
-    let input = br#"let a = ["s1", "s2", "s3"];"#;
-    let mut source = TwoByteSource::new(input);
+/// The tokenizing loop shared by every test below that reads through a
+/// [`Source`] rather than indexing a `&[u8]` directly: scan spans with
+/// [`read_span`], hand quoted content to `QuoteEnd` via
+/// `stream_to_stream`, and push the quote bytes themselves in between
+/// — `source` picks up exactly where each step left off, since nothing
+/// here ever takes ownership of it.
+fn tokenize_string_array_literal<S: Source>(source: &mut S) -> Vec<(&'static str, String)>
+where
+    S::Error: core::fmt::Debug,
+{
     let mut tokens: Vec<(&str, String)> = Vec::new();
 
     loop {
-        let span = match read_span(&mut source).unwrap() {
+        let span = match read_span(source).unwrap() {
             SpanEnd::Quote(span) => span,
             SpanEnd::Eof(span) => {
                 if !span.is_empty() {
@@ -288,7 +307,7 @@ fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
 
         // Same source, handed to stream_to_stream just for this span.
         let mut sink = VecSink::default();
-        stream_to_stream(&mut source, quote_end(), &mut sink).unwrap();
+        stream_to_stream(source, quote_end(), &mut sink).unwrap();
         let string_token = String::from_utf8(sink.into_inner()).unwrap();
         tokens.push(("string", string_token));
 
@@ -299,6 +318,13 @@ fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
         tokens.push(("quote", "\"".to_string()));
     }
 
+    tokens
+}
+
+/// The token stream every test below expects, decoded from `let a =
+/// ["s1", "s2", "s3"];` regardless of which `Source` produced those
+/// bytes.
+fn assert_string_array_literal_tokens(tokens: Vec<(&str, String)>) {
     let expected: Vec<(&str, String)> = vec![
         ("span", "let a = [".to_string()),
         ("quote", "\"".to_string()),
@@ -315,4 +341,92 @@ fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
         ("span", "];".to_string()),
     ];
     assert_eq!(tokens, expected);
+}
+
+/// Same tokenizer as [`tokenizes_a_string_array_literal`], same input
+/// value, but reading through one [`TwoByteSource`] for the *whole*
+/// input — created once, before the loop even starts — instead of a
+/// fresh [`SliceSource`] per quoted span. The outer scan and every
+/// `stream_to_stream` call take turns advancing it: `stream_to_stream`
+/// borrows it just for the quoted content, and because it only ever
+/// takes `&mut Source` (never owns it), control returns to the outer
+/// scan afterward with the source picking up exactly where `QuoteEnd`
+/// left off — the closing quote still sitting unconsumed at the
+/// front, ready for `read_span`'s next `chunk()` call to see. Nothing
+/// about `Source`/`stream_to_stream` needed to change to make this
+/// work.
+#[test]
+fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
+    let input = br#"let a = ["s1", "s2", "s3"];"#;
+    let mut source = TwoByteSource::new(input);
+    let tokens = tokenize_string_array_literal(&mut source);
+    assert_string_array_literal_tokens(tokens);
+}
+
+/// The same tokenizer and expected output again, but now `source`
+/// isn't reading plaintext at all — [`CodecSource`] decodes base64 on
+/// the fly, through a 2-byte scratch buffer, over a [`TwoByteSource`]
+/// that hands out the *encoded* bytes 2 at a time. Two narrow windows
+/// stacked on each other: `TwoByteSource` stresses `Base64Dec`'s own
+/// input handling, and `CodecSource`'s 2-byte decode buffer (smaller
+/// than `Base64Dec`'s 3-byte atomic output group) stresses its
+/// `Carry`. Neither `read_span` nor `tokenize_string_array_literal`
+/// know or care that they're reading through a codec instead of raw
+/// bytes.
+#[test]
+fn tokenizes_a_string_array_literal_from_a_base64_decoded_two_byte_source() {
+    use rust_codecs_core::base64::base64_dec;
+
+    let encoded = b"bGV0IGEgPSBbInMxIiwgInMyIiwgInMzIl07";
+    let mut source: CodecSource<_, _, 2> =
+        CodecSource::new(TwoByteSource::new(encoded), base64_dec());
+    let tokens = tokenize_string_array_literal(&mut source);
+    assert_string_array_literal_tokens(tokens);
+}
+
+/// Wraps a [`Source`] with a codec, decoding through an owned,
+/// fixed-size scratch buffer of `N` bytes — turning the codec's output
+/// into a `Source` in its own right. Built on [`Pump`]/`pump_read`,
+/// the same pieces `std_io`/`embedded_io`'s own `CodecReader` uses
+/// internally to do the equivalent for `std::io::Read`/
+/// `embedded_io::Read`; see `CREATING-IO-BACKENDS.md` for the general
+/// pattern.
+struct CodecSource<I: Source, C: TerminatingCodec, const N: usize> {
+    inner: I,
+    pump: rust_codecs_core::Pump<C>,
+    buf: [u8; N],
+    pos: usize,
+    len: usize,
+}
+
+impl<I: Source, C: TerminatingCodec, const N: usize> CodecSource<I, C, N> {
+    fn new(inner: I, codec: C) -> Self {
+        Self {
+            inner,
+            pump: rust_codecs_core::Pump::new(codec),
+            buf: [0; N],
+            pos: 0,
+            len: 0,
+        }
+    }
+}
+
+impl<I: Source, C: TerminatingCodec, const N: usize> Source for CodecSource<I, C, N> {
+    type Error = rust_codecs_core::DriveError<I::Error, Infallible>;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        if self.pos == self.len {
+            self.len = rust_codecs_core::sources_and_sinks::shared_io::pump_read(
+                &mut self.pump,
+                &mut self.inner,
+                &mut self.buf,
+            )?;
+            self.pos = 0;
+        }
+        Ok((self.pos < self.len).then_some(&self.buf[self.pos..self.len]))
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.pos += amount;
+    }
 }
