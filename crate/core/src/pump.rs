@@ -128,7 +128,7 @@ where
 /// `output` is always exactly one [`Sink::spare`] slice, so "the
 /// buffer filled" and "the sink ran out of room this round" coincide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DrainStep {
+pub(crate) struct PumpDrainStep {
     pub(crate) written: usize,
     pub(crate) end: DrainEnd,
 }
@@ -364,18 +364,18 @@ impl<C: TerminatingCodec> Pump<C> {
     /// Dispatch to [`Pump::finish`] or [`Pump::flush`] by `op` — the
     /// `drain_to` loop's counterpart to [`DrainOp::step`] dispatching
     /// to `DrainCodec::finish`/`DrainCodec::flush`, one layer up.
-    fn finish_or_flush(&mut self, output: &mut [u8], op: DrainOp) -> Result<DrainStep, Error> {
+    fn finish_or_flush(&mut self, output: &mut [u8], op: DrainOp) -> Result<PumpDrainStep, Error> {
         match op {
             DrainOp::Finish => self.finish(output),
             DrainOp::Flush => self.flush(output),
         }
     }
 
-    pub(crate) fn finish(&mut self, output: &mut [u8]) -> Result<DrainStep, Error> {
+    pub(crate) fn finish(&mut self, output: &mut [u8]) -> Result<PumpDrainStep, Error> {
         self.drain(output, DrainOp::Finish)
     }
 
-    pub(crate) fn flush(&mut self, output: &mut [u8]) -> Result<DrainStep, Error> {
+    pub(crate) fn flush(&mut self, output: &mut [u8]) -> Result<PumpDrainStep, Error> {
         self.drain(output, DrainOp::Flush)
     }
 
@@ -387,15 +387,15 @@ impl<C: TerminatingCodec> Pump<C> {
     /// repeats of itself, but that doesn't license skipping `process`
     /// or `flush` afterward (point 6), so a `Done` from `self.codec`
     /// is never latched into `self.done` — only reported.
-    fn drain(&mut self, output: &mut [u8], op: DrainOp) -> Result<DrainStep, Error> {
+    fn drain(&mut self, output: &mut [u8], op: DrainOp) -> Result<PumpDrainStep, Error> {
         if self.done {
-            return Ok(DrainStep {
+            return Ok(PumpDrainStep {
                 written: 0,
                 end: DrainEnd::Done,
             });
         }
         let step = op.step(&mut self.codec, output)?;
-        Ok(DrainStep {
+        Ok(PumpDrainStep {
             written: step.written,
             end: match step.stop {
                 DrainStop::OutputFilled => DrainEnd::SinkExhausted,
