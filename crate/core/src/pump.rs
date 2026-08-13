@@ -48,6 +48,10 @@ pub trait Sink {
     type Error;
 
     /// Return writable space, or `None` when the destination is full.
+    ///
+    /// A caller is never required to commit any of it before calling
+    /// `spare` again — an uncommitted call may simply be re-issued,
+    /// returning the same (or an equivalent) span.
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
 
     /// Commit the first `amount` bytes of the space returned by `spare`.
@@ -228,7 +232,9 @@ impl<C: TerminatingCodec> Pump<C> {
     /// is a stall — the sink offered an empty (but `Some`) slice and
     /// the codec couldn't do anything with it — and is reported as
     /// `DriveError::NoProgress`, the same as a codec error, both of
-    /// which abort the loop after committing zero bytes to the sink.
+    /// which abort the loop without committing anything to the sink;
+    /// its uncommitted `spare` is simply left for the next caller to
+    /// re-request.
     pub(crate) fn transfer_from<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
@@ -240,10 +246,7 @@ impl<C: TerminatingCodec> Pump<C> {
             // Invariants at top of loop: `consumed`/`written` are the
             // committed totals from prior iterations only (this
             // iteration hasn't moved anything yet); the codec hasn't
-            // reported `End` (that returns immediately); neither
-            // `input` nor `output` holds a chunk/spare left over from a
-            // prior iteration (each iteration either resolves what it
-            // borrowed via `latched_step`, or commits 0 before returning).
+            // reported `End` (that returns immediately).
             let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
                 return Ok(PumpTransfer {
                     consumed,
@@ -273,14 +276,8 @@ impl<C: TerminatingCodec> Pump<C> {
                 {
                     moved
                 }
-                Ok(_) => {
-                    output.commit(0).map_err(DriveError::Sink)?;
-                    return Err(DriveError::NoProgress);
-                }
-                Err(error) => {
-                    output.commit(0).map_err(DriveError::Sink)?;
-                    return Err(DriveError::Codec(error));
-                }
+                Ok(_) => return Err(DriveError::NoProgress),
+                Err(error) => return Err(DriveError::Codec(error)),
             };
             // `moved.consumed` may be less than `chunk.len()` (output
             // ran out first); the unconsumed remainder isn't lost —
@@ -346,8 +343,9 @@ impl<C: TerminatingCodec> Pump<C> {
     /// result right alongside the error case, not by rejecting an
     /// empty spare slice up front — so a codec that happens to have
     /// nothing left to write against an empty buffer still completes
-    /// normally. A codec error commits zero bytes to the sink before
-    /// propagating.
+    /// normally. Neither case commits anything to the sink before
+    /// propagating; the uncommitted `spare` is simply left for the
+    /// next caller to re-request.
     fn drain_to<O: Sink>(
         &mut self,
         output: &mut O,
@@ -358,14 +356,8 @@ impl<C: TerminatingCodec> Pump<C> {
             let moved = match output.spare().map_err(DriveError::Sink)? {
                 Some(spare) => match self.finish_or_flush(spare, op) {
                     Ok(moved) if moved.written > 0 || moved.end == DrainEnd::Done => Ok(moved),
-                    Ok(_) => {
-                        output.commit(0).map_err(DriveError::Sink)?;
-                        return Err(DriveError::NoProgress);
-                    }
-                    Err(error) => {
-                        output.commit(0).map_err(DriveError::Sink)?;
-                        return Err(DriveError::Codec(error));
-                    }
+                    Ok(_) => return Err(DriveError::NoProgress),
+                    Err(error) => return Err(DriveError::Codec(error)),
                 },
                 None => {
                     let moved = self

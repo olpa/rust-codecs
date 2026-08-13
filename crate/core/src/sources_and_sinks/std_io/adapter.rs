@@ -86,7 +86,6 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
     type Error = std::io::Error;
 
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
-        assert_eq!(self.offered, 0, "commit must follow spare");
         self.offered = self.buffer.as_mut().len();
         Ok(Some(self.buffer.as_mut()))
     }

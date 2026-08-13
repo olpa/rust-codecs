@@ -87,7 +87,6 @@ impl Sink for VecSink {
     type Error = Infallible;
 
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
-        assert_eq!(self.offered, 0, "commit must follow spare");
         if self.inner.spare_capacity_mut().is_empty() {
             self.inner.reserve(self.grow_by);
         }
