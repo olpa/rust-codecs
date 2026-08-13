@@ -11,7 +11,7 @@
 //! input was consumed, all output was filled, or the stream ended.
 //! [`crate::step::end_capable_step`] validates that report and
 //! normalizes it into exact progress on both sides — the trust
-//! boundary every `Pump::process` call and [`stream_to_stream`] call
+//! boundary every `Pump::latched_step` call and [`stream_to_stream`] call
 //! goes through.
 
 use crate::step::{end_capable_step, DrainOp, DrainStop, EndCapableStep, EndCapableStepEnd};
@@ -190,7 +190,7 @@ impl<C: TerminatingCodec> Pump<C> {
         self.done
     }
 
-    pub(crate) fn process(
+    pub(crate) fn latched_step(
         &mut self,
         input: &[u8],
         output: &mut [u8],
@@ -215,7 +215,7 @@ impl<C: TerminatingCodec> Pump<C> {
     /// offer.
     ///
     /// Each loop iteration fetches one chunk from `input`, then one
-    /// spare slice from `output`, calls [`Pump::process`] once, then
+    /// spare slice from `output`, calls [`Pump::latched_step`] once, then
     /// feeds the result back (`input.consume`, `output.commit`).
     ///
     /// Returns once one of three things happens: the source is
@@ -241,7 +241,7 @@ impl<C: TerminatingCodec> Pump<C> {
             // reported `End` (that returns immediately); neither
             // `input` nor `output` holds a chunk/spare left over from a
             // prior iteration (each iteration either resolves what it
-            // borrowed via `process`, or commits 0 before returning).
+            // borrowed via `latched_step`, or commits 0 before returning).
             let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
                 return Ok(PumpTransfer {
                     consumed,
@@ -263,7 +263,7 @@ impl<C: TerminatingCodec> Pump<C> {
             // result, right alongside the error case: zero bytes moved
             // on both sides, without ending the stream, means this
             // pair genuinely can't advance.
-            let moved = match self.process(chunk, spare) {
+            let moved = match self.latched_step(chunk, spare) {
                 Ok(moved)
                     if moved.consumed > 0
                         || moved.written > 0
@@ -411,11 +411,11 @@ impl<C: TerminatingCodec> Pump<C> {
     }
 
     /// Shared engine behind [`Pump::finish`]/[`Pump::flush`]:
-    /// `self.done` is only ever set by [`Pump::process`] reaching a
+    /// `self.done` is only ever set by [`Pump::latched_step`] reaching a
     /// genuine `TerminatingProgress::End` (contract point 4 — pinned
     /// forever, across every method). Reaching `Drain::Done` here is
     /// governed by point 3 instead: `finish` is idempotent against
-    /// repeats of itself, but that doesn't license skipping `process`
+    /// repeats of itself, but that doesn't license skipping `latched_step`
     /// or `flush` afterward (point 6), so a `Done` from `self.codec`
     /// is never latched into `self.done` — only reported.
     fn drain(&mut self, output: &mut [u8], op: DrainOp) -> Result<PumpDrainStep, Error> {
@@ -557,7 +557,7 @@ mod tests {
             process: TerminatingProgress::OutputFilled { consumed: 2 },
             drain: Drain::Done { written: 0 },
         });
-        let moved = pump.process(b"abc", &mut [0; 4]).unwrap();
+        let moved = pump.latched_step(b"abc", &mut [0; 4]).unwrap();
         assert_eq!(moved.consumed, 2);
         assert_eq!(moved.written, 4);
         assert_eq!(moved.end, EndCapableStepEnd::OutputExhausted);
@@ -572,10 +572,10 @@ mod tests {
             },
             drain: Drain::OutputFilled,
         });
-        pump.process(b"abc", &mut [0; 4]).unwrap();
+        pump.latched_step(b"abc", &mut [0; 4]).unwrap();
         assert!(pump.is_done());
         assert_eq!(pump.finish(&mut []).unwrap().end, DrainEnd::Done);
-        let repeated = pump.process(b"trailing", &mut [0; 4]).unwrap();
+        let repeated = pump.latched_step(b"trailing", &mut [0; 4]).unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
         assert_eq!(repeated.end, EndCapableStepEnd::End);
@@ -593,10 +593,10 @@ mod tests {
         assert!(!filled.is_done());
 
         // `finish` reaching `Done` is only point-3 self-idempotency,
-        // not a point-4 pin — `process` must still be free to run
+        // not a point-4 pin — `latched_step` must still be free to run
         // normally afterward (point 6), so `is_done()` stays false and
         // the codec, not a synthetic `End`, answers the next
-        // `process` call.
+        // `latched_step` call.
         let mut done = Pump::new(Scripted {
             process: TerminatingProgress::InputConsumed { written: 5 },
             drain: Drain::Done { written: 2 },
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, DrainEnd::Done);
         assert!(!done.is_done());
-        let resumed = done.process(b"abc", &mut [0; 8]).unwrap();
+        let resumed = done.latched_step(b"abc", &mut [0; 8]).unwrap();
         assert_eq!(resumed.written, 5);
     }
 
