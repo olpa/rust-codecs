@@ -185,7 +185,6 @@ impl<C: TerminatingCodec> Pump<C> {
         Self { codec, done: false }
     }
 
-    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     pub(crate) fn is_done(&self) -> bool {
         self.done
     }
@@ -316,7 +315,6 @@ impl<C: TerminatingCodec> Pump<C> {
         self.drain_to(output, DrainOp::Finish)
     }
 
-    #[cfg_attr(not(any(feature = "std", feature = "embedded-io")), allow(dead_code))]
     pub(crate) fn flush_to<O: Sink>(
         &mut self,
         output: &mut O,

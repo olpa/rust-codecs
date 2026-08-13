@@ -23,5 +23,4 @@ pub mod slice;
 #[cfg(feature = "alloc")]
 pub mod vec;
 
-#[cfg(any(feature = "embedded-io", feature = "std"))]
 pub mod shared_io;
