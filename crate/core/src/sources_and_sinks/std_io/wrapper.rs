@@ -208,6 +208,19 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
         Ok(self.output.into_inner())
     }
+
+    /// Reclaim the writer, the codec, and the scratch buffer without
+    /// finishing the codec stream — e.g. to read state the codec holds
+    /// (a checksum, a digest) after an error, or to reuse the buffer's
+    /// allocation for another `CodecWriter`. Same caveat as dropping
+    /// without calling `finish`: any trailer/padding/checksum bytes the
+    /// codec was still holding are discarded, and any output already
+    /// staged in the buffer via a prior `write`/`flush` but not yet
+    /// written to the wrapped writer is discarded too.
+    pub fn into_parts(self) -> (W, C, S) {
+        let (inner, buffer) = self.output.into_parts();
+        (inner, self.pump.into_inner(), buffer)
+    }
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {

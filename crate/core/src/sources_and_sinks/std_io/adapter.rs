@@ -39,7 +39,10 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
 
     /// Reclaim both the reader and the scratch buffer, e.g. to reuse
     /// the buffer's allocation for another `StdSource`. `into_inner`
-    /// drops the buffer; this is the exhaustive teardown.
+    /// drops the buffer; this is the exhaustive teardown. Any buffered,
+    /// unconsumed bytes (already read from `inner` into the buffer via
+    /// `chunk`, but not yet passed to `consume`) are discarded along
+    /// with it.
     pub fn into_parts(self) -> (R, S) {
         (self.inner, self.buffer)
     }
@@ -98,7 +101,9 @@ impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
 
     /// Reclaim both the writer and the scratch buffer, e.g. to reuse
     /// the buffer's allocation for another `StdSink`. `into_inner`
-    /// drops the buffer; this is the exhaustive teardown.
+    /// drops the buffer; this is the exhaustive teardown. Any bytes
+    /// staged in the buffer via `spare` but not yet handed to `commit`
+    /// are discarded along with it, and are not written to `inner`.
     pub fn into_parts(self) -> (W, S) {
         (self.inner, self.buffer)
     }
