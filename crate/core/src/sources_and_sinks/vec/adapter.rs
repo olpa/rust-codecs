@@ -111,6 +111,14 @@ impl Sink for VecSink {
         }
         let spare = self.inner.spare_capacity_mut();
         self.offered = spare.len();
+        // DESIGN: codecs are trusted, cooperative extensions of this
+        // high-performance library. In particular, a codec must initialize
+        // every byte it reports as written. Deliberately do not zero this
+        // spare capacity: avoiding that initialization is the reason this
+        // adapter writes into `Vec` allocation directly. Treat a codec that
+        // claims unwritten bytes as outside the supported safety contract,
+        // not as an adversarial implementation this adapter must defend
+        // against.
         // SAFETY: this deliberately lends uninitialized `u8` storage to
         // `Codec::process`/`finish`. The codec contract permits claiming
         // only the prefix it initialized; `commit` is the sole operation
