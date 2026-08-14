@@ -130,7 +130,7 @@ where
 }
 
 /// Exact progress and boundary of one validated `finish` or `flush`
-/// call, as reported by [`Pump::finish`]/[`Pump::flush`] — renames
+/// call, as reported by [`Pump::finish_or_flush_step`] — renames
 /// [`DrainStop`] to `SinkExhausted`/`Done`, since at this layer
 /// `output` is always exactly one [`Sink::spare`] slice, so "the
 /// buffer filled" and "the sink ran out of room this round" coincide.
@@ -302,8 +302,8 @@ impl<C: TerminatingCodec> Pump<C> {
     }
 
     /// Drain the codec's trailing output by repeatedly calling
-    /// [`Pump::finish`] against spare space taken from `output`,
-    /// until the codec reports `Done`.
+    /// [`Pump::finish_or_flush_step`] against spare space taken from
+    /// `output`, until the codec reports `Done`.
     ///
     /// This is the finalizing counterpart to `transfer_from`: it is
     /// called once the source is exhausted, to flush whatever bytes
@@ -327,9 +327,9 @@ impl<C: TerminatingCodec> Pump<C> {
     }
 
     /// Shared loop behind `finish_to`/`flush_to`: repeatedly obtain
-    /// spare space from `output` and hand it to [`Pump::finish`] (if
-    /// `op` is `DrainOp::Finish`) or [`Pump::flush`] (otherwise),
-    /// committing what was written, until the codec reports `Done`.
+    /// spare space from `output` and hand it to
+    /// [`Pump::finish_or_flush_step`], committing what was written,
+    /// until the codec reports `Done`.
     ///
     /// When `output.spare()` returns `None`, the sink has no room —
     /// but rather than immediately reporting `SinkExhausted`, one more
@@ -358,14 +358,14 @@ impl<C: TerminatingCodec> Pump<C> {
         let mut written = 0;
         loop {
             let moved = match output.spare().map_err(DriveError::Sink)? {
-                Some(spare) => match self.finish_or_flush(spare, op) {
+                Some(spare) => match self.finish_or_flush_step(spare, op) {
                     Ok(moved) if moved.written > 0 || moved.end == DrainEnd::Done => Ok(moved),
                     Ok(_) => return Err(DriveError::NoProgress),
                     Err(error) => return Err(DriveError::Codec(error)),
                 },
                 None => {
                     let moved = self
-                        .finish_or_flush(&mut [], op)
+                        .finish_or_flush_step(&mut [], op)
                         .map_err(DriveError::Codec)?;
                     return Ok(PumpDrainTransfer {
                         written,
@@ -391,33 +391,20 @@ impl<C: TerminatingCodec> Pump<C> {
         }
     }
 
-    /// Dispatch to [`Pump::finish`] or [`Pump::flush`] by `op` — the
-    /// `drain_to` loop's counterpart to [`DrainOp::step`] dispatching
-    /// to `DrainCodec::finish`/`DrainCodec::flush`, one layer up.
-    fn finish_or_flush(&mut self, output: &mut [u8], op: DrainOp) -> Result<PumpDrainStep, Error> {
-        match op {
-            DrainOp::Finish => self.finish(output),
-            DrainOp::Flush => self.flush(output),
-        }
-    }
-
-    pub(crate) fn finish(&mut self, output: &mut [u8]) -> Result<PumpDrainStep, Error> {
-        self.drain(output, DrainOp::Finish)
-    }
-
-    pub(crate) fn flush(&mut self, output: &mut [u8]) -> Result<PumpDrainStep, Error> {
-        self.drain(output, DrainOp::Flush)
-    }
-
-    /// Shared engine behind [`Pump::finish`]/[`Pump::flush`]:
-    /// `self.done` is only ever set by [`Pump::latched_step`] reaching a
-    /// genuine `TerminatingProgress::End` (contract point 4 — pinned
+    /// Run one `finish`/`flush` call against `output`, selecting which
+    /// by `op` — the `drain_to` loop's counterpart to [`DrainOp::step`]
+    /// dispatching to `DrainCodec::finish`/`DrainCodec::flush`, one
+    /// layer up.
+    ///
+    /// `self.done` is only ever set by [`Pump::latched_step`] reaching
+    /// a genuine `TerminatingProgress::End` (contract point 4 — pinned
     /// forever, across every method). Reaching `Drain::Done` here is
-    /// governed by point 3 instead: `finish` is idempotent against
-    /// repeats of itself, but that doesn't license skipping `latched_step`
-    /// or `flush` afterward (point 6), so a `Done` from `self.codec`
-    /// is never latched into `self.done` — only reported.
-    fn drain(&mut self, output: &mut [u8], op: DrainOp) -> Result<PumpDrainStep, Error> {
+    /// governed by point 3 instead: this call is idempotent against
+    /// repeats of itself, but that doesn't license skipping
+    /// `latched_step` or a call with the other `op` afterward (point
+    /// 6), so a `Done` from `self.codec` is never latched into
+    /// `self.done` — only reported.
+    fn finish_or_flush_step(&mut self, output: &mut [u8], op: DrainOp) -> Result<PumpDrainStep, Error> {
         if self.done {
             return Ok(PumpDrainStep {
                 written: 0,
@@ -438,7 +425,7 @@ impl<C: TerminatingCodec> Pump<C> {
 #[cfg(test)]
 mod tests {
     use super::{DrainEnd, Pump, PumpEnd, EndCapableStep, EndCapableStepEnd};
-    use crate::step::end_capable_step;
+    use crate::step::{end_capable_step, DrainOp};
     use crate::{
         Codec, Drain, DrainCodec, DriveError, Error, ErrorKind, Progress, Sink, Source,
         TerminatingCodec, TerminatingProgress,
@@ -573,7 +560,7 @@ mod tests {
         });
         pump.latched_step(b"abc", &mut [0; 4]).unwrap();
         assert!(pump.is_done());
-        assert_eq!(pump.finish(&mut []).unwrap().end, DrainEnd::Done);
+        assert_eq!(pump.finish_or_flush_step(&mut [], DrainOp::Finish).unwrap().end, DrainEnd::Done);
         let repeated = pump.latched_step(b"trailing", &mut [0; 4]).unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
@@ -586,12 +573,12 @@ mod tests {
             process: TerminatingProgress::InputConsumed { written: 0 },
             drain: Drain::OutputFilled,
         });
-        let moved = filled.finish(&mut [0; 3]).unwrap();
+        let moved = filled.finish_or_flush_step(&mut [0; 3], DrainOp::Finish).unwrap();
         assert_eq!(moved.written, 3);
         assert_eq!(moved.end, DrainEnd::SinkExhausted);
         assert!(!filled.is_done());
 
-        // `finish` reaching `Done` is only point-3 self-idempotency,
+        // `finish_or_flush_step` reaching `Done` is only point-3 self-idempotency,
         // not a point-4 pin — `latched_step` must still be free to run
         // normally afterward (point 6), so `is_done()` stays false and
         // the codec, not a synthetic `End`, answers the next
@@ -600,7 +587,7 @@ mod tests {
             process: TerminatingProgress::InputConsumed { written: 5 },
             drain: Drain::Done { written: 2 },
         });
-        let moved = done.finish(&mut [0; 3]).unwrap();
+        let moved = done.finish_or_flush_step(&mut [0; 3], DrainOp::Finish).unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, DrainEnd::Done);
         assert!(!done.is_done());
@@ -614,7 +601,7 @@ mod tests {
             process: TerminatingProgress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 2 },
         });
-        let moved = pump.flush(&mut [0; 3]).unwrap();
+        let moved = pump.finish_or_flush_step(&mut [0; 3], DrainOp::Flush).unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, DrainEnd::Done);
         assert!(!pump.is_done());
@@ -627,7 +614,7 @@ mod tests {
             drain: Drain::Done { written: 4 },
         });
         assert_eq!(
-            pump.finish(&mut [0; 3]),
+            pump.finish_or_flush_step(&mut [0; 3], DrainOp::Finish),
             Err(Error::new(ErrorKind::ContractViolation, 0, 0))
         );
     }
