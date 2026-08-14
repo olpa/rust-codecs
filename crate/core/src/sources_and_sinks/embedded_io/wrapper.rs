@@ -89,8 +89,25 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Direct access to the wrapped reader, bypassing the codec.
     /// Bytes already pulled from it into this reader's scratch buffer,
     /// but not yet yielded to the caller, aren't visible here.
+    pub fn get_ref(&self) -> &R {
+        self.input.get_ref()
+    }
+
+    /// Mutable counterpart to [`CodecReader::get_ref`].
     pub fn get_mut(&mut self) -> &mut R {
         self.input.get_mut()
+    }
+
+    /// Direct access to the codec — e.g. to read state a
+    /// `TerminatingCodec` call doesn't expose (a checksum, a digest)
+    /// once its stream has ended in-band.
+    pub fn codec_ref(&self) -> &C {
+        self.pump.get_ref()
+    }
+
+    /// Mutable counterpart to [`CodecReader::codec_ref`].
+    pub fn codec_mut(&mut self) -> &mut C {
+        self.pump.get_mut()
     }
 }
 
@@ -138,8 +155,25 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// `write`/`flush` (fresh, or right after `flush`/`finish`);
     /// writing here while the codec is mid-unit reorders bytes ahead of
     /// whatever it's still holding.
+    pub fn get_ref(&self) -> &W {
+        self.output.get_ref()
+    }
+
+    /// Mutable counterpart to [`CodecWriter::get_ref`].
     pub fn get_mut(&mut self) -> &mut W {
         self.output.get_mut()
+    }
+
+    /// Direct access to the codec — e.g. to read state a `Codec` call
+    /// doesn't expose (a checksum, a digest) before calling
+    /// [`CodecWriter::finish`].
+    pub fn codec_ref(&self) -> &C {
+        self.pump.get_ref()
+    }
+
+    /// Mutable counterpart to [`CodecWriter::codec_ref`].
+    pub fn codec_mut(&mut self) -> &mut C {
+        self.pump.get_mut()
     }
 
     /// Finish the codec stream, flush the endpoint, and return it.

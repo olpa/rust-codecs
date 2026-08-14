@@ -196,6 +196,23 @@ impl<C: TerminatingCodec> Pump<C> {
         Self { codec, done: false }
     }
 
+    /// Reach the wrapped codec, e.g. to read state a `TerminatingCodec`
+    /// call doesn't expose (a checksum, a digest) once the stream has
+    /// ended.
+    pub fn get_ref(&self) -> &C {
+        &self.codec
+    }
+
+    /// Mutable counterpart to [`Pump::get_ref`].
+    pub fn get_mut(&mut self) -> &mut C {
+        &mut self.codec
+    }
+
+    /// Unwrap the codec back out, discarding `Pump`'s lifecycle state.
+    pub fn into_inner(self) -> C {
+        self.codec
+    }
+
     /// Lets a caller like `shared_io::pump_read` short-circuit to a
     /// no-op once the stream has ended, instead of re-entering
     /// `transfer_from`/`finish_to` on every repeated call past EOF.

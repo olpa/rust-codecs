@@ -19,6 +19,14 @@ impl VecSource {
         Self { inner, pos: 0 }
     }
 
+    pub fn get_ref(&self) -> &alloc::vec::Vec<u8> {
+        &self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
+        &mut self.inner
+    }
+
     pub fn into_inner(self) -> alloc::vec::Vec<u8> {
         self.inner
     }
@@ -69,6 +77,17 @@ impl VecSink {
             offered: 0,
         }
     }
+
+    pub fn get_ref(&self) -> &alloc::vec::Vec<u8> {
+        &self.inner
+    }
+
+    // No `get_mut`: `commit`'s `unsafe { set_len }` trusts `self.offered`
+    // (captured at the last `spare` call) to still describe the vec's
+    // actual spare capacity. A caller reaching in via `&mut Vec<u8>`
+    // between `spare` and `commit` (e.g. `shrink_to_fit`) could
+    // invalidate that without tripping any check, turning `commit`
+    // into real unsoundness rather than a panic.
 
     pub fn into_inner(self) -> alloc::vec::Vec<u8> {
         self.inner

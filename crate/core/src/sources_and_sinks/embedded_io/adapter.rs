@@ -25,12 +25,16 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
         }
     }
 
-    pub fn into_inner(self) -> R {
-        self.inner
+    pub fn get_ref(&self) -> &R {
+        &self.inner
     }
 
     pub fn get_mut(&mut self) -> &mut R {
         &mut self.inner
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
     }
 }
 
@@ -73,12 +77,16 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
         }
     }
 
-    pub fn into_inner(self) -> W {
-        self.inner
+    pub fn get_ref(&self) -> &W {
+        &self.inner
     }
 
     pub fn get_mut(&mut self) -> &mut W {
         &mut self.inner
+    }
+
+    pub fn into_inner(self) -> W {
+        self.inner
     }
 }
 
