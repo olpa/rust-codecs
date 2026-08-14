@@ -179,6 +179,13 @@ pub(crate) struct PumpDrainTransfer {
 /// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io)'s
 /// `pump_read`/`pump_write`/`pump_finish`/`pump_flush` rather than
 /// calling its own methods directly — those stay crate-private.
+///
+/// `C` is generic, not fixed to `TerminatingCodec` itself, because a
+/// trait isn't a sized type a field can hold directly. The obvious
+/// fix, `Box<dyn TerminatingCodec>`, would require `alloc`
+/// unconditionally, breaking this crate's `no_std`-without-`alloc`
+/// support. Callers who want that trade-off can still get it without
+/// any change here, via `Pump<Box<dyn Codec>>`.
 pub struct Pump<C> {
     codec: C,
     done: bool,
@@ -404,7 +411,11 @@ impl<C: TerminatingCodec> Pump<C> {
     /// `latched_step` or a call with the other `op` afterward (point
     /// 6), so a `Done` from `self.codec` is never latched into
     /// `self.done` — only reported.
-    fn finish_or_flush_step(&mut self, output: &mut [u8], op: DrainOp) -> Result<PumpDrainStep, Error> {
+    fn finish_or_flush_step(
+        &mut self,
+        output: &mut [u8],
+        op: DrainOp,
+    ) -> Result<PumpDrainStep, Error> {
         if self.done {
             return Ok(PumpDrainStep {
                 written: 0,
@@ -424,7 +435,7 @@ impl<C: TerminatingCodec> Pump<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrainEnd, Pump, PumpEnd, EndCapableStep, EndCapableStepEnd};
+    use super::{DrainEnd, EndCapableStep, EndCapableStepEnd, Pump, PumpEnd};
     use crate::step::{end_capable_step, DrainOp};
     use crate::{
         Codec, Drain, DrainCodec, DriveError, Error, ErrorKind, Progress, Sink, Source,
@@ -523,6 +534,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "alloc")]
+    fn pump_accepts_a_boxed_trait_object_codec() {
+        let mut input = SliceSource {
+            bytes: b"abcdef",
+            pos: 0,
+        };
+        let mut output = NullSink;
+        let boxed: alloc::boxed::Box<dyn Codec> = alloc::boxed::Box::new(DropEverything);
+        let mut pump: Pump<alloc::boxed::Box<dyn Codec>> = Pump::new(boxed);
+        let moved = pump.transfer_from(&mut input, &mut output).unwrap();
+        assert_eq!(moved.consumed, 6);
+        assert_eq!(moved.written, 0);
+        assert_eq!(moved.end, PumpEnd::SourceExhausted);
+    }
+
+    #[test]
     fn a_pair_that_truly_cannot_progress_reports_no_progress() {
         let mut input = SliceSource {
             bytes: b"x",
@@ -560,7 +587,12 @@ mod tests {
         });
         pump.latched_step(b"abc", &mut [0; 4]).unwrap();
         assert!(pump.is_done());
-        assert_eq!(pump.finish_or_flush_step(&mut [], DrainOp::Finish).unwrap().end, DrainEnd::Done);
+        assert_eq!(
+            pump.finish_or_flush_step(&mut [], DrainOp::Finish)
+                .unwrap()
+                .end,
+            DrainEnd::Done
+        );
         let repeated = pump.latched_step(b"trailing", &mut [0; 4]).unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
@@ -573,7 +605,9 @@ mod tests {
             process: TerminatingProgress::InputConsumed { written: 0 },
             drain: Drain::OutputFilled,
         });
-        let moved = filled.finish_or_flush_step(&mut [0; 3], DrainOp::Finish).unwrap();
+        let moved = filled
+            .finish_or_flush_step(&mut [0; 3], DrainOp::Finish)
+            .unwrap();
         assert_eq!(moved.written, 3);
         assert_eq!(moved.end, DrainEnd::SinkExhausted);
         assert!(!filled.is_done());
@@ -587,7 +621,9 @@ mod tests {
             process: TerminatingProgress::InputConsumed { written: 5 },
             drain: Drain::Done { written: 2 },
         });
-        let moved = done.finish_or_flush_step(&mut [0; 3], DrainOp::Finish).unwrap();
+        let moved = done
+            .finish_or_flush_step(&mut [0; 3], DrainOp::Finish)
+            .unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, DrainEnd::Done);
         assert!(!done.is_done());
@@ -601,7 +637,9 @@ mod tests {
             process: TerminatingProgress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 2 },
         });
-        let moved = pump.finish_or_flush_step(&mut [0; 3], DrainOp::Flush).unwrap();
+        let moved = pump
+            .finish_or_flush_step(&mut [0; 3], DrainOp::Flush)
+            .unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, DrainEnd::Done);
         assert!(!pump.is_done());
