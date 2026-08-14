@@ -396,7 +396,7 @@ pub trait Codec: DrainCodec {
 /// call on an ordinary concrete codec can be ambiguous when both traits
 /// are in scope. Use Rust's fully qualified syntax in that case:
 ///
-/// ```ignore
+/// ```text
 /// Codec::process(&mut codec, input, output);
 /// TerminatingCodec::process(&mut codec, input, output);
 /// ```
