@@ -99,14 +99,7 @@ impl<E: Engine> DrainCodec for Base64Enc<E> {
             // The engine pads a final short group itself — that's why
             // partial groups are deferred to finish and never encoded
             // in process.
-            let (scratch, n) = {
-                let mut scratch = [0u8; ENCODED_GROUP];
-                let n = self
-                    .engine
-                    .encode_slice(&self.pending_group[..self.len], &mut scratch)
-                    .map_err(|_| Error::new(ErrorKind::Corrupt, 0, out_pos))?;
-                (scratch, n)
-            };
+            let (scratch, n) = self.encode_group(&self.pending_group[..self.len], 0, out_pos)?;
             self.len = 0;
             out_pos += self.carry.emit(&scratch[..n], &mut output[out_pos..]);
             if !self.carry.is_empty() {
