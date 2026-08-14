@@ -108,6 +108,18 @@ impl Error {
             written,
         }
     }
+
+    /// Check the progress carried by an error against the buffers used by
+    /// the failing call. Error progress crosses the same trust boundary as
+    /// successful progress and must not be allowed to advance endpoints
+    /// beyond the slices the codec received.
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Self, Self> {
+        if self.consumed <= input_len && self.written <= output_len {
+            Ok(self)
+        } else {
+            Err(Self::new(ErrorKind::ContractViolation, 0, 0))
+        }
+    }
 }
 
 impl Progress {
@@ -133,7 +145,11 @@ impl Progress {
 impl TerminatingProgress {
     /// The [`Progress::validated`] counterpart for
     /// [`TerminatingCodec::process`].
-    pub fn validated(self, input_len: usize, output_len: usize) -> Result<TerminatingProgress, Error> {
+    pub fn validated(
+        self,
+        input_len: usize,
+        output_len: usize,
+    ) -> Result<TerminatingProgress, Error> {
         let honest = match self {
             TerminatingProgress::InputConsumed { written } => written <= output_len,
             TerminatingProgress::OutputFilled { consumed } => consumed <= input_len,

@@ -301,7 +301,18 @@ impl<C: TerminatingCodec> Pump<C> {
                     moved
                 }
                 Ok(_) => return Err(DriveError::NoProgress),
-                Err(error) => return Err(DriveError::Codec(error)),
+                Err(error) => {
+                    let error = error
+                        .validated(chunk.len(), spare.len())
+                        .unwrap_or_else(|violation| violation);
+                    if error.consumed > 0 {
+                        input.consume(error.consumed);
+                    }
+                    if error.written > 0 {
+                        output.commit(error.written).map_err(DriveError::Sink)?;
+                    }
+                    return Err(DriveError::Codec(error));
+                }
             };
             // `moved.consumed` may be less than `chunk.len()` (output
             // ran out first); the unconsumed remainder isn't lost —
@@ -385,7 +396,15 @@ impl<C: TerminatingCodec> Pump<C> {
                 Some(spare) => match self.finish_or_flush_step(spare, op) {
                     Ok(moved) if moved.written > 0 || moved.end == DrainEnd::Done => Ok(moved),
                     Ok(_) => return Err(DriveError::NoProgress),
-                    Err(error) => return Err(DriveError::Codec(error)),
+                    Err(error) => {
+                        let error = error
+                            .validated(0, spare.len())
+                            .unwrap_or_else(|violation| violation);
+                        if error.written > 0 {
+                            output.commit(error.written).map_err(DriveError::Sink)?;
+                        }
+                        return Err(DriveError::Codec(error));
+                    }
                 },
                 None => {
                     let moved = self
@@ -520,6 +539,24 @@ mod tests {
         }
     }
 
+    struct RecordingSink {
+        bytes: [u8; 8],
+        written: usize,
+    }
+
+    impl Sink for RecordingSink {
+        type Error = core::convert::Infallible;
+
+        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+            Ok(Some(&mut self.bytes[self.written..]))
+        }
+
+        fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
+            self.written += amount;
+            Ok(())
+        }
+    }
+
     /// Consumes everything, writes nothing — e.g. a hash/checksum
     /// pass with no output stream at all.
     struct DropEverything;
@@ -548,6 +585,71 @@ mod tests {
         assert_eq!(moved.consumed, 6);
         assert_eq!(moved.written, 0);
         assert_eq!(moved.end, PumpEnd::SourceExhausted);
+    }
+
+    struct FailsAfterProgress;
+
+    impl DrainCodec for FailsAfterProgress {
+        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            output[0] = b'!';
+            Err(Error::new(ErrorKind::Corrupt, 0, 1))
+        }
+    }
+
+    impl Codec for FailsAfterProgress {
+        fn process(&mut self, _input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+            output[..2].copy_from_slice(b"ok");
+            Err(Error::new(ErrorKind::Corrupt, 1, 2))
+        }
+    }
+
+    #[test]
+    fn process_error_progress_is_applied_to_endpoints() {
+        let mut input = SliceSource {
+            bytes: b"abc",
+            pos: 0,
+        };
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsAfterProgress);
+
+        let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
+
+        assert_eq!(input.pos, 1);
+        assert_eq!(output.written, 2);
+        assert_eq!(&output.bytes[..2], b"ok");
+        assert!(matches!(
+            error,
+            DriveError::Codec(Error {
+                kind: ErrorKind::Corrupt,
+                consumed: 1,
+                written: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn finish_error_progress_is_committed() {
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsAfterProgress);
+
+        let error = pump.finish_to(&mut output).unwrap_err();
+
+        assert_eq!(output.written, 1);
+        assert_eq!(output.bytes[0], b'!');
+        assert!(matches!(
+            error,
+            DriveError::Codec(Error {
+                kind: ErrorKind::Corrupt,
+                consumed: 0,
+                written: 1
+            })
+        ));
     }
 
     #[test]
