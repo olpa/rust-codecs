@@ -192,10 +192,13 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-mod vocabulary;
-pub use vocabulary::{
+mod protocol;
+pub use protocol::{
     Codec, Drain, DrainCodec, Error, ErrorKind, Progress, TerminatingCodec, TerminatingProgress,
 };
+
+mod stream;
+pub use stream::{Sink, Source};
 
 mod carry;
 pub use carry::Carry;
@@ -203,7 +206,7 @@ pub use carry::Carry;
 mod step;
 
 mod pump;
-pub use pump::{stream_to_stream, DriveError, Pump, Sink, Source, Totals};
+pub use pump::{stream_to_stream, DriveError, Pump, Totals};
 
 mod chain;
 pub use chain::Chain;

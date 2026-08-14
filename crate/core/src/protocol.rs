@@ -2,6 +2,10 @@
 //! methods speak in: [`Progress`], [`TerminatingProgress`], [`Drain`],
 //! [`Error`]. See `CREATING-CODECS.md` for how to write a codec.
 
+// ----
+// Progress
+// ----
+
 /// Progress of one [`Codec::process`] call. Every variant states an
 /// invariant a driver can rely on without inspecting byte counts —
 /// "made no progress and can't say why" is not expressible.
@@ -46,6 +50,10 @@ impl From<Progress> for TerminatingProgress {
     }
 }
 
+// ----
+// Draining
+// ----
+
 /// Progress of one [`DrainCodec::finish`] or [`DrainCodec::flush`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drain {
@@ -57,6 +65,10 @@ pub enum Drain {
     /// this is the end of the stream; for `flush`, the sync point.
     Done { written: usize },
 }
+
+// ----
+// Errors and validation
+// ----
 
 /// What kind of failure a codec reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +188,10 @@ impl Drain {
         }
     }
 }
+
+// ----
+// Codec traits
+// ----
 
 /// Lifecycle operations shared by [`Codec`] and [`TerminatingCodec`]:
 /// signalling end-of-input and reaching a sync point.
@@ -397,6 +413,10 @@ impl<C: Codec> TerminatingCodec for C {
     }
 }
 
+// ----
+// Allocation-backed delegation
+// ----
+
 // Mirrors std's `impl<R: Read + ?Sized> Read for Box<R>`: lets a `Box<dyn
 // Codec>` (or a boxed concrete codec) stand in anywhere a `Codec` is
 // expected, e.g. to build a runtime-determined chain of codecs.
@@ -420,6 +440,10 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
         (**self).process(input, output)
     }
 }
+
+// ----
+// Tests
+// ----
 
 #[cfg(test)]
 mod tests {
