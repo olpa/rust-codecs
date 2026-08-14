@@ -1,5 +1,5 @@
-//! The [`Codec`]/[`TerminatingCodec`] traits and the vocabulary their
-//! methods speak in: [`Progress`], [`TerminatingProgress`], [`Drain`],
+//! The [`Codec`]/[`EndCapableCodec`] traits and the vocabulary their
+//! methods speak in: [`Progress`], [`EndCapableProgress`], [`Drain`],
 //! [`Error`]. See `CREATING-CODECS.md` for how to write a codec.
 
 // ----
@@ -22,10 +22,10 @@ pub enum Progress {
     OutputFilled { consumed: usize },
 }
 
-/// Progress of one [`TerminatingCodec::process`] call: everything
+/// Progress of one [`EndCapableCodec::process`] call: everything
 /// [`Progress`] can report, plus an in-band end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminatingProgress {
+pub enum EndCapableProgress {
     /// All of `input` was consumed; `written` bytes were produced
     /// (possibly zero, when everything went into internal buffering).
     /// The driver's move: supply more input, or `finish`.
@@ -41,7 +41,7 @@ pub enum TerminatingProgress {
     End { consumed: usize, written: usize },
 }
 
-impl From<Progress> for TerminatingProgress {
+impl From<Progress> for EndCapableProgress {
     fn from(progress: Progress) -> Self {
         match progress {
             Progress::InputConsumed { written } => Self::InputConsumed { written },
@@ -154,18 +154,18 @@ impl Progress {
     }
 }
 
-impl TerminatingProgress {
+impl EndCapableProgress {
     /// The [`Progress::validated`] counterpart for
-    /// [`TerminatingCodec::process`].
+    /// [`EndCapableCodec::process`].
     pub fn validated(
         self,
         input_len: usize,
         output_len: usize,
-    ) -> Result<TerminatingProgress, Error> {
+    ) -> Result<EndCapableProgress, Error> {
         let honest = match self {
-            TerminatingProgress::InputConsumed { written } => written <= output_len,
-            TerminatingProgress::OutputFilled { consumed } => consumed <= input_len,
-            TerminatingProgress::End { consumed, written } => {
+            EndCapableProgress::InputConsumed { written } => written <= output_len,
+            EndCapableProgress::OutputFilled { consumed } => consumed <= input_len,
+            EndCapableProgress::End { consumed, written } => {
                 consumed <= input_len && written <= output_len
             }
         };
@@ -193,16 +193,16 @@ impl Drain {
 // Codec traits
 // ----
 
-/// Lifecycle operations shared by [`Codec`] and [`TerminatingCodec`]:
+/// Lifecycle operations shared by [`Codec`] and [`EndCapableCodec`]:
 /// signalling end-of-input and reaching a sync point.
 pub trait DrainCodec {
     /// Signal "no more input is coming": flush any buffered state and,
     /// for formats with one, write the trailer/checksum. Call
     /// repeatedly (draining `output` between calls) until it reports
     /// [`Drain::Done`]. Idempotent once `Done`: see [`Codec`] contract
-    /// point 3. For a [`TerminatingCodec`], pinned to reporting `Done`
+    /// point 3. For a [`EndCapableCodec`], pinned to reporting `Done`
     /// forever once `process` has reported
-    /// [`TerminatingProgress::End`]. Must always resolve to
+    /// [`EndCapableProgress::End`]. Must always resolve to
     /// `OutputFilled`, `Done`, or `Err`: see [`Codec`] contract point 7.
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error>;
 
@@ -342,9 +342,9 @@ pub trait Codec: DrainCodec {
 /// [`CodecWriter`](crate::sources_and_sinks::std_io::CodecWriter):
 /// `Write` cannot represent a successful permanent short write.
 ///
-/// Every [`Codec`] is automatically a `TerminatingCodec` that never
+/// Every [`Codec`] is automatically a `EndCapableCodec` that never
 /// returns `End` — see the blanket implementation below. The
-/// conversion is one-way: a `TerminatingCodec` cannot be used where
+/// conversion is one-way: a `EndCapableCodec` cannot be used where
 /// `Codec` is required, because it cannot promise to consume the whole
 /// logical input stream. One concrete type also cannot independently
 /// implement both traits with different behavior — a format offering
@@ -353,7 +353,7 @@ pub trait Codec: DrainCodec {
 /// # The contract
 ///
 /// Same as [`Codec`]'s points 1–6 (`process` may additionally resolve
-/// to [`TerminatingProgress::End`], in which case: `consumed` input
+/// to [`EndCapableProgress::End`], in which case: `consumed` input
 /// bytes belong to the ended stream, `written` output bytes were
 /// produced by this call, `input[consumed..]` was not consumed and
 /// belongs to whatever follows the terminated stream, and the codec
@@ -367,7 +367,7 @@ pub trait Codec: DrainCodec {
 /// `End { consumed: 0, written: 0 }` again on any `input`,
 /// `finish`/`flush` answer `Drain::Done { written: 0 }`. None of them
 /// re-run whatever ended the stream. A caller (or a combinator built on
-/// top of `TerminatingCodec`) is free to call any of the three again
+/// top of `EndCapableCodec`) is free to call any of the three again
 /// after `End` and must see a no-op every time, not a second ending.
 /// This is the one case where `finish` and `flush` stop being
 /// independent of each other: past `End`, both are pinned to `Done {
@@ -375,7 +375,7 @@ pub trait Codec: DrainCodec {
 /// themselves.
 ///
 /// A codec intended to yield several tokens or boundaries from one
-/// instance is not a `TerminatingCodec` in the usual driver sense —
+/// instance is not a `EndCapableCodec` in the usual driver sense —
 /// drivers like [`Pump`](crate::pump::Pump) latch permanently after the
 /// first `End`. Driving `process` directly, call by call, still allows
 /// reusing one instance across multiple logical streams (see
@@ -387,28 +387,28 @@ pub trait Codec: DrainCodec {
 /// required, `finish` should return an `UnexpectedEnd` error when EOF
 /// arrives first; if both an in-band terminator and source EOF are
 /// valid endings, `finish` may drain buffered output and return `Done`.
-/// Each `TerminatingCodec` should document which rule it uses.
+/// Each `EndCapableCodec` should document which rule it uses.
 ///
 /// # Naming the operation
 ///
-/// Both `Codec` and `TerminatingCodec` deliberately name their method
+/// Both `Codec` and `EndCapableCodec` deliberately name their method
 /// `process`. Because of the blanket implementation, a direct method
 /// call on an ordinary concrete codec can be ambiguous when both traits
 /// are in scope. Use Rust's fully qualified syntax in that case:
 ///
 /// ```text
 /// Codec::process(&mut codec, input, output);
-/// TerminatingCodec::process(&mut codec, input, output);
+/// EndCapableCodec::process(&mut codec, input, output);
 /// ```
-pub trait TerminatingCodec: DrainCodec {
+pub trait EndCapableCodec: DrainCodec {
     /// Push input bytes and pull output bytes, possibly recognizing the
     /// stream's in-band end. Pinned to reporting `End` forever once
     /// it's reached. Calling this after `finish` is unsupported.
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error>;
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error>;
 }
 
-impl<C: Codec> TerminatingCodec for C {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error> {
+impl<C: Codec> EndCapableCodec for C {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error> {
         Codec::process(self, input, output).map(Into::into)
     }
 }
@@ -447,7 +447,7 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drain, Error, ErrorKind, Progress, TerminatingProgress};
+    use super::{Drain, Error, ErrorKind, Progress, EndCapableProgress};
 
     const CV: Error = Error {
         kind: ErrorKind::ContractViolation,
@@ -463,7 +463,7 @@ mod tests {
         assert!(Progress::OutputFilled { consumed: 10 }
             .validated(10, 4)
             .is_ok());
-        assert!(TerminatingProgress::End {
+        assert!(EndCapableProgress::End {
             consumed: 0,
             written: 0
         }
@@ -484,7 +484,7 @@ mod tests {
             Err(CV)
         );
         assert_eq!(
-            TerminatingProgress::End {
+            EndCapableProgress::End {
                 consumed: 11,
                 written: 0
             }
@@ -492,7 +492,7 @@ mod tests {
             Err(CV)
         );
         assert_eq!(
-            TerminatingProgress::End {
+            EndCapableProgress::End {
                 consumed: 0,
                 written: 5
             }

@@ -7,7 +7,7 @@
 //!
 //! [`codec_step`]/[`end_capable_step`] are the `process`-side halves:
 //! two entry points, not one generic function, because `Chain` accepts
-//! only [`Codec`] members. A single `TerminatingCodec`-bound `step`
+//! only [`Codec`] members. A single `EndCapableCodec`-bound `step`
 //! would still work for `Chain` — every `Codec` is one via the blanket
 //! implementation — but its result type could represent an in-band
 //! `End` that `Chain`'s members can never actually produce. Keeping
@@ -18,11 +18,11 @@
 //! caller needs a narrower type here, since `Drain` has no in-band-end
 //! counterpart to begin with.
 
-use crate::{Codec, Drain, DrainCodec, Error, Progress, TerminatingCodec, TerminatingProgress};
+use crate::{Codec, Drain, DrainCodec, Error, Progress, EndCapableCodec, EndCapableProgress};
 
 /// Why one step of an ordinary [`Codec::process`] call stopped. No
 /// in-band end is possible — see [`EndCapableStepEnd`] for the
-/// [`TerminatingCodec`] counterpart that has one.
+/// [`EndCapableCodec`] counterpart that has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodecStepEnd {
     /// The complete input window was consumed.
@@ -66,7 +66,7 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
     })
 }
 
-/// Why one step of a [`TerminatingCodec::process`] call stopped.
+/// Why one step of a [`EndCapableCodec::process`] call stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EndCapableStepEnd {
     /// The complete input window was consumed.
@@ -77,7 +77,7 @@ pub(crate) enum EndCapableStepEnd {
     End,
 }
 
-/// Exact progress made by one validated [`TerminatingCodec::process`]
+/// Exact progress made by one validated [`EndCapableCodec::process`]
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EndCapableStep {
@@ -86,9 +86,9 @@ pub(crate) struct EndCapableStep {
     pub(crate) end: EndCapableStepEnd,
 }
 
-/// Run one step of a [`TerminatingCodec`], validated against the
+/// Run one step of a [`EndCapableCodec`], validated against the
 /// buffers it was given.
-pub(crate) fn end_capable_step<C: TerminatingCodec + ?Sized>(
+pub(crate) fn end_capable_step<C: EndCapableCodec + ?Sized>(
     codec: &mut C,
     input: &[u8],
     output: &mut [u8],
@@ -100,17 +100,17 @@ pub(crate) fn end_capable_step<C: TerminatingCodec + ?Sized>(
         .validated(input_len, output_len)?;
 
     Ok(match outcome {
-        TerminatingProgress::InputConsumed { written } => EndCapableStep {
+        EndCapableProgress::InputConsumed { written } => EndCapableStep {
             consumed: input_len,
             written,
             end: EndCapableStepEnd::InputExhausted,
         },
-        TerminatingProgress::OutputFilled { consumed } => EndCapableStep {
+        EndCapableProgress::OutputFilled { consumed } => EndCapableStep {
             consumed,
             written: output_len,
             end: EndCapableStepEnd::OutputExhausted,
         },
-        TerminatingProgress::End { consumed, written } => EndCapableStep {
+        EndCapableProgress::End { consumed, written } => EndCapableStep {
             consumed,
             written,
             end: EndCapableStepEnd::End,

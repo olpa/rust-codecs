@@ -12,17 +12,17 @@ use core::convert::Infallible;
 use rust_codecs_core::rot13::rot13;
 use rust_codecs_core::sources_and_sinks::shared_io::pump_read;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
-use rust_codecs_core::{DriveError, Pump, Source, TerminatingCodec};
+use rust_codecs_core::{DriveError, Pump, Source, EndCapableCodec};
 
 /// A minimal incremental reader, built the same way
 /// `std_io`/`embedded_io`'s `CodecReader` is: a `Source` plus a
 /// `Pump`, driven one bounded call at a time by `pump_read`.
-struct MinimalReader<I: Source, C: TerminatingCodec> {
+struct MinimalReader<I: Source, C: EndCapableCodec> {
     input: I,
     pump: Pump<C>,
 }
 
-impl<I: Source, C: TerminatingCodec> MinimalReader<I, C> {
+impl<I: Source, C: EndCapableCodec> MinimalReader<I, C> {
     fn new(input: I, codec: C) -> Self {
         Self { input, pump: Pump::new(codec) }
     }

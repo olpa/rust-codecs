@@ -65,14 +65,14 @@ way `std_io::wrapper::CodecReader`/`CodecWriter` hold one next to
 use core::convert::Infallible;
 
 use rust_codecs_core::sources_and_sinks::shared_io::pump_read;
-use rust_codecs_core::{DriveError, Pump, Source, TerminatingCodec};
+use rust_codecs_core::{DriveError, Pump, Source, EndCapableCodec};
 
-struct YourReader<I: Source, C: TerminatingCodec> {
+struct YourReader<I: Source, C: EndCapableCodec> {
     input: I,
     pump: Pump<C>,
 }
 
-impl<I: Source, C: TerminatingCodec> YourReader<I, C> {
+impl<I: Source, C: EndCapableCodec> YourReader<I, C> {
     fn new(input: I, codec: C) -> Self {
         Self { input, pump: Pump::new(codec) }
     }

@@ -1,4 +1,4 @@
-//! Demonstrates driving a [`TerminatingCodec`] directly, call by call,
+//! Demonstrates driving a [`EndCapableCodec`] directly, call by call,
 //! instead of through `stream_to_stream`'s internal pump loop — and
 //! what an early-stop input (in-band `End`) looks like from that
 //! level.
@@ -20,8 +20,8 @@ use core::convert::Infallible;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
 use rust_codecs_core::{
-    stream_to_stream, Drain, DrainCodec, DriveError, Error, Source, TerminatingCodec,
-    TerminatingProgress,
+    stream_to_stream, Drain, DrainCodec, DriveError, Error, Source, EndCapableCodec,
+    EndCapableProgress,
 };
 
 struct QuoteEnd;
@@ -32,24 +32,24 @@ impl DrainCodec for QuoteEnd {
     }
 }
 
-impl TerminatingCodec for QuoteEnd {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error> {
+impl EndCapableCodec for QuoteEnd {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error> {
         let quote_pos = input.iter().position(|&b| b == b'"');
         let available = quote_pos.unwrap_or(input.len());
         let n = available.min(output.len());
         output[..n].copy_from_slice(&input[..n]);
         if n < available {
             // Output ran out before reaching the quote (or the end of input).
-            Ok(TerminatingProgress::OutputFilled { consumed: n })
+            Ok(EndCapableProgress::OutputFilled { consumed: n })
         } else if quote_pos.is_some() {
             // Reached the quote; it's left unconsumed for the driver to deal with.
-            Ok(TerminatingProgress::End {
+            Ok(EndCapableProgress::End {
                 consumed: n,
                 written: n,
             })
         } else {
             // Consumed all of input; no quote in sight.
-            Ok(TerminatingProgress::InputConsumed { written: n })
+            Ok(EndCapableProgress::InputConsumed { written: n })
         }
     }
 }
@@ -74,7 +74,7 @@ fn drives_three_segments_across_two_early_stops() {
     // quote, then gets stuck — End, with the quote itself still
     // sitting unconsumed at the front of what's left.
     let progress = codec.process(&input[pos..], &mut output).unwrap();
-    let TerminatingProgress::End { consumed, written } = progress else {
+    let EndCapableProgress::End { consumed, written } = progress else {
         panic!("expected End, got {progress:?}");
     };
     assert_eq!(&output[..written], b"let s = ");
@@ -86,7 +86,7 @@ fn drives_three_segments_across_two_early_stops() {
     let progress = codec.process(&input[pos..], &mut output).unwrap();
     assert_eq!(
         progress,
-        TerminatingProgress::End {
+        EndCapableProgress::End {
             consumed: 0,
             written: 0
         }
@@ -100,7 +100,7 @@ fn drives_three_segments_across_two_early_stops() {
     // copies the quoted content up to the closing quote, then gets
     // stuck again the same way.
     let progress = codec.process(&input[pos..], &mut output).unwrap();
-    let TerminatingProgress::End { consumed, written } = progress else {
+    let EndCapableProgress::End { consumed, written } = progress else {
         panic!("expected End, got {progress:?}");
     };
     assert_eq!(&output[..written], b"Hello, world!");
@@ -111,7 +111,7 @@ fn drives_three_segments_across_two_early_stops() {
     let progress = codec.process(&input[pos..], &mut output).unwrap();
     assert_eq!(
         progress,
-        TerminatingProgress::End {
+        EndCapableProgress::End {
             consumed: 0,
             written: 0
         }
@@ -122,7 +122,7 @@ fn drives_three_segments_across_two_early_stops() {
     // Third call: nothing left but the trailing `;` and no more
     // quotes — an ordinary InputConsumed, no early stop this time.
     let progress = codec.process(&input[pos..], &mut output).unwrap();
-    let TerminatingProgress::InputConsumed { written } = progress else {
+    let EndCapableProgress::InputConsumed { written } = progress else {
         panic!("expected InputConsumed, got {progress:?}");
     };
     assert_eq!(&output[..written], b";");
@@ -247,7 +247,7 @@ impl Source for TwoByteSource<'_> {
 /// only ever reads from a borrowed `&str` of its own.
 fn encode_string<S: Source>(
     source: &mut S,
-    codec: impl TerminatingCodec,
+    codec: impl EndCapableCodec,
 ) -> Result<String, DriveError<S::Error, Infallible>> {
     let mut sink = VecSink::default();
     stream_to_stream(source, codec, &mut sink)?;
@@ -380,7 +380,7 @@ fn tokenizes_a_string_array_literal_from_a_base64_decoded_two_byte_source() {
 /// internally to do the equivalent for `std::io::Read`/
 /// `embedded_io::Read`; see `CREATING-IO-BACKENDS.md` for the general
 /// pattern.
-struct CodecSource<I: Source, C: TerminatingCodec, const N: usize> {
+struct CodecSource<I: Source, C: EndCapableCodec, const N: usize> {
     inner: I,
     pump: rust_codecs_core::Pump<C>,
     buf: [u8; N],
@@ -388,7 +388,7 @@ struct CodecSource<I: Source, C: TerminatingCodec, const N: usize> {
     len: usize,
 }
 
-impl<I: Source, C: TerminatingCodec, const N: usize> CodecSource<I, C, N> {
+impl<I: Source, C: EndCapableCodec, const N: usize> CodecSource<I, C, N> {
     fn new(inner: I, codec: C) -> Self {
         Self {
             inner,
@@ -400,7 +400,7 @@ impl<I: Source, C: TerminatingCodec, const N: usize> CodecSource<I, C, N> {
     }
 }
 
-impl<I: Source, C: TerminatingCodec, const N: usize> Source for CodecSource<I, C, N> {
+impl<I: Source, C: EndCapableCodec, const N: usize> Source for CodecSource<I, C, N> {
     type Error = rust_codecs_core::DriveError<I::Error, Infallible>;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {

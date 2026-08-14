@@ -42,7 +42,7 @@ impl Codec for Rot13 {
 ```
 
 `finish`/`flush` live on [`DrainCodec`], a supertrait shared by
-`Codec` and `TerminatingCodec` (see below) — implement it first, then
+`Codec` and `EndCapableCodec` (see below) — implement it first, then
 `Codec` for `process`.
 
 ## The contract
@@ -68,12 +68,12 @@ makes any other outcome unrepresentable:
 If your format is self-terminating — it can recognize its own end
 inside an input slice, with bytes past that end belonging to whatever
 follows (a delimiter, a length-prefixed frame) — implement
-[`TerminatingCodec`] instead of `Codec`. It's the same shape, except
-`process` returns a [`TerminatingProgress`] that adds a third outcome,
+[`EndCapableCodec`] instead of `Codec`. It's the same shape, except
+`process` returns a [`EndCapableProgress`] that adds a third outcome,
 `End { consumed, written }`. Every `Codec` already gets a
-`TerminatingCodec` impl for free (it just never returns `End`), so
+`EndCapableCodec` impl for free (it just never returns `End`), so
 input-side drivers (`CodecReader`, `stream_to_stream`) accept either
-kind interchangeably; only implement `TerminatingCodec` directly when
+kind interchangeably; only implement `EndCapableCodec` directly when
 your format actually has an in-band end to report.
 `CodecWriter` accepts only `Codec` — `Write` has no way to represent a
 permanent short write, so a genuinely terminating codec can't be
@@ -81,7 +81,7 @@ wrapped as one.
 
 The drivers do not take your word for it: every reported count is
 checked against the buffer sizes the call was given
-(`Progress::validated`/`TerminatingProgress::validated`/`Drain::validated`),
+(`Progress::validated`/`EndCapableProgress::validated`/`Drain::validated`),
 and an overclaimed count surfaces as an `ErrorKind::ContractViolation`
 error rather than corrupting driver state. If you build your own
 driver, apply the same check at your codec boundary.
@@ -156,7 +156,7 @@ At minimum, exercise:
   prove the carry spans buffers correctly.
 - `finish()` reaching `Drain::Done`.
 
-If you implemented `TerminatingCodec`, additionally exercise:
+If you implemented `EndCapableCodec`, additionally exercise:
 
 - `End` reporting exact consumed/written counts, with the delimiter
   handled the way you documented (consumed or left for the caller).
@@ -166,6 +166,6 @@ If you implemented `TerminatingCodec`, additionally exercise:
 - EOF arriving before the in-band boundary, per whatever policy you
   documented for that case.
 
-That's the whole surface: implement `Codec` or `TerminatingCodec`,
+That's the whole surface: implement `Codec` or `EndCapableCodec`,
 expose constructor function(s), and the rest of RustCodecs (stream
 adapters, `Vec<u8>` helper) works with your codec for free.

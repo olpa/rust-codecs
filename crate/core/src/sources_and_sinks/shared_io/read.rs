@@ -2,14 +2,14 @@ use core::convert::Infallible;
 
 use crate::pump::{DrainEnd, Pump, PumpEnd};
 use crate::sources_and_sinks::slice::SliceSink;
-use crate::{DriveError, Source, TerminatingCodec};
+use crate::{DriveError, Source, EndCapableCodec};
 
 /// Drive `pump` against `input`, filling `buf` with transformed bytes —
 /// the transport-independent core of a `Read::read` impl, matching
 /// what `std_io`/`embedded_io`'s own `CodecReader` calls internally.
 /// Ends the codec's stream (running `finish`) once `input` reports
 /// exhaustion, so the caller never has to invoke `finish` itself.
-pub fn pump_read<I: Source, C: TerminatingCodec>(
+pub fn pump_read<I: Source, C: EndCapableCodec>(
     pump: &mut Pump<C>,
     input: &mut I,
     buf: &mut [u8],

@@ -1,5 +1,5 @@
 //! `embedded_io::Read`/`Write` wrappers over a [`Codec`](crate::Codec)
-//! or [`TerminatingCodec`](crate::TerminatingCodec).
+//! or [`EndCapableCodec`](crate::EndCapableCodec).
 //!
 //! The ownership is directional and zero-copy at the codec boundary:
 //! [`CodecReader`] owns input scratch and writes directly into
@@ -12,7 +12,7 @@ use embedded_io::{ErrorType, Read, Write};
 
 use crate::pump::Pump;
 use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
-use crate::{Codec, DriveError, Error, ErrorKind, TerminatingCodec};
+use crate::{Codec, DriveError, Error, ErrorKind, EndCapableCodec};
 
 use super::adapter::{EmbeddedSource, EmbeddedSink};
 
@@ -69,13 +69,13 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 
 /// Wraps an [`embedded_io::Read`], yielding bytes transformed by `C`.
 ///
-/// `C` may be an ordinary [`Codec`] or a [`TerminatingCodec`].
-pub struct CodecReader<R, C: TerminatingCodec, S> {
+/// `C` may be an ordinary [`Codec`] or a [`EndCapableCodec`].
+pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: EmbeddedSource<R, S>,
     pump: Pump<C>,
 }
 
-impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
         Self { input: EmbeddedSource::new(inner, inbuf), pump: Pump::new(codec) }
     }
@@ -109,7 +109,7 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     }
 
     /// Direct access to the codec — e.g. to read state a
-    /// `TerminatingCodec` call doesn't expose (a checksum, a digest)
+    /// `EndCapableCodec` call doesn't expose (a checksum, a digest)
     /// once its stream has ended in-band.
     pub fn codec_ref(&self) -> &C {
         self.pump.get_ref()
@@ -121,11 +121,11 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     }
 }
 
-impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
+impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
     type Error = EmbeddedError<R::Error>;
 }
 
-impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
+impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
     }
@@ -134,7 +134,7 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S>
 /// Wraps an [`embedded_io::Write`], transforming bytes before writing
 /// them to the wrapped endpoint.
 ///
-/// `C` is bound to [`Codec`], not [`TerminatingCodec`]: an in-band end
+/// `C` is bound to [`Codec`], not [`EndCapableCodec`]: an in-band end
 /// would otherwise become a permanent short write from `write`. The
 /// caller must explicitly call [`CodecWriter::finish`] to finalize the
 /// codec; `Write::flush` is a resumable synchronization point, not a
@@ -227,7 +227,7 @@ mod tests {
 
     use super::{CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
-    use crate::{Drain, DrainCodec, Error, TerminatingCodec, TerminatingProgress};
+    use crate::{Drain, DrainCodec, Error, EndCapableCodec, EndCapableProgress};
 
     const INPUT: &[u8] = b"embedded io";
 
@@ -268,7 +268,7 @@ mod tests {
 
     /// Copies bytes 1:1 but ends its stream after `limit` bytes, like
     /// a self-describing format with an in-band terminator. A genuine
-    /// `TerminatingCodec` (not `Codec`), so only `CodecReader` can
+    /// `EndCapableCodec` (not `Codec`), so only `CodecReader` can
     /// drive it — `CodecWriter` is bound to `Codec` and rejects it at
     /// compile time.
     struct EarlyEnd {
@@ -282,18 +282,18 @@ mod tests {
         }
     }
 
-    impl TerminatingCodec for EarlyEnd {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error> {
+    impl EndCapableCodec for EarlyEnd {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
             output[..n].copy_from_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
-                Ok(TerminatingProgress::End { consumed: n, written: n })
+                Ok(EndCapableProgress::End { consumed: n, written: n })
             } else if n == input.len() {
-                Ok(TerminatingProgress::InputConsumed { written: n })
+                Ok(EndCapableProgress::InputConsumed { written: n })
             } else {
-                Ok(TerminatingProgress::OutputFilled { consumed: n })
+                Ok(EndCapableProgress::OutputFilled { consumed: n })
             }
         }
     }

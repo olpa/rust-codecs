@@ -5,7 +5,7 @@
 //! `io` (or a client's own) gets chaining for free without knowing
 //! anything about it.
 //!
-//! Both members are bound to [`Codec`], not [`TerminatingCodec`](crate::TerminatingCodec):
+//! Both members are bound to [`Codec`], not [`EndCapableCodec`](crate::EndCapableCodec):
 //! neither can ever report an in-band end, so `Chain` doesn't need a
 //! policy for propagating one, finalizing `second` early, or discarding
 //! bytes an ended `second` never got to. A future terminating

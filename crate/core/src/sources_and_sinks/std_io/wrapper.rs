@@ -1,5 +1,5 @@
 //! `std::io::Read`/`Write` wrappers over a [`Codec`](crate::Codec) or
-//! [`TerminatingCodec`](crate::TerminatingCodec).
+//! [`EndCapableCodec`](crate::EndCapableCodec).
 //!
 //! - [`CodecReader`]: wraps a `Read`, runs the transform on the fly, and
 //!   is itself a `Read` yielding the transformed bytes.
@@ -23,7 +23,7 @@ use core::convert::Infallible;
 
 use crate::pump::Pump;
 use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
-use crate::{Codec, DriveError, Error, ErrorKind, TerminatingCodec};
+use crate::{Codec, DriveError, Error, ErrorKind, EndCapableCodec};
 
 use super::adapter::{StdSource, StdSink};
 
@@ -60,8 +60,8 @@ fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
 
 /// Wraps a `Read`, running `C` over the bytes as they're pulled through.
 ///
-/// `C` may be an ordinary [`Codec`] or a [`TerminatingCodec`] — every
-/// `Codec` is automatically a `TerminatingCodec` that never ends
+/// `C` may be an ordinary [`Codec`] or a [`EndCapableCodec`] — every
+/// `Codec` is automatically a `EndCapableCodec` that never ends
 /// in-band.
 ///
 /// End-of-stream: when the wrapped reader hits EOF, the codec's
@@ -72,12 +72,12 @@ fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
 /// point and then reports EOF itself, without touching the codec
 /// again; trailing input bytes already pulled from the wrapped reader
 /// are lost.
-pub struct CodecReader<R, C: TerminatingCodec, S> {
+pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: StdSource<R, S>,
     pump: Pump<C>,
 }
 
-impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Build a `CodecReader`.
     ///
     /// # Panics
@@ -120,7 +120,7 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     }
 
     /// Direct access to the codec — e.g. to read state a
-    /// `TerminatingCodec` call doesn't expose (a checksum, a digest)
+    /// `EndCapableCodec` call doesn't expose (a checksum, a digest)
     /// once its stream has ended in-band.
     pub fn codec_ref(&self) -> &C {
         self.pump.get_ref()
@@ -132,7 +132,7 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     }
 }
 
-impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
+impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
     }
@@ -141,7 +141,7 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S>
 /// Wraps a `Write`; bytes written to this wrapper are run through `C`
 /// before being written to the wrapped writer.
 ///
-/// `C` is bound to [`Codec`], not [`TerminatingCodec`]: an in-band end
+/// `C` is bound to [`Codec`], not [`EndCapableCodec`]: an in-band end
 /// would otherwise become a permanent short write from `write`, which
 /// `write_all`/`io::copy` would then turn into `ErrorKind::WriteZero`.
 /// The caller must explicitly call [`CodecWriter::finish`] to finalize
@@ -240,7 +240,7 @@ mod tests {
 
     use super::{CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::{Drain, DrainCodec, Error, TerminatingCodec, TerminatingProgress};
+    use crate::{Drain, DrainCodec, Error, EndCapableCodec, EndCapableProgress};
 
     #[test]
     #[should_panic(expected = "buffer must be non-empty")]
@@ -256,8 +256,8 @@ mod tests {
 
     /// Copies bytes 1:1 but ends its stream after `limit` bytes, like
     /// a self-describing format with an in-band terminator. A genuine
-    /// `TerminatingCodec` (not `Codec` — a `Codec` can never report an
-    /// in-band end), so only `CodecReader` (bound to `TerminatingCodec`)
+    /// `EndCapableCodec` (not `Codec` — a `Codec` can never report an
+    /// in-band end), so only `CodecReader` (bound to `EndCapableCodec`)
     /// can drive it; `CodecWriter` is bound to `Codec` and rejects it
     /// at compile time.
     struct EarlyEnd {
@@ -271,18 +271,18 @@ mod tests {
         }
     }
 
-    impl TerminatingCodec for EarlyEnd {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<TerminatingProgress, Error> {
+    impl EndCapableCodec for EarlyEnd {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
             output[..n].copy_from_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
-                Ok(TerminatingProgress::End { consumed: n, written: n })
+                Ok(EndCapableProgress::End { consumed: n, written: n })
             } else if n == input.len() {
-                Ok(TerminatingProgress::InputConsumed { written: n })
+                Ok(EndCapableProgress::InputConsumed { written: n })
             } else {
-                Ok(TerminatingProgress::OutputFilled { consumed: n })
+                Ok(EndCapableProgress::OutputFilled { consumed: n })
             }
         }
     }
