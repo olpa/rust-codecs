@@ -18,7 +18,8 @@ first, the next runs on its output, and so on. Writer codecs also apply
 in the order listed — the first name runs first, closest to the incoming
 bytes, before the result reaches stdout.
 
-Currently known codec names: `identity`, `rot13`.
+Currently known codec names: `identity`, `rot13`, `base64-enc`,
+`base64-dec`, `json-enc`.
 
 ## Example
 
