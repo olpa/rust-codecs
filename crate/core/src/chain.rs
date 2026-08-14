@@ -160,8 +160,39 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             return Ok(());
         }
         let staging = self.staging.as_mut();
-        let moved = codec_step(&mut self.second, &staging[..self.stage_pos], &mut output[*out_pos..])
-            .map_err(|e| Error { consumed: consumed_on_error, written: *out_pos, ..e })?;
+        let staged = self.stage_pos;
+        let output_len = output.len() - *out_pos;
+        let moved = match codec_step(
+            &mut self.second,
+            &staging[..staged],
+            &mut output[*out_pos..],
+        ) {
+            Ok(moved) => moved,
+            Err(error) => {
+                let error = match error.validated(staged, output_len) {
+                    Ok(error) => error,
+                    Err(error) => {
+                        return Err(Error {
+                            consumed: consumed_on_error,
+                            written: *out_pos,
+                            ..error
+                        });
+                    }
+                };
+                *out_pos += error.written;
+                let leftover = staged - error.consumed;
+                if leftover > 0 {
+                    let staging = self.staging.as_mut();
+                    staging.copy_within(error.consumed..staged, 0);
+                }
+                self.stage_pos = leftover;
+                return Err(Error {
+                    consumed: consumed_on_error,
+                    written: *out_pos,
+                    ..error
+                });
+            }
+        };
         *out_pos += moved.written;
         let leftover = self.stage_pos - moved.consumed;
         if leftover > 0 {
@@ -183,9 +214,17 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         loop {
             if !nothing_more_from_first {
                 let staging = self.staging.as_mut();
-                let moved = op
-                    .step(&mut self.first, &mut staging[self.stage_pos..])
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                let available = staging.len() - self.stage_pos;
+                let moved = match op.step(&mut self.first, &mut staging[self.stage_pos..]) {
+                    Ok(moved) => moved,
+                    Err(error) => {
+                        let error = error
+                            .validated(0, available)
+                            .unwrap_or_else(|violation| violation);
+                        self.stage_pos += error.written;
+                        return Err(Error { consumed: 0, written: out_pos, ..error });
+                    }
+                };
                 self.stage_pos += moved.written;
                 if moved.stop == DrainStop::Done {
                     nothing_more_from_first = true;
@@ -197,9 +236,20 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             if nothing_more_from_first && self.stage_pos == 0 {
                 // `first` is fully drained through `second`; run
                 // `second`'s own step.
-                let moved = op
-                    .step(&mut self.second, &mut output[out_pos..])
-                    .map_err(|e| Error { consumed: 0, written: out_pos, ..e })?;
+                let available = output.len() - out_pos;
+                let moved = match op.step(&mut self.second, &mut output[out_pos..]) {
+                    Ok(moved) => moved,
+                    Err(error) => {
+                        let error = error
+                            .validated(0, available)
+                            .unwrap_or_else(|violation| violation);
+                        return Err(Error {
+                            consumed: 0,
+                            written: out_pos + error.written,
+                            ..error
+                        });
+                    }
+                };
                 return Ok(match moved.stop {
                     DrainStop::OutputFilled => Drain::OutputFilled,
                     DrainStop::Done => Drain::Done { written: out_pos + moved.written },
@@ -241,8 +291,23 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // feed it an empty slice.
             if in_pos < input.len() {
                 let staging = self.staging.as_mut();
-                let moved = codec_step(&mut self.first, &input[in_pos..], &mut staging[self.stage_pos..])
-                    .map_err(|e| Error { consumed: in_pos, written: out_pos, ..e })?;
+                let input_len = input.len() - in_pos;
+                let output_len = staging.len() - self.stage_pos;
+                let moved = match codec_step(
+                    &mut self.first,
+                    &input[in_pos..],
+                    &mut staging[self.stage_pos..],
+                ) {
+                    Ok(moved) => moved,
+                    Err(error) => {
+                        let error = error
+                            .validated(input_len, output_len)
+                            .unwrap_or_else(|violation| violation);
+                        in_pos += error.consumed;
+                        self.stage_pos += error.written;
+                        return Err(Error { consumed: in_pos, written: out_pos, ..error });
+                    }
+                };
                 in_pos += moved.consumed;
                 self.stage_pos += moved.written;
             }
@@ -549,5 +614,86 @@ mod tests {
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
         let result = collect(chain, INPUT);
         assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ContractViolation);
+    }
+
+    struct FirstFailsOnce {
+        failed: bool,
+    }
+
+    impl DrainCodec for FirstFailsOnce {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    impl Codec for FirstFailsOnce {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+            if !self.failed {
+                self.failed = true;
+                output[..2].copy_from_slice(b"xy");
+                return Err(Error::new(crate::ErrorKind::Corrupt, 1, 2));
+            }
+            let n = input.len().min(output.len());
+            output[..n].copy_from_slice(&input[..n]);
+            if n == input.len() {
+                Ok(Progress::InputConsumed { written: n })
+            } else {
+                Ok(Progress::OutputFilled { consumed: n })
+            }
+        }
+    }
+
+    #[test]
+    fn first_codec_error_progress_is_retained_in_staging() {
+        let mut chain = Chain::new(FirstFailsOnce { failed: false }, identity(), vec![0; 8]);
+        let mut output = [0; 8];
+
+        let error = chain.process(b"abc", &mut output).unwrap_err();
+        assert_eq!(error, Error::new(crate::ErrorKind::Corrupt, 1, 0));
+
+        let progress = chain.process(b"bc", &mut output).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 4 });
+        assert_eq!(&output[..4], b"xybc");
+    }
+
+    struct SecondFailsOnce {
+        failed: bool,
+    }
+
+    impl DrainCodec for SecondFailsOnce {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    impl Codec for SecondFailsOnce {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+            if !self.failed {
+                self.failed = true;
+                output[0] = input[0];
+                return Err(Error::new(crate::ErrorKind::Corrupt, 1, 1));
+            }
+            let n = input.len().min(output.len());
+            output[..n].copy_from_slice(&input[..n]);
+            if n == input.len() {
+                Ok(Progress::InputConsumed { written: n })
+            } else {
+                Ok(Progress::OutputFilled { consumed: n })
+            }
+        }
+    }
+
+    #[test]
+    fn second_codec_error_progress_compacts_staging() {
+        let mut chain = Chain::new(identity(), SecondFailsOnce { failed: false }, vec![0; 8]);
+        let mut output = [0; 8];
+
+        let error = chain.process(b"abc", &mut output).unwrap_err();
+        assert_eq!(error, Error::new(crate::ErrorKind::Corrupt, 3, 1));
+        assert_eq!(&output[..1], b"a");
+
+        let progress = chain.process(b"", &mut output).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 2 });
+        assert_eq!(&output[..2], b"bc");
     }
 }
