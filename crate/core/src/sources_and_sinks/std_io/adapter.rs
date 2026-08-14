@@ -36,6 +36,13 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
     pub fn into_inner(self) -> R {
         self.inner
     }
+
+    /// Reclaim both the reader and the scratch buffer, e.g. to reuse
+    /// the buffer's allocation for another `StdSource`. `into_inner`
+    /// drops the buffer; this is the exhaustive teardown.
+    pub fn into_parts(self) -> (R, S) {
+        (self.inner, self.buffer)
+    }
 }
 
 impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
@@ -87,6 +94,13 @@ impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
 
     pub fn into_inner(self) -> W {
         self.inner
+    }
+
+    /// Reclaim both the writer and the scratch buffer, e.g. to reuse
+    /// the buffer's allocation for another `StdSink`. `into_inner`
+    /// drops the buffer; this is the exhaustive teardown.
+    pub fn into_parts(self) -> (W, S) {
+        (self.inner, self.buffer)
     }
 }
 

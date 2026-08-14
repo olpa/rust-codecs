@@ -96,6 +96,17 @@ impl<R: Read, C: TerminatingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         self.input.into_inner()
     }
 
+    /// Reclaim the reader, the codec, and the scratch buffer — e.g. to
+    /// read state the codec holds (a checksum, a digest), or to reuse
+    /// the buffer's allocation for another `CodecReader`. `into_inner`
+    /// discards all three; this is the exhaustive teardown. Same
+    /// caveat as `into_inner`: bytes already pulled from the reader
+    /// but not yet yielded to the caller are lost.
+    pub fn into_parts(self) -> (R, C, S) {
+        let (inner, buffer) = self.input.into_parts();
+        (inner, self.pump.into_inner(), buffer)
+    }
+
     /// Direct access to the wrapped reader, bypassing the codec.
     /// Bytes already pulled from it into this reader's scratch buffer,
     /// but not yet yielded to the caller, aren't visible here.

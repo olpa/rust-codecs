@@ -133,6 +133,17 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         }
     }
 
+    /// Reclaim both codecs and the staging buffer — e.g. to read state
+    /// one of them holds (a checksum, a digest) once the stream is
+    /// done, or to reuse the buffer's allocation for another `Chain`.
+    /// Any bytes `first` had produced but `second` hadn't yet drained
+    /// are still physically present at the front of the returned
+    /// buffer, but `stage_pos` isn't returned alongside it, so there's
+    /// no way to tell how many (if any) — treat them as lost.
+    pub fn into_parts(self) -> (A, B, S) {
+        (self.first, self.second, self.staging)
+    }
+
     /// Offer everything currently staged to `second`, advancing
     /// `out_pos` by what it wrote and compacting whatever it left
     /// unconsumed to the front of `staging`. Shared by `process` (where
