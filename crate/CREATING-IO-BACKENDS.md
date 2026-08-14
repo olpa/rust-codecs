@@ -33,11 +33,12 @@ case), not the caller's. Load-bearing details, easiest to get wrong:
   unconsumed position.
 - **`None` means exhausted**, not "call again later" — end of input
   for `Source`, no room for `Sink`.
-- **`spare` must be followed by `commit`** before the next `spare`
-  call. The crate's own `Sink` impls all enforce this with
-  `assert_eq!(self.offered, 0, "commit must follow spare")` — worth
-  copying, so a driver that violates it panics loudly rather than
-  corrupting state silently.
+- **`spare` never needs a matching `commit`.** A caller is free to
+  call `spare` again without having committed the previous one — the
+  same span (or an equivalent one) is simply re-offered. This mirrors
+  `chunk`/`consume`: nothing is lost by not committing, since whatever
+  was (or wasn't) written into the returned window is still there, or
+  is irrelevant, either way.
 - **`Sink::finish` defaults to a no-op** — override it only if your
   transport needs a final flush once the codec's stream has ended
   (`StdSink`/`EmbeddedSink` forward to the wrapped writer's own
