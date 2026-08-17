@@ -10,8 +10,8 @@
 //!   contract in one sentence: every call fully consumes its input,
 //!   fully fills its output, or (for a `EndCapableCodec`) ends the
 //!   stream in-band.
-//! - [`Carry`]: helper for codecs with a minimum atomic output unit,
-//!   letting an emitted unit span output buffers.
+//! - [`Carry`]: helper for codecs that write output in multi-byte
+//!   chunks, letting an emitted chunk span output buffers.
 //! - [`Source`]/[`Sink`]/[`stream_to_stream`]: the lending stream
 //!   contract, independent of any particular byte transport.
 //! - [`sources_and_sinks`]: concrete `Source`/`Sink` backends —
@@ -201,7 +201,7 @@ mod stream;
 pub use stream::{Sink, Source};
 
 mod carry;
-pub use carry::Carry;
+pub use carry::{Carry, CarryError};
 
 mod step;
 

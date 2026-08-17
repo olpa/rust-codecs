@@ -14,12 +14,11 @@
 //!
 //! A literal chunk is already a slice of `input`, so it's copied
 //! straight into `output` piece by piece — no buffering needed, at any
-//! output size. An escape sequence (`\uXXXX`, at most 6 bytes) is this
-//! codec's atomic output unit, same idea as base64's 4-byte encoded
-//! group: it may need to span output buffers, so it's handed to a
-//! [`Carry`] rather than written in one shot — that's what lets any
-//! non-empty output buffer work, with no `OutputTooSmall` escape hatch
-//! needed.
+//! output size. An escape sequence (`\uXXXX`, at most 6 bytes), same
+//! idea as base64's 4-byte encoded group, may need to span output
+//! buffers, so it's handed to a [`Carry`] rather than written in one
+//! shot — that's what lets any non-empty output buffer work, with no
+//! `OutputTooSmall` escape hatch needed.
 //!
 //! The tail of a literal run that's already been scanned but not yet
 //! copied out also outlives a `process` call when `output` runs out
@@ -77,11 +76,11 @@ impl JsonEnc {
     /// only once that's fully drained, since its bytes precede the
     /// escape's trigger byte in the stream — the escape sequence itself,
     /// handed to `carry`. Returns `(consumed, written)`.
-    fn flush_pending(&mut self, input: &[u8], output: &mut [u8]) -> (usize, usize) {
+    fn flush_pending(&mut self, input: &[u8], output: &mut [u8]) -> Result<(usize, usize), Error> {
         let mut consumed = 0;
         let mut written = self.carry.drain(output);
         if !self.carry.is_empty() {
-            return (consumed, written);
+            return Ok((consumed, written));
         }
 
         if self.pending_literal > 0 {
@@ -91,16 +90,19 @@ impl JsonEnc {
             consumed += n;
             self.pending_literal -= n;
             if self.pending_literal > 0 {
-                return (consumed, written);
+                return Ok((consumed, written));
             }
         }
 
         if let Some(s) = self.pending_escape.take() {
             consumed += 1;
-            written += self.carry.emit(s.as_bytes(), &mut output[written..]);
+            written += self
+                .carry
+                .emit(s.as_bytes(), &mut output[written..])
+                .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
         }
 
-        (consumed, written)
+        Ok((consumed, written))
     }
 }
 
@@ -121,7 +123,7 @@ impl DrainCodec for JsonEnc {
         if self.pending_literal > 0 {
             return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
         }
-        let (_, written) = self.flush_pending(&[], output);
+        let (_, written) = self.flush_pending(&[], output)?;
         if !self.carry.is_empty() {
             return Ok(Drain::OutputFilled);
         }
@@ -131,7 +133,7 @@ impl DrainCodec for JsonEnc {
 
 impl Codec for JsonEnc {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-        let (mut consumed, mut written) = self.flush_pending(input, output);
+        let (mut consumed, mut written) = self.flush_pending(input, output)?;
         if self.pending_literal > 0 || !self.carry.is_empty() {
             // Still pending: either flush_pending ran out of output
             // mid-literal, or an escape's carry didn't fully drain.
@@ -160,7 +162,10 @@ impl Codec for JsonEnc {
 
             let Some(s) = chunk.escaped() else { continue };
             consumed += 1;
-            written += self.carry.emit(s.as_bytes(), &mut output[written..]);
+            written += self
+                .carry
+                .emit(s.as_bytes(), &mut output[written..])
+                .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
             if !self.carry.is_empty() {
                 return Ok(Progress::OutputFilled { consumed });
             }
