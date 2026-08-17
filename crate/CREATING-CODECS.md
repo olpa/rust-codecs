@@ -96,17 +96,17 @@ Two consequences worth spelling out:
   never coalesce input into a larger contiguous slice for you.
 - **"This output buffer is too small for my atomic unit" does not
   exist.** A codec that can only emit whole units (base64: 4-byte
-  encoded groups) uses a [`Carry`] at the output boundary. First
-  transform as many whole units as possible directly into the caller's
-  output. If the output is not full but its remaining space is smaller
-  than the next unit, render that unit directly into `carry.buffer()`,
-  then record the rendered length with `carry.set_len()`.
-  `carry.drain(remaining_output)` fills the output
-  and retains the tail for the next call. Size the carry to your
-  largest atomic unit — it's a
-  compile-time constant of the format. This is what makes every buffer
-  size legal everywhere: 1-byte staging in a `Chain`, 1-byte slots in
-  `stream_to_stream`, 1-byte reads from a `CodecReader`.
+  encoded groups) uses a [`Carry`] at the output boundary. Find the
+  largest prefix of whole input units whose transformed output fits,
+  and transform it directly into the caller's output. If that
+  underfills the output, but adding one more input unit would overfill
+  it, transform that one extra unit into `carry.buffer()`, then record
+  the rendered length with `carry.set_len()`.
+  `carry.drain(remaining_output)` fills the output and retains the tail
+  for the next call. Size the carry to your largest atomic unit — it's
+  a compile-time constant of the format. This is what makes every
+  buffer size legal everywhere: 1-byte staging in a `Chain`, 1-byte
+  slots in `stream_to_stream`, 1-byte reads from a `CodecReader`.
 
   For base64 encoding with 10 bytes of output space, encode two 3-byte
   input groups directly to the first 8 output bytes, then encode one

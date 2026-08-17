@@ -1,47 +1,28 @@
 //! [`Carry`]: a helper for codec authors whose codec can generate more
 //! output at once than the output buffer has room for.
 //!
-//! The `Codec` contract requires every `process`/`finish` call to
-//! fully consume its input or fully fill its output. A codec is
-//! never allowed to decline a buffer as "too small".
-//!
-//! So when a call generates more output than the buffer has room
-//! left, the codec must still write what fits, then hold the rest
-//! until the next call in `Carry`.
-//!
-//! `Carry` is a boundary helper, not the codec's normal output path.
-//! Transform as much input as possible directly into the caller's
-//! output first. Only when some output space remains but the next
-//! indivisible transform unit will not fit, render that one unit
-//! directly into [`Carry::buffer`], set its length, and drain it.
-//! This avoids copying every unit through scratch and, for codecs such
-//! as base64, preserves the underlying implementation's bulk/SIMD path.
-//!
 //! Usage pattern inside a codec:
 //!
 //! 1. First thing in `process`/`finish`/`flush`:
 //!    `out_pos += carry.drain(output)`. If the carry is still
 //!    non-empty, the output is now full, return `OutputFilled`.
-//! 2. Process whole units directly from input into the remaining
-//!    output while both slices have enough room.
-//! 3. If output is not yet full and another whole input unit is
-//!    available, render the unit into [`Carry::buffer`], then call
-//!    [`Carry::set_len`] with the rendered length.
-//!    Then `out_pos += carry.drain(&mut output[out_pos..])`, mapping
-//!    [`CarryError`] into the codec's own error type — both
-//!    variants mean the codec itself is buggy, but a codec may run as
-//!    a third-party plugin, and a host loading it has no way to
-//!    recover from a panic. If the carry is non-empty afterward, the
-//!    output is full — return
-//!    `OutputFilled`.
+//! 2. Choose the largest prefix `input` of whole transform units for
+//!    which encoding `input` fits in the remaining output. Encode it
+//!    directly into that output.
+//! 3. If encoding `input` underfilled the output, but encoding
+//!    `input + one unit` would overfill it:
+//!
+//!    - Encode the extra unit into [`Carry::buffer`].
+//!    - Call [`Carry::set_len`] with the rendered length.
+//!    - Drain into the remaining output.
 //!
 //! For example, base64 encoding maps 3 input bytes to 4 output bytes.
-//! With 10 output bytes available, encode two groups (6 bytes to 8)
-//! directly into `output`, encode the next group into a 4-byte
-//! carry buffer, then drain its first 2 bytes into `output` and retain
-//! its last 2. Staging all three groups separately would produce the
-//! same bytes, but adds needless per-group copying and prevents one
-//! bulk call over the first two groups.
+//! With 10 output bytes available:
+//!
+//! - Encode two groups (6 input bytes to 8 output bytes) directly into
+//!   `output`.
+//! - Encode the next group into the 4-byte carry buffer.
+//! - Drain 2 bytes into `output` and retain the last 2.
 
 /// Holds the tail of an output chunk that didn't fit the caller's
 /// output buffer, to be delivered first on the next call.
