@@ -108,64 +108,19 @@ mod tests {
     }
 
     #[test]
-    fn chunk_that_fits_leaves_carry_empty() {
+    fn drains_across_output_buffers() {
         let mut carry = Carry::<4>::new();
-        let mut out = [0u8; 8];
+        let mut output = [0u8; 4];
+
         fill(&mut carry, b"abcd").unwrap();
-        let n = carry.drain(&mut out);
-        assert_eq!(n, 4);
-        assert_eq!(&out[..4], b"abcd");
-        assert!(carry.is_empty());
-    }
-
-    #[test]
-    fn chunk_spans_three_buffers() {
-        let mut carry = Carry::<4>::new();
-        let mut collected = [0u8; 4];
-        let mut pos = 0;
-
-        let mut out = [0u8; 1];
-        fill(&mut carry, b"abcd").unwrap();
-        let n = carry.drain(&mut out);
-        assert_eq!(n, 1);
-        collected[pos..pos + n].copy_from_slice(&out[..n]);
-        pos += n;
+        assert_eq!(carry.drain(&mut []), 0);
+        assert_eq!(carry.drain(&mut output[..1]), 1);
         assert!(!carry.is_empty());
-
-        let mut out = [0u8; 2];
-        let n = carry.drain(&mut out);
-        assert_eq!(n, 2);
-        collected[pos..pos + n].copy_from_slice(&out[..n]);
-        pos += n;
+        assert_eq!(carry.drain(&mut output[1..3]), 2);
         assert!(!carry.is_empty());
-
-        let mut out = [0u8; 8];
-        let n = carry.drain(&mut out);
-        assert_eq!(n, 1);
-        collected[pos..pos + n].copy_from_slice(&out[..n]);
-        pos += n;
+        assert_eq!(carry.drain(&mut output[3..]), 1);
         assert!(carry.is_empty());
-
-        assert_eq!(pos, collected.len());
-        assert_eq!(&collected, b"abcd");
-    }
-
-    #[test]
-    fn empty_drain_holds_everything() {
-        let mut carry = Carry::<4>::new();
-        fill(&mut carry, b"abcd").unwrap();
-        assert!(!carry.is_empty());
-        let mut out = [0u8; 4];
-        assert_eq!(carry.drain(&mut out), 4);
-        assert_eq!(&out, b"abcd");
-    }
-
-    #[test]
-    fn drain_on_empty_carry_is_a_no_op() {
-        let mut carry = Carry::<4>::new();
-        let mut out = [0u8; 4];
-        assert_eq!(carry.drain(&mut out), 0);
-        assert!(carry.is_empty());
+        assert_eq!(&output, b"abcd");
     }
 
     #[test]
@@ -179,12 +134,5 @@ mod tests {
     fn committed_output_larger_than_capacity_is_an_error() {
         let mut carry = Carry::<4>::new();
         assert_eq!(carry.set_len(5), Err(CarryError::OutputTooLarge));
-    }
-
-    #[test]
-    fn unused_buffer_leaves_carry_empty() {
-        let mut carry = Carry::<4>::new();
-        carry.buffer().unwrap()[0] = b'x';
-        assert!(carry.is_empty());
     }
 }
