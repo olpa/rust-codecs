@@ -98,10 +98,8 @@ impl<const N: usize> Default for Carry<N> {
     }
 }
 
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(test)]
 mod tests {
-    use alloc::vec::Vec;
-
     use super::{Carry, CarryError};
 
     fn fill(carry: &mut Carry<4>, bytes: &[u8]) -> Result<(), CarryError> {
@@ -123,28 +121,33 @@ mod tests {
     #[test]
     fn chunk_spans_three_buffers() {
         let mut carry = Carry::<4>::new();
-        let mut collected = Vec::new();
+        let mut collected = [0u8; 4];
+        let mut pos = 0;
 
         let mut out = [0u8; 1];
         fill(&mut carry, b"abcd").unwrap();
         let n = carry.drain(&mut out);
         assert_eq!(n, 1);
-        collected.extend_from_slice(&out[..n]);
+        collected[pos..pos + n].copy_from_slice(&out[..n]);
+        pos += n;
         assert!(!carry.is_empty());
 
         let mut out = [0u8; 2];
         let n = carry.drain(&mut out);
         assert_eq!(n, 2);
-        collected.extend_from_slice(&out[..n]);
+        collected[pos..pos + n].copy_from_slice(&out[..n]);
+        pos += n;
         assert!(!carry.is_empty());
 
         let mut out = [0u8; 8];
         let n = carry.drain(&mut out);
         assert_eq!(n, 1);
-        collected.extend_from_slice(&out[..n]);
+        collected[pos..pos + n].copy_from_slice(&out[..n]);
+        pos += n;
         assert!(carry.is_empty());
 
-        assert_eq!(collected, b"abcd");
+        assert_eq!(pos, collected.len());
+        assert_eq!(&collected, b"abcd");
     }
 
     #[test]
