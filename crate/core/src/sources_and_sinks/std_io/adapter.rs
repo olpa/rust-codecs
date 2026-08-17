@@ -90,11 +90,12 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
 /// of `StdSource` minus the double allocation.
 pub struct BufReadSource<R> {
     inner: R,
+    eof: bool,
 }
 
 impl<R: BufRead> BufReadSource<R> {
     pub fn new(inner: R) -> Self {
-        Self { inner }
+        Self { inner, eof: false }
     }
 
     pub fn get_ref(&self) -> &R {
@@ -114,12 +115,24 @@ impl<R: BufRead> Source for BufReadSource<R> {
     type Error = std::io::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        // Once a fill has come back empty, latch it: `Pump` calls
+        // `chunk()` again on every subsequent driver call for as long as
+        // the caller keeps asking (a plain `Codec` never reports an
+        // in-band `End`, so nothing else stops that), and re-running
+        // `fill_buf` on an already-exhausted reader would re-enter its
+        // real-I/O path on every one of those calls — an unbounded
+        // stream of pointless syscalls on a `BufReader<File>` or
+        // `BufReader<TcpStream>`. `StdSource` avoids this the same way.
+        if self.eof {
+            return Ok(None);
+        }
+
         // `fill_buf` already returns the current unconsumed window
         // without over-reading, and an empty result means EOF — the
         // same contract `Source::chunk` asks for, so no bookkeeping of
-        // our own is needed. It also doesn't retry `Interrupted` itself,
-        // so a signal landing mid-fill must be retried here — matching
-        // `std::io::copy`.
+        // our own is needed beyond the latch above. It also doesn't
+        // retry `Interrupted` itself, so a signal landing mid-fill must
+        // be retried here — matching `std::io::copy`.
         //
         // The retry loop can't return the borrowed slice directly from
         // within its own `match` (returning a borrow across a `continue`
@@ -141,6 +154,7 @@ impl<R: BufRead> Source for BufReadSource<R> {
             }
         };
         if len == 0 {
+            self.eof = true;
             return Ok(None);
         }
         let buf = self.inner.fill_buf()?;
@@ -221,6 +235,7 @@ mod tests {
     use crate::identity::identity;
     use crate::stream_to_stream;
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
+    use crate::Source;
 
     /// Fails its first `read` with `Interrupted`, then delegates.
     struct FlakyOnce<R> {
@@ -290,6 +305,23 @@ mod tests {
         let mut output = VecSink::default();
         stream_to_stream(&mut input, identity(), &mut output).unwrap();
         assert_eq!(output.into_inner(), b"hi");
+    }
+
+    #[test]
+    fn buf_read_source_latches_eof_across_repeated_chunk_calls() {
+        // `stream_to_stream` stops calling `chunk()` once it sees `None`,
+        // so this drives it directly — standing in for a plain `Codec`
+        // driven through `BufReadCodecReader`, where `Pump::is_done()`
+        // never latches and every `Read::read()` re-enters `chunk()`
+        // regardless of the source having ended already.
+        let mut input = BufReadSource::new(BufReader::new(EofThenPoisoned { calls: 0 }));
+        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), None);
+        // A third call to the wrapped reader would return `Interrupted`;
+        // the `eof` latch must keep it from ever being made.
+        assert_eq!(input.chunk().unwrap(), None);
+        assert_eq!(input.chunk().unwrap(), None);
     }
 
     #[test]
