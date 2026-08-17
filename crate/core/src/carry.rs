@@ -9,19 +9,39 @@
 //! left, the codec must still write what fits, then hold the rest
 //! until the next call in `Carry`.
 //!
+//! `Carry` is a boundary helper, not the codec's normal output path.
+//! Transform as much input as possible directly into the caller's
+//! output first. Only when some output space remains but the next
+//! indivisible transform unit will not fit, render that one unit
+//! directly into [`Carry::buffer`], set its length, and drain it.
+//! This avoids copying every unit through scratch and, for codecs such
+//! as base64, preserves the underlying implementation's bulk/SIMD path.
+//!
 //! Usage pattern inside a codec:
 //!
 //! 1. First thing in `process`/`finish`/`flush`:
 //!    `out_pos += carry.drain(output)`. If the carry is still
 //!    non-empty, the output is now full, return `OutputFilled`.
-//! 2. To emit a chunk: render it into a scratch array, then
-//!    `out_pos += carry.emit(&scratch, &mut output[out_pos..]).map_err(...)?`,
-//!    mapping [`CarryError`] into the codec's own error type — both
+//! 2. Process whole units directly from input into the remaining
+//!    output while both slices have enough room.
+//! 3. If output is not yet full and another whole input unit is
+//!    available, render the unit into [`Carry::buffer`], then call
+//!    [`Carry::set_len`] with the rendered length.
+//!    Then `out_pos += carry.drain(&mut output[out_pos..])`, mapping
+//!    [`CarryError`] into the codec's own error type — both
 //!    variants mean the codec itself is buggy, but a codec may run as
 //!    a third-party plugin, and a host loading it has no way to
 //!    recover from a panic. If the carry is non-empty afterward, the
 //!    output is full — return
 //!    `OutputFilled`.
+//!
+//! For example, base64 encoding maps 3 input bytes to 4 output bytes.
+//! With 10 output bytes available, encode two groups (6 bytes to 8)
+//! directly into `output`, encode the next group into a 4-byte
+//! carry buffer, then drain its first 2 bytes into `output` and retain
+//! its last 2. Staging all three groups separately would produce the
+//! same bytes, but adds needless per-group copying and prevents one
+//! bulk call over the first two groups.
 
 /// Holds the tail of an output chunk that didn't fit the caller's
 /// output buffer, to be delivered first on the next call.
@@ -58,39 +78,37 @@ impl<const N: usize> Carry<N> {
         take
     }
 
-    /// Write `chunk` through `out`, holding whatever doesn't fit;
-    /// returns how many bytes landed in `out`. After this, either the
-    /// carry is empty (the chunk fit) or `out` is full.
-    ///
-    /// The carry must be empty on entry (drain it first), and `chunk`
-    /// must be at most `N` bytes: both are codec bugs otherwise, and
-    /// both are reported as [`CarryError`] rather than panicking.
-    pub fn emit(&mut self, chunk: &[u8], out: &mut [u8]) -> Result<usize, CarryError> {
+    /// Storage for rendering the next atomic output unit. The carry
+    /// must have been completely drained first. After rendering, call
+    /// [`set_len`](Self::set_len) with the number of bytes produced.
+    pub fn buffer(&mut self) -> Result<&mut [u8], CarryError> {
         if !self.is_empty() {
             return Err(CarryError::NotDrained);
         }
-        if chunk.len() > N {
-            return Err(CarryError::ChunkTooLarge);
-        }
-        let take = chunk.len().min(out.len());
-        out[..take].copy_from_slice(&chunk[..take]);
-        let rest = &chunk[take..];
-        self.buf[..rest.len()].copy_from_slice(rest);
         self.pos = 0;
-        self.len = rest.len();
-        Ok(take)
+        self.len = 0;
+        Ok(&mut self.buf)
+    }
+
+    /// Make the first `len` rendered bytes available to [`Self::drain`].
+    pub fn set_len(&mut self, len: usize) -> Result<(), CarryError> {
+        if len > N {
+            return Err(CarryError::OutputTooLarge);
+        }
+        self.len = len;
+        Ok(())
     }
 }
 
-/// Why [`Carry::emit`] was refused — always a codec bug, never a
-/// condition caused by the data being processed.
+/// Why staging an output unit was refused — always a codec bug, never
+/// a condition caused by the data being processed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CarryError {
-    /// `emit` was called while a previous chunk was still held —
+    /// [`Carry::buffer`] was called while a previous unit was still held —
     /// `drain` must be called (and the carry found empty) first.
     NotDrained,
-    /// `chunk` was longer than the carry's capacity `N`.
-    ChunkTooLarge,
+    /// [`Carry::set_len`] reported more output than capacity `N`.
+    OutputTooLarge,
 }
 
 impl<const N: usize> Default for Carry<N> {
@@ -105,11 +123,17 @@ mod tests {
 
     use super::{Carry, CarryError};
 
+    fn fill(carry: &mut Carry<4>, bytes: &[u8]) -> Result<(), CarryError> {
+        carry.buffer()?[..bytes.len()].copy_from_slice(bytes);
+        carry.set_len(bytes.len())
+    }
+
     #[test]
     fn chunk_that_fits_leaves_carry_empty() {
         let mut carry = Carry::<4>::new();
         let mut out = [0u8; 8];
-        let n = carry.emit(b"abcd", &mut out).unwrap();
+        fill(&mut carry, b"abcd").unwrap();
+        let n = carry.drain(&mut out);
         assert_eq!(n, 4);
         assert_eq!(&out[..4], b"abcd");
         assert!(carry.is_empty());
@@ -121,7 +145,8 @@ mod tests {
         let mut collected = Vec::new();
 
         let mut out = [0u8; 1];
-        let n = carry.emit(b"abcd", &mut out).unwrap();
+        fill(&mut carry, b"abcd").unwrap();
+        let n = carry.drain(&mut out);
         assert_eq!(n, 1);
         collected.extend_from_slice(&out[..n]);
         assert!(!carry.is_empty());
@@ -142,10 +167,9 @@ mod tests {
     }
 
     #[test]
-    fn emit_into_empty_out_holds_everything() {
+    fn empty_drain_holds_everything() {
         let mut carry = Carry::<4>::new();
-        let n = carry.emit(b"abcd", &mut []).unwrap();
-        assert_eq!(n, 0);
+        fill(&mut carry, b"abcd").unwrap();
         assert!(!carry.is_empty());
         let mut out = [0u8; 4];
         assert_eq!(carry.drain(&mut out), 4);
@@ -161,18 +185,22 @@ mod tests {
     }
 
     #[test]
-    fn emit_with_held_bytes_is_an_error() {
+    fn buffer_with_held_bytes_is_an_error() {
         let mut carry = Carry::<4>::new();
-        carry.emit(b"abcd", &mut []).unwrap();
-        assert_eq!(carry.emit(b"efgh", &mut []), Err(CarryError::NotDrained));
+        fill(&mut carry, b"abcd").unwrap();
+        assert!(matches!(carry.buffer(), Err(CarryError::NotDrained)));
     }
 
     #[test]
-    fn emit_chunk_larger_than_capacity_is_an_error() {
+    fn committed_output_larger_than_capacity_is_an_error() {
         let mut carry = Carry::<4>::new();
-        assert_eq!(
-            carry.emit(b"abcde", &mut []),
-            Err(CarryError::ChunkTooLarge)
-        );
+        assert_eq!(carry.set_len(5), Err(CarryError::OutputTooLarge));
+    }
+
+    #[test]
+    fn unused_buffer_leaves_carry_empty() {
+        let mut carry = Carry::<4>::new();
+        carry.buffer().unwrap()[0] = b'x';
+        assert!(carry.is_empty());
     }
 }

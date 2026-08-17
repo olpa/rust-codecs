@@ -75,17 +75,21 @@ impl<E: Engine> Base64Enc<E> {
         Self { engine, pending_group: [0; GROUP], len: 0, carry: Carry::new() }
     }
 
-    /// Encode one whole group into a scratch array — `encode_slice` is
-    /// all-or-nothing on whatever slice it's given, so partial groups
-    /// and partial outputs are both handled by the caller (padding for
-    /// a final short group is the engine's own doing in `finish`).
-    fn encode_group(&self, group: &[u8], consumed: usize, written: usize) -> Result<([u8; ENCODED_GROUP], usize), Error> {
-        let mut scratch = [0u8; ENCODED_GROUP];
-        let n = self
-            .engine
-            .encode_slice(group, &mut scratch)
+    /// Encode one group directly into the carry. Partial input groups
+    /// are reserved for `finish`; partial output is handled by draining
+    /// the staged group afterward.
+    fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
+        let engine = &self.engine;
+        let buffer = self
+            .carry
+            .buffer()
+            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
+        let n = engine
+            .encode_slice(group, buffer)
             .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
-        Ok((scratch, n))
+        self.carry
+            .set_len(n)
+            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
     }
 }
 
@@ -99,12 +103,10 @@ impl<E: Engine> DrainCodec for Base64Enc<E> {
             // The engine pads a final short group itself — that's why
             // partial groups are deferred to finish and never encoded
             // in process.
-            let (scratch, n) = self.encode_group(&self.pending_group[..self.len], 0, out_pos)?;
+            let group = self.pending_group;
+            self.stage_group(&group[..self.len], 0, out_pos)?;
             self.len = 0;
-            out_pos += self
-                .carry
-                .emit(&scratch[..n], &mut output[out_pos..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, 0, out_pos))?;
+            out_pos += self.carry.drain(&mut output[out_pos..]);
             if !self.carry.is_empty() {
                 return Ok(Drain::OutputFilled);
             }
@@ -131,12 +133,10 @@ impl<E: Engine> Codec for Base64Enc<E> {
                 // The top-up took everything `input` had.
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
-            let (scratch, n) = self.encode_group(&self.pending_group, in_pos, out_pos)?;
+            let group = self.pending_group;
+            self.stage_group(&group, in_pos, out_pos)?;
             self.len = 0;
-            out_pos += self
-                .carry
-                .emit(&scratch[..n], &mut output[out_pos..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, in_pos, out_pos))?;
+            out_pos += self.carry.drain(&mut output[out_pos..]);
             if !self.carry.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
@@ -172,12 +172,9 @@ impl<E: Engine> Codec for Base64Enc<E> {
         // remainder is under one group (buffer it and report the input
         // consumed).
         if input.len() - in_pos >= GROUP && out_pos < output.len() {
-            let (scratch, n) = self.encode_group(&input[in_pos..in_pos + GROUP], in_pos, out_pos)?;
+            self.stage_group(&input[in_pos..in_pos + GROUP], in_pos, out_pos)?;
             in_pos += GROUP;
-            out_pos += self
-                .carry
-                .emit(&scratch[..n], &mut output[out_pos..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, in_pos, out_pos))?;
+            out_pos += self.carry.drain(&mut output[out_pos..]);
         }
         if input.len() - in_pos >= GROUP {
             debug_assert_eq!(out_pos, output.len());
@@ -220,13 +217,18 @@ impl<E: Engine> Base64Dec<E> {
         Self { engine, pending_group: [0; ENCODED_GROUP], len: 0, carry: Carry::new() }
     }
 
-    fn decode_group(&self, group: &[u8], consumed: usize, written: usize) -> Result<([u8; GROUP], usize), Error> {
-        let mut scratch = [0u8; GROUP];
-        let n = self
-            .engine
-            .decode_slice(group, &mut scratch)
+    fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
+        let engine = &self.engine;
+        let buffer = self
+            .carry
+            .buffer()
+            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
+        let n = engine
+            .decode_slice(group, buffer)
             .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
-        Ok((scratch, n))
+        self.carry
+            .set_len(n)
+            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
     }
 }
 
@@ -242,19 +244,17 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
             // padding (e.g. URL_SAFE_NO_PAD); the engine itself
             // enforces that — a padded engine like STANDARD rejects an
             // unpadded partial group here.
-            let (scratch, n) = {
-                let mut scratch = [0u8; GROUP];
-                let n = self
-                    .engine
-                    .decode_slice(&self.pending_group[..self.len], &mut scratch)
-                    .map_err(|_| Error::new(ErrorKind::UnexpectedEnd, 0, out_pos))?;
-                (scratch, n)
-            };
+            let group = self.pending_group;
+            self.stage_group(&group[..self.len], 0, out_pos)
+                .map_err(|error| {
+                    if error.kind == ErrorKind::Corrupt {
+                        Error { kind: ErrorKind::UnexpectedEnd, ..error }
+                    } else {
+                        error
+                    }
+                })?;
             self.len = 0;
-            out_pos += self
-                .carry
-                .emit(&scratch[..n], &mut output[out_pos..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, 0, out_pos))?;
+            out_pos += self.carry.drain(&mut output[out_pos..]);
             if !self.carry.is_empty() {
                 return Ok(Drain::OutputFilled);
             }
@@ -292,12 +292,10 @@ impl<E: Engine> Codec for Base64Dec<E> {
                 }
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
-            let (scratch, n) = self.decode_group(&self.pending_group, in_pos, out_pos)?;
+            let group = self.pending_group;
+            self.stage_group(&group, in_pos, out_pos)?;
             self.len = 0;
-            out_pos += self
-                .carry
-                .emit(&scratch[..n], &mut output[out_pos..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, in_pos, out_pos))?;
+            out_pos += self.carry.drain(&mut output[out_pos..]);
             if !self.carry.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
@@ -357,12 +355,9 @@ impl<E: Engine> Codec for Base64Dec<E> {
             if out_pos == output.len() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
-            let (scratch, n) = self.decode_group(&next_group, in_pos, out_pos)?;
+            self.stage_group(&next_group, in_pos, out_pos)?;
             in_pos += ENCODED_GROUP;
-            out_pos += self
-                .carry
-                .emit(&scratch[..n], &mut output[out_pos..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, in_pos, out_pos))?;
+            out_pos += self.carry.drain(&mut output[out_pos..]);
             if !self.carry.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }

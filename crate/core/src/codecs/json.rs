@@ -70,6 +70,17 @@ pub struct JsonEnc {
 }
 
 impl JsonEnc {
+    fn stage_escape(&mut self, escape: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
+        let buffer = self
+            .carry
+            .buffer()
+            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
+        buffer[..escape.len()].copy_from_slice(escape);
+        self.carry
+            .set_len(escape.len())
+            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
+    }
+
     /// Drain whatever `process`/`finish` left pending from a previous
     /// call: first any escape tail still held in `carry`, then the
     /// literal tail (copied straight from the front of `input`), then —
@@ -96,10 +107,8 @@ impl JsonEnc {
 
         if let Some(s) = self.pending_escape.take() {
             consumed += 1;
-            written += self
-                .carry
-                .emit(s.as_bytes(), &mut output[written..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
+            self.stage_escape(s.as_bytes(), consumed, written)?;
+            written += self.carry.drain(&mut output[written..]);
         }
 
         Ok((consumed, written))
@@ -162,10 +171,8 @@ impl Codec for JsonEnc {
 
             let Some(s) = chunk.escaped() else { continue };
             consumed += 1;
-            written += self
-                .carry
-                .emit(s.as_bytes(), &mut output[written..])
-                .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
+            self.stage_escape(s.as_bytes(), consumed, written)?;
+            written += self.carry.drain(&mut output[written..]);
             if !self.carry.is_empty() {
                 return Ok(Progress::OutputFilled { consumed });
             }

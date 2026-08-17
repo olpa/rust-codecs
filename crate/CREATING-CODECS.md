@@ -96,13 +96,26 @@ Two consequences worth spelling out:
   never coalesce input into a larger contiguous slice for you.
 - **"This output buffer is too small for my atomic unit" does not
   exist.** A codec that can only emit whole units (base64: 4-byte
-  encoded groups) uses a [`Carry`]: render the unit into a scratch
-  array, `carry.emit(&scratch, output)` writes what fits and holds the
-  tail, and `carry.drain(output)` delivers the tail first thing on the
-  next call. Size the carry to your largest atomic unit — it's a
+  encoded groups) uses a [`Carry`] at the output boundary. First
+  transform as many whole units as possible directly into the caller's
+  output. If the output is not full but its remaining space is smaller
+  than the next unit, render that unit directly into `carry.buffer()`,
+  then record the rendered length with `carry.set_len()`.
+  `carry.drain(remaining_output)` fills the output
+  and retains the tail for the next call. Size the carry to your
+  largest atomic unit — it's a
   compile-time constant of the format. This is what makes every buffer
   size legal everywhere: 1-byte staging in a `Chain`, 1-byte slots in
   `stream_to_stream`, 1-byte reads from a `CodecReader`.
+
+  For base64 encoding with 10 bytes of output space, encode two 3-byte
+  input groups directly to the first 8 output bytes, then encode one
+  more group directly into a 4-byte carry: drain 2 bytes to fill the
+  output and retain 2. Encoding every group separately into the carry
+  is functionally correct, but it adds a copy and staging call per
+  group and defeats the base64 engine's bulk/SIMD implementation. The
+  carry-staging path should handle at most the one group that
+  straddles the output boundary.
 
 Degenerate buffers: with empty `input`, `process` drains pending
 output (if any) and reports `InputConsumed`; drivers avoid calling
