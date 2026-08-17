@@ -55,7 +55,16 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
         // Only refills once the current window is fully consumed; an
         // unconsumed remainder overlaps the previous call's chunk.
         if self.pos == self.len && !self.eof {
-            self.len = self.inner.read(self.buffer.as_mut())?;
+            // `Read::read` doesn't retry `Interrupted` itself (unlike
+            // `write_all`'s default impl), so a signal landing mid-read
+            // must be retried here — matching `std::io::copy`.
+            self.len = loop {
+                match self.inner.read(self.buffer.as_mut()) {
+                    Ok(n) => break n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            };
             self.pos = 0;
             self.eof = self.len == 0;
         }
@@ -108,7 +117,23 @@ impl<R: BufRead> Source for BufReadSource<R> {
         // `fill_buf` already returns the current unconsumed window
         // without over-reading, and an empty result means EOF — the
         // same contract `Source::chunk` asks for, so no bookkeeping of
-        // our own is needed.
+        // our own is needed. It also doesn't retry `Interrupted` itself,
+        // so a signal landing mid-fill must be retried here — matching
+        // `std::io::copy`.
+        //
+        // The retry loop can't return the borrowed slice directly from
+        // within its own `match` (returning a borrow across a `continue`
+        // edge doesn't pass borrowck), so it only retries until an
+        // attempt stops erroring, then a final, non-looping call reads
+        // out the now-settled buffer — a no-op read when data is
+        // already there, so this costs nothing on the common path.
+        loop {
+            match self.inner.fill_buf() {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
         let buf = self.inner.fill_buf()?;
         Ok((!buf.is_empty()).then_some(buf))
     }
@@ -181,12 +206,49 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
 
 #[cfg(all(test, feature = "identity"))]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{BufReader, Cursor, Read};
 
     use super::{BufReadSource, StdSource, StdSink};
     use crate::identity::identity;
     use crate::stream_to_stream;
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
+
+    /// Fails its first `read` with `Interrupted`, then delegates.
+    struct FlakyOnce<R> {
+        inner: R,
+        failed: bool,
+    }
+
+    impl<R: Read> Read for FlakyOnce<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.failed {
+                self.failed = true;
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "eintr"));
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    #[test]
+    fn std_source_retries_an_interrupted_read() {
+        let flaky = FlakyOnce { inner: Cursor::new(b"retry me".as_slice()), failed: false };
+        let mut input = StdSource::new(flaky, [0u8; 8]);
+        let mut output = VecSink::default();
+        stream_to_stream(&mut input, identity(), &mut output).unwrap();
+        assert_eq!(output.into_inner(), b"retry me");
+    }
+
+    #[test]
+    fn buf_read_source_retries_an_interrupted_fill() {
+        // `BufReader::fill_buf` calls the wrapped `Read::read` directly
+        // when its own buffer is empty, so `FlakyOnce`'s interruption
+        // surfaces through `fill_buf` too.
+        let flaky = FlakyOnce { inner: Cursor::new(b"retry me too".as_slice()), failed: false };
+        let mut input = BufReadSource::new(BufReader::new(flaky));
+        let mut output = VecSink::default();
+        stream_to_stream(&mut input, identity(), &mut output).unwrap();
+        assert_eq!(output.into_inner(), b"retry me too");
+    }
 
     #[test]
     fn std_input_can_feed_vec_output() {
