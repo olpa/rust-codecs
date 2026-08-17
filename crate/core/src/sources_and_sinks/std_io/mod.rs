@@ -5,5 +5,5 @@
 mod adapter;
 mod wrapper;
 
-pub use adapter::{StdSource, StdSink};
-pub use wrapper::{CodecReader, CodecWriter};
+pub use adapter::{BufReadSource, StdSource, StdSink};
+pub use wrapper::{BufReadCodecReader, CodecReader, CodecWriter};

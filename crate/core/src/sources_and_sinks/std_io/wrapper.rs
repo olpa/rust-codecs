@@ -3,6 +3,8 @@
 //!
 //! - [`CodecReader`]: wraps a `Read`, runs the transform on the fly, and
 //!   is itself a `Read` yielding the transformed bytes.
+//! - [`BufReadCodecReader`]: the same, for an `R: std::io::BufRead` —
+//!   no scratch buffer, since it lends straight out of `R`'s own buffer.
 //! - [`CodecWriter`]: wraps a `Write`; bytes written to it are
 //!   transformed on the fly before reaching the wrapped writer.
 //!
@@ -17,7 +19,7 @@
 //! placement in the client's own stack, so a knob inside these
 //! wrappers would just duplicate that.
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use core::convert::Infallible;
 
@@ -25,7 +27,7 @@ use crate::pump::Pump;
 use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
 use crate::{Codec, DriveError, Error, ErrorKind, EndCapableCodec};
 
-use super::adapter::{StdSource, StdSink};
+use super::adapter::{BufReadSource, StdSource, StdSink};
 
 fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
@@ -138,6 +140,64 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> 
     }
 }
 
+/// Like [`CodecReader`], but for an `R` that already implements
+/// `std::io::BufRead` — no caller-provided scratch buffer, since
+/// [`BufReadSource`] lends straight out of `R`'s own buffer instead of
+/// copying into one of its own. Same end-of-stream behavior as
+/// `CodecReader`.
+pub struct BufReadCodecReader<R, C: EndCapableCodec> {
+    input: BufReadSource<R>,
+    pump: Pump<C>,
+}
+
+impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
+    pub fn new(inner: R, codec: C) -> Self {
+        Self { input: BufReadSource::new(inner), pump: Pump::new(codec) }
+    }
+
+    /// Unwrap this reader, discarding the codec, and return the wrapped
+    /// reader. Any bytes already buffered by `inner` but not yet
+    /// yielded to the caller are still there — unlike `CodecReader`,
+    /// nothing was copied out of `inner`'s own buffer.
+    pub fn into_inner(self) -> R {
+        self.input.into_inner()
+    }
+
+    /// Reclaim the reader and the codec — e.g. to read state the codec
+    /// holds (a checksum, a digest). Same caveat as `into_inner`.
+    pub fn into_parts(self) -> (R, C) {
+        (self.input.into_inner(), self.pump.into_inner())
+    }
+
+    /// Direct access to the wrapped reader, bypassing the codec.
+    pub fn get_ref(&self) -> &R {
+        self.input.get_ref()
+    }
+
+    /// Mutable counterpart to [`BufReadCodecReader::get_ref`].
+    pub fn get_mut(&mut self) -> &mut R {
+        self.input.get_mut()
+    }
+
+    /// Direct access to the codec — e.g. to read state a
+    /// `EndCapableCodec` call doesn't expose (a checksum, a digest)
+    /// once its stream has ended in-band.
+    pub fn codec_ref(&self) -> &C {
+        self.pump.get_ref()
+    }
+
+    /// Mutable counterpart to [`BufReadCodecReader::codec_ref`].
+    pub fn codec_mut(&mut self) -> &mut C {
+        self.pump.get_mut()
+    }
+}
+
+impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+    }
+}
+
 /// Wraps a `Write`; bytes written to this wrapper are run through `C`
 /// before being written to the wrapped writer.
 ///
@@ -238,9 +298,17 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 mod tests {
     use std::io::{Cursor, Read};
 
-    use super::{CodecReader, CodecWriter};
+    use super::{BufReadCodecReader, CodecReader, CodecWriter};
     use crate::rot13::rot13;
     use crate::{Drain, DrainCodec, Error, EndCapableCodec, EndCapableProgress};
+
+    #[test]
+    fn buf_read_codec_reader_needs_no_scratch_buffer() {
+        let mut reader = BufReadCodecReader::new(Cursor::new(b"Uryyb, Jbeyq!".as_slice()), rot13());
+        let mut out = String::new();
+        reader.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "Hello, World!");
+    }
 
     #[test]
     #[should_panic(expected = "buffer must be non-empty")]
