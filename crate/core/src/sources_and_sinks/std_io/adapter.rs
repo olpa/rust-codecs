@@ -123,19 +123,28 @@ impl<R: BufRead> Source for BufReadSource<R> {
         //
         // The retry loop can't return the borrowed slice directly from
         // within its own `match` (returning a borrow across a `continue`
-        // edge doesn't pass borrowck), so it only retries until an
-        // attempt stops erroring, then a final, non-looping call reads
-        // out the now-settled buffer — a no-op read when data is
-        // already there, so this costs nothing on the common path.
-        loop {
+        // edge doesn't pass borrowck), so it retries against an owned
+        // length instead, then a final, non-looping call reads out the
+        // now-settled buffer. That second call is only made when `len`
+        // is non-zero: a non-zero length proves the buffer still has
+        // that many unconsumed bytes (nothing else touched `self.inner`
+        // in between), so `fill_buf` takes its no-I/O fast path and
+        // can't itself need retrying. Skipping it on `len == 0` avoids
+        // triggering a second, unguarded real read on the EOF/boundary
+        // case — one that could hit its own `Interrupted` and propagate
+        // unretried, undoing the fix above.
+        let len = loop {
             match self.inner.fill_buf() {
-                Ok(_) => break,
+                Ok(buf) => break buf.len(),
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
+        };
+        if len == 0 {
+            return Ok(None);
         }
         let buf = self.inner.fill_buf()?;
-        Ok((!buf.is_empty()).then_some(buf))
+        Ok(Some(buf))
     }
 
     fn consume(&mut self, amount: usize) {
@@ -248,6 +257,39 @@ mod tests {
         let mut output = VecSink::default();
         stream_to_stream(&mut input, identity(), &mut output).unwrap();
         assert_eq!(output.into_inner(), b"retry me too");
+    }
+
+    /// Yields `b"hi"`, then a genuine EOF (`Ok(0)`), then errors with
+    /// `Interrupted` on any further call — standing in for the second,
+    /// unguarded `fill_buf` call `chunk` must never make once it has
+    /// already seen a zero-length fill.
+    struct EofThenPoisoned {
+        calls: usize,
+    }
+
+    impl Read for EofThenPoisoned {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            match self.calls {
+                1 => {
+                    buf[..2].copy_from_slice(b"hi");
+                    Ok(2)
+                }
+                2 => Ok(0),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "chunk() must not fill_buf again after a zero-length fill",
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn buf_read_source_does_not_refill_after_a_zero_length_fill() {
+        let mut input = BufReadSource::new(BufReader::new(EofThenPoisoned { calls: 0 }));
+        let mut output = VecSink::default();
+        stream_to_stream(&mut input, identity(), &mut output).unwrap();
+        assert_eq!(output.into_inner(), b"hi");
     }
 
     #[test]
