@@ -326,7 +326,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     }
 }
 
-#[cfg(all(test, feature = "rot13"))]
+#[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read};
 

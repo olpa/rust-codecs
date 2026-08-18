@@ -1,9 +1,8 @@
 //! Concrete [`Codec`](crate::Codec) implementations, one per feature.
 
-#[cfg(feature = "identity")]
 pub mod identity;
 
-#[cfg(feature = "rot13")]
+#[cfg(any(feature = "rot13", test))]
 pub mod rot13;
 
 #[cfg(feature = "base64")]

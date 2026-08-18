@@ -138,7 +138,7 @@ impl Sink for VecSink {
     }
 }
 
-#[cfg(all(test, feature = "identity", feature = "alloc"))]
+#[cfg(test)]
 mod tests {
     use super::{VecSource, VecSink};
     use crate::identity::identity;

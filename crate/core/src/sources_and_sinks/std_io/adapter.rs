@@ -227,7 +227,7 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
     }
 }
 
-#[cfg(all(test, feature = "identity"))]
+#[cfg(test)]
 mod tests {
     use std::io::{BufReader, Cursor, Read};
 

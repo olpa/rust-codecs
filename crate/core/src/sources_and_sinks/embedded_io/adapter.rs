@@ -130,7 +130,7 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     }
 }
 
-#[cfg(all(test, feature = "identity", feature = "alloc"))]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::{EmbeddedSource, EmbeddedSink};
     use crate::identity::identity;

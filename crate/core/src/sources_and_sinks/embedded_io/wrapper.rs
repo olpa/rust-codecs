@@ -238,7 +238,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     }
 }
 
-#[cfg(all(test, feature = "identity"))]
+#[cfg(test)]
 mod tests {
     use embedded_io::{Read, Write};
 

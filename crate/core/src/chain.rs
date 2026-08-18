@@ -334,17 +334,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "alloc",
-    feature = "identity",
-    feature = "rot13",
-    feature = "base64"
-))]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
 
     use super::Chain;
+    #[cfg(feature = "base64")]
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
     use crate::{stream_to_stream, DriveError};
@@ -371,6 +366,7 @@ mod tests {
         assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
     }
 
+    #[cfg(feature = "base64")]
     #[test]
     fn base64_enc_then_base64_dec_round_trip() {
         let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 64]);
@@ -385,6 +381,7 @@ mod tests {
         assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
     }
 
+    #[cfg(feature = "base64")]
     #[test]
     fn base64_round_trip_through_one_byte_staging() {
         // The carry contract means even base64's 4-byte groups squeeze
@@ -419,6 +416,7 @@ mod tests {
         assert_eq!(&out[..INPUT.len()], INPUT);
     }
 
+    #[cfg(feature = "base64")]
     #[test]
     fn repeated_one_byte_output_calls_drive_to_completion() {
         // Chain state must survive un-normalized across call
@@ -457,6 +455,7 @@ mod tests {
         assert_eq!(collected, expected);
     }
 
+    #[cfg(feature = "base64")]
     #[test]
     fn finish_drains_first_through_second() {
         // base64_enc's finish() emits the padding `=`; chained into
