@@ -12,6 +12,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rust-codecs-core",
 ]
 
@@ -28,6 +29,12 @@ source = "git+https://github.com/olpa/json-escape?branch=feat%2Fescape-bytes-try
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "libc"
+version = "0.2.189"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "memchr"

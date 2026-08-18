@@ -218,7 +218,33 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Installs a no-op `SIGUSR1` handler so the retry-on-`EINTR` paths in
+/// `StdSource`/`BufReadSource` (see
+/// `core/src/sources_and_sinks/std_io/adapter.rs`) can be exercised
+/// against a real blocking read: send the running process `SIGUSR1`
+/// (`kill -USR1 <pid>`) while it's waiting on stdin.
+///
+/// Without a caught handler, `SIGUSR1`'s default disposition is to
+/// terminate the process, so it would never reach the retry logic at
+/// all — installing a handler, even one that does nothing, is what
+/// makes the interrupted syscall return `EINTR` instead of killing the
+/// process.
+#[cfg(unix)]
+fn install_sigusr1_handler() {
+    extern "C" fn no_op(_signum: libc::c_int) {}
+    // SAFETY: registers a plain C function pointer that does nothing;
+    // safe to run in a signal handler context.
+    unsafe {
+        libc::signal(libc::SIGUSR1, no_op as libc::sighandler_t);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_sigusr1_handler() {}
+
 fn main() {
+    install_sigusr1_handler();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{}", usage());

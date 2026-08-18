@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 rust-codecs-core = { path = "../core", features = ["identity", "rot13", "base64", "json", "embedded-io"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "cli"
 path = "src/main.rs"
