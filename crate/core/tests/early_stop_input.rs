@@ -15,6 +15,8 @@
 //! a base64 decoder wrapped around [`TwoByteSource`], turning the
 //! codec's own output into a `Source`.
 
+#![cfg(feature = "alloc")]
+
 use core::convert::Infallible;
 
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
