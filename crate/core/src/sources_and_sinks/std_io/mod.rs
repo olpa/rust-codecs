@@ -7,3 +7,5 @@ mod wrapper;
 
 pub use adapter::{BufReadSource, StdSource, StdSink};
 pub use wrapper::{BufReadCodecReader, CodecReader, CodecWriter};
+
+pub use crate::sources_and_sinks::shared_io::ReadGranularity;

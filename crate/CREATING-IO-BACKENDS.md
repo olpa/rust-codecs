@@ -64,17 +64,26 @@ way `std_io::wrapper::CodecReader`/`CodecWriter` hold one next to
 ```rust
 use core::convert::Infallible;
 
-use rust_codecs_core::sources_and_sinks::shared_io::pump_read;
+use rust_codecs_core::sources_and_sinks::shared_io::{pump_read, ReadGranularity};
 use rust_codecs_core::{DriveError, Pump, Source, EndCapableCodec};
 
 struct YourReader<I: Source, C: EndCapableCodec> {
     input: I,
     pump: Pump<C>,
+    granularity: ReadGranularity,
 }
 
 impl<I: Source, C: EndCapableCodec> YourReader<I, C> {
     fn new(input: I, codec: C) -> Self {
-        Self { input, pump: Pump::new(codec) }
+        Self { input, pump: Pump::new(codec), granularity: ReadGranularity::default() }
+    }
+
+    // Optional: let a caller opt into `SingleRead` (see below) instead
+    // of hardcoding `FillBuffer`, the way `std_io`/`embedded_io`'s own
+    // `CodecReader::with_read_granularity` does.
+    fn with_read_granularity(mut self, granularity: ReadGranularity) -> Self {
+        self.granularity = granularity;
+        self
     }
 
     // Wire this into `std::io::Read`/`embedded_io::Read`/whatever
@@ -82,7 +91,7 @@ impl<I: Source, C: EndCapableCodec> YourReader<I, C> {
     // your error type at the boundary (see `reader_error` in
     // `std_io::wrapper`/`embedded_io::wrapper` for the pattern).
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, DriveError<I::Error, Infallible>> {
-        pump_read(&mut self.pump, &mut self.input, buf)
+        pump_read(&mut self.pump, &mut self.input, buf, self.granularity)
     }
 }
 ```
@@ -92,3 +101,27 @@ impl<I: Source, C: EndCapableCodec> YourReader<I, C> {
 `Read`/`Write` method. Map their `DriveError` result into your own
 error type at the call site (`reader_error`/`writer_error` in
 `std_io::wrapper`/`embedded_io::wrapper` are the templates).
+
+### `ReadGranularity`: how much one `read()` pulls
+
+`pump_read` takes a [`ReadGranularity`](crate::sources_and_sinks::shared_io::ReadGranularity)
+that controls how many chunks it pulls from `input` before returning:
+
+- **`FillBuffer`** (the default): keep pulling from `input` until the
+  caller's `buf` is full or `input` is exhausted — best throughput,
+  since it coalesces as many underlying reads as fit into one `read()`
+  call.
+- **`SingleRead`**: return as soon as one pull from `input` made any
+  progress, instead of chasing a full `buf`. This is the interactive-
+  application setting: use it when `input`'s own reads are meaningful
+  units on their own (a terminal line, a network datagram) and a
+  handler downstream of your reader should see each one as soon as it
+  arrives — not only once enough of them have accumulated to fill
+  whatever buffer a caller driving your reader through something like
+  `std::io::copy` happens to be using (fixed-size and usually far
+  bigger than one such unit), which would otherwise stall the handler
+  waiting for more input than it actually needs.
+
+Both granularities move the same bytes; they only differ in how many
+`read()` calls (and so how many round trips through whatever's driving
+your reader) it takes to move them.

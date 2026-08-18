@@ -24,7 +24,9 @@ use std::io::{self, BufRead, Read, Write};
 use core::convert::Infallible;
 
 use crate::pump::Pump;
-use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
+use crate::sources_and_sinks::shared_io::{
+    pump_finish, pump_flush, pump_read, pump_write, ReadGranularity,
+};
 use crate::{Codec, DriveError, Error, ErrorKind, EndCapableCodec};
 
 use super::adapter::{BufReadSource, StdSource, StdSink};
@@ -77,10 +79,12 @@ fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
 pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: StdSource<R, S>,
     pump: Pump<C>,
+    granularity: ReadGranularity,
 }
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
-    /// Build a `CodecReader`.
+    /// Build a `CodecReader`. Reads at [`ReadGranularity::FillBuffer`]
+    /// until changed via [`CodecReader::with_read_granularity`].
     ///
     /// # Panics
     ///
@@ -88,7 +92,19 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// from `inner`, so the codec could never see any input — a caller
     /// bug, not a runtime condition.
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
-        Self { input: StdSource::new(inner, inbuf), pump: Pump::new(codec) }
+        Self {
+            input: StdSource::new(inner, inbuf),
+            pump: Pump::new(codec),
+            granularity: ReadGranularity::default(),
+        }
+    }
+
+    /// Set how much a single `read()` call pulls from the wrapped
+    /// reader before returning — see [`ReadGranularity`]. Chainable,
+    /// so it composes with `CodecReader::new`.
+    pub fn with_read_granularity(mut self, granularity: ReadGranularity) -> Self {
+        self.granularity = granularity;
+        self
     }
 
     /// Unwrap this reader, discarding the codec, and return the wrapped
@@ -136,7 +152,7 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        pump_read(&mut self.pump, &mut self.input, buf, self.granularity).map_err(reader_error)
     }
 }
 
@@ -148,11 +164,27 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> 
 pub struct BufReadCodecReader<R, C: EndCapableCodec> {
     input: BufReadSource<R>,
     pump: Pump<C>,
+    granularity: ReadGranularity,
 }
 
 impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
+    /// Build a `BufReadCodecReader`. Reads at
+    /// [`ReadGranularity::FillBuffer`] until changed via
+    /// [`BufReadCodecReader::with_read_granularity`].
     pub fn new(inner: R, codec: C) -> Self {
-        Self { input: BufReadSource::new(inner), pump: Pump::new(codec) }
+        Self {
+            input: BufReadSource::new(inner),
+            pump: Pump::new(codec),
+            granularity: ReadGranularity::default(),
+        }
+    }
+
+    /// Set how much a single `read()` call pulls from the wrapped
+    /// reader before returning — see [`ReadGranularity`]. Chainable,
+    /// so it composes with `BufReadCodecReader::new`.
+    pub fn with_read_granularity(mut self, granularity: ReadGranularity) -> Self {
+        self.granularity = granularity;
+        self
     }
 
     /// Unwrap this reader, discarding the codec, and return the wrapped
@@ -194,7 +226,7 @@ impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
 
 impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        pump_read(&mut self.pump, &mut self.input, buf, self.granularity).map_err(reader_error)
     }
 }
 

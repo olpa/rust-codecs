@@ -11,7 +11,9 @@ use core::fmt;
 use embedded_io::{ErrorType, Read, Write};
 
 use crate::pump::Pump;
-use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
+use crate::sources_and_sinks::shared_io::{
+    pump_finish, pump_flush, pump_read, pump_write, ReadGranularity,
+};
 use crate::{Codec, DriveError, Error, ErrorKind, EndCapableCodec};
 
 use super::adapter::{EmbeddedSource, EmbeddedSink};
@@ -73,11 +75,26 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: EmbeddedSource<R, S>,
     pump: Pump<C>,
+    granularity: ReadGranularity,
 }
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+    /// Build a `CodecReader`. Reads at [`ReadGranularity::FillBuffer`]
+    /// until changed via [`CodecReader::with_read_granularity`].
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
-        Self { input: EmbeddedSource::new(inner, inbuf), pump: Pump::new(codec) }
+        Self {
+            input: EmbeddedSource::new(inner, inbuf),
+            pump: Pump::new(codec),
+            granularity: ReadGranularity::default(),
+        }
+    }
+
+    /// Set how much a single `read()` call pulls from the wrapped
+    /// reader before returning — see [`ReadGranularity`]. Chainable,
+    /// so it composes with `CodecReader::new`.
+    pub fn with_read_granularity(mut self, granularity: ReadGranularity) -> Self {
+        self.granularity = granularity;
+        self
     }
 
     /// Return the wrapped reader. Any buffered, unconsumed input is
@@ -127,7 +144,7 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        pump_read(&mut self.pump, &mut self.input, buf, self.granularity).map_err(reader_error)
     }
 }
 

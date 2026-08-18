@@ -114,6 +114,32 @@ pub(crate) enum PumpEnd {
     End,
 }
 
+/// Result of one [`Pump::transfer_step`] call — the single-step
+/// counterpart to [`PumpTransfer`]/[`PumpEnd`], which cover a whole
+/// [`Pump::transfer_from`] run. Distinct from `PumpTransfer` because
+/// [`StepEnd`] has a fourth case, [`StepEnd::Progressed`], that
+/// `PumpEnd` deliberately has no room for: `transfer_from`'s loop
+/// consumes it internally (keep looping) and never lets it escape as
+/// its own `PumpEnd::End`/`SourceExhausted`/`SinkExhausted` result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PumpStep {
+    pub(crate) consumed: usize,
+    pub(crate) written: usize,
+    pub(crate) end: StepEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepEnd {
+    SourceExhausted,
+    SinkExhausted,
+    /// The step completed normally (the codec fully consumed its
+    /// input window or fully filled its output window) without
+    /// exhausting `input` or `output` themselves — more may still be
+    /// available from either on the next step.
+    Progressed,
+    End,
+}
+
 /// Same shape as [`PumpDrainStep`], but `written` is the accumulated
 /// total across every call `drain_to` made, not one call's
 /// contribution, kept as a distinct type so the two can't be mixed
@@ -198,9 +224,9 @@ impl<C: EndCapableCodec> Pump<C> {
     /// its stream end or either endpoint has no more room/data to
     /// offer.
     ///
-    /// Each loop iteration fetches one chunk from `input`, then one
-    /// spare slice from `output`, calls [`Pump::latched_step`] once, then
-    /// feeds the result back (`input.consume`, `output.commit`).
+    /// Each loop iteration is one [`Pump::transfer_step`] call; this
+    /// just accumulates its `consumed`/`written` counts and keeps
+    /// looping past [`StepEnd::Progressed`].
     ///
     /// Returns once one of three things happens: the source is
     /// exhausted (`PumpEnd::SourceExhausted`), the sink has no more
@@ -221,73 +247,112 @@ impl<C: EndCapableCodec> Pump<C> {
         let mut consumed = 0;
         let mut written = 0;
         loop {
-            // Invariants at top of loop: `consumed`/`written` are the
+            // Invariant at top of loop: `consumed`/`written` are the
             // committed totals from prior iterations only (this
-            // iteration hasn't moved anything yet); the codec hasn't
-            // reported `End` (that returns immediately).
-            let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
-                return Ok(PumpTransfer {
-                    consumed,
-                    written,
-                    end: PumpEnd::SourceExhausted,
-                });
+            // iteration hasn't moved anything yet).
+            let step = self.transfer_step(input, output)?;
+            consumed += step.consumed;
+            written += step.written;
+            let end = match step.end {
+                StepEnd::SourceExhausted => PumpEnd::SourceExhausted,
+                StepEnd::SinkExhausted => PumpEnd::SinkExhausted,
+                StepEnd::End => PumpEnd::End,
+                StepEnd::Progressed => continue,
             };
-            let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
-                return Ok(PumpTransfer {
-                    consumed,
-                    written,
-                    end: PumpEnd::SinkExhausted,
-                });
-            };
-            // A call may make progress with an empty `spare` (e.g. a
-            // codec that only ever consumes input, never writing
-            // anything), so instead of rejecting an empty slice up
-            // front, progress is judged as part of the call's own
-            // result, right alongside the error case: zero bytes moved
-            // on both sides, without ending the stream, means this
-            // pair genuinely can't advance.
-            let moved = match self.latched_step(chunk, spare) {
-                Ok(moved)
-                    if moved.consumed > 0
-                        || moved.written > 0
-                        || moved.end == EndCapableStepEnd::End =>
-                {
-                    moved
-                }
-                Ok(_) => return Err(DriveError::NoProgress),
-                Err(error) => {
-                    let error = error
-                        .validated(chunk.len(), spare.len())
-                        .unwrap_or_else(|violation| violation);
-                    if error.consumed > 0 {
-                        input.consume(error.consumed);
-                    }
-                    if error.written > 0 {
-                        output.commit(error.written).map_err(DriveError::Sink)?;
-                    }
-                    return Err(DriveError::Codec(error));
-                }
-            };
-            // `moved.consumed` may be less than `chunk.len()` (output
-            // ran out first); the unconsumed remainder isn't lost —
-            // it reappears (overlapping this chunk) on the next
-            // `input.chunk()` call.
-            if moved.consumed > 0 {
-                input.consume(moved.consumed);
-            }
-            if moved.written > 0 {
-                output.commit(moved.written).map_err(DriveError::Sink)?;
-            }
-            consumed += moved.consumed;
-            written += moved.written;
-            if moved.end == EndCapableStepEnd::End {
-                return Ok(PumpTransfer {
-                    consumed,
-                    written,
-                    end: PumpEnd::End,
-                });
-            }
+            return Ok(PumpTransfer { consumed, written, end });
         }
+    }
+
+    /// Attempt exactly one [`Pump::latched_step`] between `input` and
+    /// `output`: pull at most one chunk from `input`, hand it to the
+    /// codec along with one spare slice from `output`, and feed the
+    /// result back (`input.consume`, `output.commit`) — then return,
+    /// without looping back for more input the way
+    /// [`Pump::transfer_from`] does.
+    ///
+    /// This is the single-step primitive `transfer_from` loops on, and
+    /// is also driven directly by
+    /// [`crate::sources_and_sinks::shared_io::pump_read`] under
+    /// [`crate::sources_and_sinks::shared_io::ReadGranularity::SingleRead`],
+    /// so a `Read::read` call returns as soon as the wrapped source's
+    /// own read produced anything, instead of coalescing multiple
+    /// source reads into one call. That's the interactive-application
+    /// case `SingleRead` exists for: a handler downstream of the
+    /// `Read` should see each unit of input as soon as it arrives,
+    /// not only once enough of them have piled up to fill some
+    /// buffer it can't see into.
+    ///
+    /// Same stall/error handling as `transfer_from`'s loop body: a call
+    /// that moves zero bytes on both sides without ending the stream is
+    /// `DriveError::NoProgress`; a codec error still commits whatever
+    /// progress it validly reported before returning it.
+    pub(crate) fn transfer_step<I: Source, O: Sink>(
+        &mut self,
+        input: &mut I,
+        output: &mut O,
+    ) -> Result<PumpStep, DriveError<I::Error, O::Error>> {
+        let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
+            return Ok(PumpStep {
+                consumed: 0,
+                written: 0,
+                end: StepEnd::SourceExhausted,
+            });
+        };
+        let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
+            return Ok(PumpStep {
+                consumed: 0,
+                written: 0,
+                end: StepEnd::SinkExhausted,
+            });
+        };
+        // A call may make progress with an empty `spare` (e.g. a
+        // codec that only ever consumes input, never writing
+        // anything), so instead of rejecting an empty slice up
+        // front, progress is judged as part of the call's own
+        // result, right alongside the error case: zero bytes moved
+        // on both sides, without ending the stream, means this
+        // pair genuinely can't advance.
+        let moved = match self.latched_step(chunk, spare) {
+            Ok(moved)
+                if moved.consumed > 0
+                    || moved.written > 0
+                    || moved.end == EndCapableStepEnd::End =>
+            {
+                moved
+            }
+            Ok(_) => return Err(DriveError::NoProgress),
+            Err(error) => {
+                let error = error
+                    .validated(chunk.len(), spare.len())
+                    .unwrap_or_else(|violation| violation);
+                if error.consumed > 0 {
+                    input.consume(error.consumed);
+                }
+                if error.written > 0 {
+                    output.commit(error.written).map_err(DriveError::Sink)?;
+                }
+                return Err(DriveError::Codec(error));
+            }
+        };
+        // `moved.consumed` may be less than `chunk.len()` (output ran
+        // out first); the unconsumed remainder isn't lost — it
+        // reappears (overlapping this chunk) on the next
+        // `input.chunk()` call.
+        if moved.consumed > 0 {
+            input.consume(moved.consumed);
+        }
+        if moved.written > 0 {
+            output.commit(moved.written).map_err(DriveError::Sink)?;
+        }
+        Ok(PumpStep {
+            consumed: moved.consumed,
+            written: moved.written,
+            end: if moved.end == EndCapableStepEnd::End {
+                StepEnd::End
+            } else {
+                StepEnd::Progressed
+            },
+        })
     }
 
     /// Drain the codec's trailing output by repeatedly calling
