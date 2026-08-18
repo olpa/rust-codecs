@@ -30,6 +30,8 @@
 //! straight through to the base writer, unescaped.
 //!
 //! ```
+//! # #[cfg(feature = "json")]
+//! # {
 //! use std::io::Write;
 //!
 //! use rust_codecs_core::json::json_enc;
@@ -52,6 +54,7 @@
 //! // Assert
 //! let output = base_writer;
 //! assert_eq!(output, br#""\"\\""#);
+//! # }
 //! ```
 //!
 //! ## Wrapping an input
@@ -60,6 +63,8 @@
 //! wrappers instead of `std::io`.
 //!
 //! ```
+//! # #[cfg(all(feature = "base64", feature = "embedded-io"))]
+//! # {
 //! use embedded_io::Read;
 //!
 //! use rust_codecs_core::base64::base64_dec;
@@ -79,6 +84,7 @@
 //! // Assert
 //! let text = std::str::from_utf8(&read_buffer).unwrap();
 //! assert_eq!(text, "🦀");
+//! # }
 //! ```
 //!
 //! ## Any stream to any stream
@@ -88,6 +94,8 @@
 //! borrows a `&str`'s bytes and the sink grows a `Vec<u8>`.
 //!
 //! ```
+//! # #[cfg(feature = "rot13")]
+//! # {
 //! use rust_codecs_core::rot13::rot13;
 //! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 //! use rust_codecs_core::sources_and_sinks::vec::VecSink;
@@ -106,6 +114,7 @@
 //! // Assert
 //! let output = String::from_utf8(sink.into_inner()).unwrap();
 //! assert_eq!(output, "uryyb");
+//! # }
 //! ```
 //!
 //! Notes:
@@ -216,3 +225,29 @@ pub mod sources_and_sinks;
 mod codecs;
 #[allow(unused_imports)]
 pub use codecs::*;
+
+#[cfg(test)]
+mod feature_coverage {
+    // A plain `cargo test` silently skips whatever optional features
+    // aren't enabled — no error, just fewer tests run. Surface that
+    // instead of letting it pass quietly: this test only actually runs
+    // (and only then needs to pass) under `--all-features`; otherwise
+    // it's skipped as "ignored" with the reason below, which shows up
+    // in the summary line without failing the narrower run.
+    #[test]
+    #[cfg_attr(
+        not(all(
+            feature = "std",
+            feature = "base64",
+            feature = "json",
+            feature = "embedded-io"
+        )),
+        ignore = "some optional features are disabled — run `cargo test --all-features`"
+    )]
+    fn all_optional_features_are_enabled() {
+        assert!(cfg!(feature = "std"), "feature \"std\" is off");
+        assert!(cfg!(feature = "base64"), "feature \"base64\" is off");
+        assert!(cfg!(feature = "json"), "feature \"json\" is off");
+        assert!(cfg!(feature = "embedded-io"), "feature \"embedded-io\" is off");
+    }
+}

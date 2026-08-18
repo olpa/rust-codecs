@@ -362,6 +362,7 @@ fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
 /// `Carry`. Neither `read_span` nor `tokenize_string_array_literal`
 /// know or care that they're reading through a codec instead of raw
 /// bytes.
+#[cfg(feature = "base64")]
 #[test]
 fn tokenizes_a_string_array_literal_from_a_base64_decoded_two_byte_source() {
     use rust_codecs_core::base64::base64_dec;
