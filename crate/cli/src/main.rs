@@ -13,8 +13,8 @@
 
 use std::io::{self, Read, Write};
 
-use rust_codecs_core::sources_and_sinks::std_io::{CodecReader, CodecWriter};
-use rust_codecs_core::{Chain, Codec};
+use rust_codecs_core::sources_and_sinks::std_io::{CodecReader, CodecWriter, StdSink, StdSource};
+use rust_codecs_core::{stream_to_stream, Chain, Codec};
 
 /// Staging buffer size for each link in a `--readers`/`--writers` chain.
 const STAGING: usize = 4 * 1024;
@@ -39,9 +39,15 @@ Test harness for chaining codecs: folds --readers into one Chain and
 the writers, to stdout.
 
 Usage:
-  cargo run -p cli -- [--readers CODEC...] [--writers CODEC...]
+  cargo run -p cli -- [--engine copy|stream] [--readers CODEC...] [--writers CODEC...]
 
 Codecs: {names}
+
+--engine selects which copy path drives the chain: `copy` (default)
+wraps the chain in CodecReader/CodecWriter and drives it with
+std::io::copy; `stream` drives the same chain directly via
+stream_to_stream over StdSource/StdSink, with no Read/Write adapter
+in between.
 
 Reader codecs apply in the order listed (first listed runs on the raw
 bytes first). Writer codecs also apply in the order listed (first
@@ -67,12 +73,39 @@ enum Mode {
     Writers,
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> Result<(Vec<String>, Vec<String>), String> {
+/// Which copy path drives the composed reader/writer chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    /// `CodecReader`/`CodecWriter` (a `Read`/`Write` adapter pair)
+    /// driven by `std::io::copy`.
+    Copy,
+    /// `StdSource`/`StdSink` driven directly by `stream_to_stream`,
+    /// with no `Read`/`Write` adapter in between.
+    Stream,
+}
+
+fn parse_args(
+    args: impl Iterator<Item = String>,
+) -> Result<(Engine, Vec<String>, Vec<String>), String> {
     let mut mode = Mode::None;
+    let mut engine = Engine::Copy;
     let mut readers = Vec::new();
     let mut writers = Vec::new();
-    for arg in args {
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--engine" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--engine requires a value (copy or stream)".to_string())?;
+                engine = match value.as_str() {
+                    "copy" => Engine::Copy,
+                    "stream" => Engine::Stream,
+                    other => {
+                        return Err(format!("unknown engine {other:?} (expected copy or stream)"))
+                    }
+                };
+            }
             "--readers" => mode = Mode::Readers,
             "--writers" => mode = Mode::Writers,
             _ => match mode {
@@ -86,7 +119,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<(Vec<String>, Vec<St
             },
         }
     }
-    Ok((readers, writers))
+    Ok((engine, readers, writers))
 }
 
 /// Fold `names` into a single `Codec`, first name applied first, closest
@@ -118,9 +151,39 @@ fn run_io<R: Read, W: Write>(
     writer.finish().map_err(|e| e.to_string())
 }
 
+/// Same end-to-end behavior as `run_io`, but drives the composed chain
+/// directly via `stream_to_stream` over `StdSource`/`StdSink` instead
+/// of wrapping it in `CodecReader`/`CodecWriter` and driving it with
+/// `std::io::copy`. The reader and writer stacks are folded into a
+/// single `Chain` first, since `stream_to_stream` drives one codec
+/// between one `Source` and one `Sink`.
+fn run_io_stream<R: Read, W: Write>(
+    reader_names: &[String],
+    writer_names: &[String],
+    input: R,
+    output: W,
+) -> Result<W, String> {
+    let reader_codec = compose(reader_names)?;
+    let writer_codec = compose(writer_names)?;
+    let codec = Chain::new(reader_codec, writer_codec, vec![0u8; STAGING]);
+
+    let mut source = StdSource::new(input, vec![0u8; STAGING]);
+    let mut sink = StdSink::new(output, vec![0u8; STAGING]);
+
+    stream_to_stream(&mut source, codec, &mut sink).map_err(|e| format!("{e:?}"))?;
+    Ok(sink.into_inner())
+}
+
 fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let (reader_names, writer_names) = parse_args(args)?;
-    run_io(&reader_names, &writer_names, io::stdin(), io::stdout())?;
+    let (engine, reader_names, writer_names) = parse_args(args)?;
+    match engine {
+        Engine::Copy => {
+            run_io(&reader_names, &writer_names, io::stdin(), io::stdout())?;
+        }
+        Engine::Stream => {
+            run_io_stream(&reader_names, &writer_names, io::stdin(), io::stdout())?;
+        }
+    }
     Ok(())
 }
 
@@ -147,7 +210,7 @@ mod tests {
     use rust_codecs_core::sources_and_sinks::vec::{VecSource, VecSink};
     use rust_codecs_core::rot13::rot13;
 
-    use super::{compose, run_io};
+    use super::{compose, parse_args, run_io, run_io_stream, Engine};
 
     fn collect(codec: impl rust_codecs_core::Codec, bytes: &[u8]) -> Vec<u8> {
         let mut input = VecSource::new(bytes.to_vec());
@@ -175,6 +238,47 @@ mod tests {
 
         let expected = collect(rot13(), input);
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn stream_engine_matches_copy_engine() {
+        // Same pipeline as `end_to_end_round_trip_from_module_doc`,
+        // driven through `stream_to_stream`/`StdSource`/`StdSink`
+        // instead of `std::io::copy`/`CodecReader`/`CodecWriter` — both
+        // engines must agree on the bytes they produce.
+        let reader_names = names(&["identity", "identity", "rot13"]);
+        let writer_names = names(&["rot13", "rot13", "identity"]);
+        let input = b"hello";
+
+        let copy_output =
+            run_io(&reader_names, &writer_names, Cursor::new(input.to_vec()), Vec::new()).unwrap();
+        let stream_output = run_io_stream(
+            &reader_names,
+            &writer_names,
+            Cursor::new(input.to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(stream_output, copy_output);
+    }
+
+    #[test]
+    fn parse_args_reads_engine_flag() {
+        let (engine, readers, writers) =
+            parse_args(names(&["--engine", "stream", "--readers", "rot13"]).into_iter()).unwrap();
+        assert_eq!(engine, Engine::Stream);
+        assert_eq!(readers, names(&["rot13"]));
+        assert!(writers.is_empty());
+
+        let (engine, _, _) = parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
+        assert_eq!(engine, Engine::Copy);
+    }
+
+    #[test]
+    fn parse_args_rejects_unknown_engine() {
+        let err = parse_args(names(&["--engine", "bogus"]).into_iter()).unwrap_err();
+        assert!(err.contains("bogus"));
     }
 
     /// A `Write` sink that shares its buffer via `Rc<RefCell<_>>`, so a
