@@ -17,11 +17,16 @@ CodecReader/CodecWriter). Each length's bytes are drawn from a Random
 seeded with f"{seed}:{length}", so a single failing length can be
 reproduced in isolation with --seed and --only-length.
 
+Every check runs once per `--engine` value (default: both `copy` and
+`stream`, the cli's two copy paths -- see `cli --help`), so a codec bug
+that only one engine exercises still gets caught.
+
 Usage:
   ./stress_test_base64.py
   ./stress_test_base64.py --seed 42
   ./stress_test_base64.py --only-length 17 -v
   ./stress_test_base64.py --hex-input 48656c6c6f
+  ./stress_test_base64.py --engine stream
 """
 
 import argparse
@@ -37,8 +42,8 @@ DEFAULT_EXTRA_LENGTHS = [
 ]
 
 
-def cli_cmd(args):
-    return ["cargo", "run", "-q", "-p", "cli", "--", *args]
+def cli_cmd(args, engine):
+    return ["cargo", "run", "-q", "-p", "cli", "--", "--engine", engine, *args]
 
 
 def run(cmd, input_bytes, cwd):
@@ -69,23 +74,24 @@ def check(name, actual, expected, data, failures):
     return True
 
 
-def test_one(crate_dir, data, verbose):
+def test_one(crate_dir, data, verbose, engines):
     failures = []
 
-    enc_writer = run(cli_cmd(["--writers", "base64-enc"]), data, cwd=crate_dir)
-    sys_enc = system_base64_encode(data)
-    check("writer-encode vs system base64", enc_writer, sys_enc, data, failures)
+    for engine in engines:
+        enc_writer = run(cli_cmd(["--writers", "base64-enc"], engine), data, cwd=crate_dir)
+        sys_enc = system_base64_encode(data)
+        check(f"[{engine}] writer-encode vs system base64", enc_writer, sys_enc, data, failures)
 
-    enc_reader = run(cli_cmd(["--readers", "base64-enc"]), data, cwd=crate_dir)
-    check("reader-encode vs writer-encode", enc_reader, enc_writer, data, failures)
+        enc_reader = run(cli_cmd(["--readers", "base64-enc"], engine), data, cwd=crate_dir)
+        check(f"[{engine}] reader-encode vs writer-encode", enc_reader, enc_writer, data, failures)
 
-    dec_reader = run(cli_cmd(["--readers", "base64-dec"]), enc_writer, cwd=crate_dir)
-    check("reader-decode vs original", dec_reader, data, data, failures)
+        dec_reader = run(cli_cmd(["--readers", "base64-dec"], engine), enc_writer, cwd=crate_dir)
+        check(f"[{engine}] reader-decode vs original", dec_reader, data, data, failures)
 
-    dec_writer = run(cli_cmd(["--writers", "base64-dec"]), enc_writer, cwd=crate_dir)
-    check("writer-decode vs original", dec_writer, data, data, failures)
+        dec_writer = run(cli_cmd(["--writers", "base64-dec"], engine), enc_writer, cwd=crate_dir)
+        check(f"[{engine}] writer-decode vs original", dec_writer, data, data, failures)
 
-    check("reader-decode vs writer-decode", dec_reader, dec_writer, data, failures)
+        check(f"[{engine}] reader-decode vs writer-decode", dec_reader, dec_writer, data, failures)
 
     if verbose and not failures:
         print(f"  ok: {describe(data)}")
@@ -106,6 +112,12 @@ def main():
     parser.add_argument("--only-length", type=int, default=None, help="test only this one input length")
     parser.add_argument("--hex-input", type=str, default=None, help="test this exact hex-encoded input instead of random data")
     parser.add_argument(
+        "--engine",
+        choices=["copy", "stream", "both"],
+        default="both",
+        help="which cli --engine value(s) to test (default: both)",
+    )
+    parser.add_argument(
         "--crate-dir",
         type=Path,
         default=Path(__file__).resolve().parent / "crate",
@@ -117,6 +129,8 @@ def main():
     if shutil.which("base64") is None:
         print("error: no `base64` command found on PATH", file=sys.stderr)
         return 1
+
+    engines = ["copy", "stream"] if args.engine == "both" else [args.engine]
 
     crate_dir = args.crate_dir
     print(f"building cli (cargo build -q -p cli) in {crate_dir} ...")
@@ -137,7 +151,7 @@ def main():
     total_failures = []
     for label, data in cases:
         print(f"testing {label} ...")
-        failures = test_one(crate_dir, data, args.verbose)
+        failures = test_one(crate_dir, data, args.verbose, engines)
         if failures:
             print(f"  FAILED ({len(failures)} check(s)):")
             for f in failures:

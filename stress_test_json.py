@@ -25,11 +25,16 @@ cases here come in three flavors:
     landing an escape right at a chunk boundary, and invalid UTF-8
     interleaved with escapes.
 
+Every check runs once per `--engine` value (default: both `copy` and
+`stream`, the cli's two copy paths -- see `cli --help`), so a codec bug
+that only one engine exercises still gets caught.
+
 Usage:
   ./stress_test_json.py
   ./stress_test_json.py --seed 42
   ./stress_test_json.py --only escape-heavy -v
   ./stress_test_json.py --hex-input 48656c6c6f0a22
+  ./stress_test_json.py --engine stream
 """
 
 import argparse
@@ -72,8 +77,8 @@ def oracle(data: bytes) -> bytes:
     return bytes(out)
 
 
-def cli_cmd(args):
-    return ["cargo", "run", "-q", "-p", "cli", "--", *args]
+def cli_cmd(args, engine):
+    return ["cargo", "run", "-q", "-p", "cli", "--", "--engine", engine, *args]
 
 
 def run(cmd, input_bytes, cwd):
@@ -100,15 +105,16 @@ def check(name, actual, expected, data, failures):
     return True
 
 
-def test_one(crate_dir, data, verbose):
+def test_one(crate_dir, data, verbose, engines):
     failures = []
 
-    enc_writer = run(cli_cmd(["--writers", "json-enc"]), data, cwd=crate_dir)
-    expected = oracle(data)
-    check("writer-encode vs oracle", enc_writer, expected, data, failures)
+    for engine in engines:
+        enc_writer = run(cli_cmd(["--writers", "json-enc"], engine), data, cwd=crate_dir)
+        expected = oracle(data)
+        check(f"[{engine}] writer-encode vs oracle", enc_writer, expected, data, failures)
 
-    enc_reader = run(cli_cmd(["--readers", "json-enc"]), data, cwd=crate_dir)
-    check("reader-encode vs writer-encode", enc_reader, enc_writer, data, failures)
+        enc_reader = run(cli_cmd(["--readers", "json-enc"], engine), data, cwd=crate_dir)
+        check(f"[{engine}] reader-encode vs writer-encode", enc_reader, enc_writer, data, failures)
 
     if verbose and not failures:
         print(f"  ok: {describe(data)}")
@@ -162,6 +168,12 @@ def main():
     )
     parser.add_argument("--hex-input", type=str, default=None, help="test this exact hex-encoded input instead of generated cases")
     parser.add_argument(
+        "--engine",
+        choices=["copy", "stream", "both"],
+        default="both",
+        help="which cli --engine value(s) to test (default: both)",
+    )
+    parser.add_argument(
         "--crate-dir",
         type=Path,
         default=Path(__file__).resolve().parent / "crate",
@@ -169,6 +181,8 @@ def main():
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="print each passing case, not just failures")
     args = parser.parse_args()
+
+    engines = ["copy", "stream"] if args.engine == "both" else [args.engine]
 
     crate_dir = args.crate_dir
     print(f"building cli (cargo build -q -p cli) in {crate_dir} ...")
@@ -187,7 +201,7 @@ def main():
     total_failures = []
     for label, data in cases:
         print(f"testing {label} ...")
-        failures = test_one(crate_dir, data, args.verbose)
+        failures = test_one(crate_dir, data, args.verbose, engines)
         if failures:
             print(f"  FAILED ({len(failures)} check(s)):")
             for f in failures:
