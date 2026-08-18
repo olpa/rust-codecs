@@ -189,19 +189,33 @@ pub fn json_enc() -> JsonEnc {
     JsonEnc::default()
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "std")]
     use std::io::{Cursor, Read, Write};
 
-    use super::{escape_bytes, json_enc, JsonEnc};
+    #[cfg(feature = "std")]
+    use super::escape_bytes;
+    use super::{json_enc, JsonEnc};
+    #[cfg(feature = "std")]
+    use alloc::vec;
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
+    #[cfg(feature = "std")]
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
+    #[cfg(feature = "alloc")]
     use crate::sources_and_sinks::vec::{VecSink, VecSource};
-    use crate::{Codec, Drain, DrainCodec, DriveError, ErrorKind, Progress};
+    use crate::{Codec, Drain, DrainCodec, ErrorKind, Progress};
+    #[cfg(feature = "alloc")]
+    use crate::DriveError;
 
+    #[cfg(feature = "alloc")]
     const INPUT: &[u8] = b"He said \"hi\"\n\tBack\\slash\x01\x1f\x7f\xc3\xa9";
+    #[cfg(feature = "alloc")]
     const ESCAPED: &[u8] =
         b"He said \\\"hi\\\"\\n\\tBack\\\\slash\\u0001\\u001f\x7f\xc3\xa9";
 
+    #[cfg(feature = "alloc")]
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
         let mut input = VecSource::new(bytes.to_vec());
         let mut output = VecSink::default();
@@ -213,16 +227,19 @@ mod tests {
         Ok(output.into_inner())
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn vec_adapter_round_trip() {
         assert_eq!(collect(json_enc(), INPUT).unwrap(), ESCAPED);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn passes_through_plain_bytes_unchanged() {
         assert_eq!(collect(json_enc(), b"plain text 123").unwrap(), b"plain text 123");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn passes_through_invalid_utf8_unchanged() {
         // Escaping never needs to decode characters, so bytes that aren't
@@ -253,6 +270,7 @@ mod tests {
     /// expected output from a single, non-streaming call to the
     /// underlying `escape_bytes`, independent of this codec's
     /// pending-state bookkeeping.
+    #[cfg(feature = "std")]
     fn escape_transitions_fixture() -> (Vec<u8>, Vec<u8>) {
         let mut input = Vec::new();
         input.extend_from_slice(&[b'A'; 5]); // long literal run
@@ -277,6 +295,7 @@ mod tests {
         (input, expected)
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn reader_matches_one_shot_escape_through_the_minimum_output_buffer() {
         // 6 bytes: the smallest buffer that can always fit an escape
@@ -297,6 +316,7 @@ mod tests {
         assert_eq!(via_reader, expected);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn writer_matches_one_shot_escape_fed_one_byte_at_a_time() {
         let (input, expected) = escape_transitions_fixture();
@@ -309,6 +329,7 @@ mod tests {
         assert_eq!(via_writer, expected);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn escape_spans_a_below_minimum_output_buffer() {
         // A 1-byte output buffer can never fit a whole escape sequence
@@ -340,6 +361,7 @@ mod tests {
         assert_eq!(result.unwrap_err().kind, ErrorKind::UnexpectedEnd);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn long_literal_run_through_a_one_byte_output_buffer() {
         // A literal run far longer than the output buffer, so it can
@@ -360,6 +382,7 @@ mod tests {
         assert_eq!(out, input);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn reader_with_small_output_buffer() {
         // 6 bytes: the smallest buffer that can always fit an escape
@@ -377,6 +400,7 @@ mod tests {
         assert_eq!(out, ESCAPED);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn writer_finish_reaches_done() {
         let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 64]);
@@ -387,6 +411,7 @@ mod tests {
         assert_eq!(out, ESCAPED);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn writer_splits_a_multibyte_character_one_byte_at_a_time() {
         // \xf0\x9f\x98\x80 (😀), fed one byte per write: no stitching is

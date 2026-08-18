@@ -42,15 +42,23 @@ pub fn rot13() -> Rot13 {
     Rot13
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "std")]
     use std::io::{Cursor, Read, Write};
 
+    #[cfg(feature = "alloc")]
     use super::rot13;
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
+    #[cfg(feature = "alloc")]
     use crate::stream_to_stream;
+    #[cfg(feature = "std")]
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
+    #[cfg(feature = "alloc")]
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
 
+    #[cfg(feature = "alloc")]
     fn collect(codec: impl crate::Codec, bytes: &[u8]) -> Vec<u8> {
         let mut input = VecSource::new(bytes.to_vec());
         let mut output = VecSink::default();
@@ -58,15 +66,19 @@ mod tests {
         output.into_inner()
     }
 
+    #[cfg(feature = "alloc")]
     const INPUT: &[u8] = b"Hello, World! 123";
+    #[cfg(feature = "alloc")]
     const ROT13D: &[u8] = b"Uryyb, Jbeyq! 123";
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn vec_adapter_round_trip() {
         assert_eq!(collect(rot13(), INPUT), ROT13D);
         assert_eq!(collect(rot13(), ROT13D), INPUT);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn reader_with_small_output_buffer() {
         let mut reader = CodecReader::new(Cursor::new(INPUT), rot13(), vec![0u8; 3]);
@@ -82,6 +94,7 @@ mod tests {
         assert_eq!(out, ROT13D);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn writer_finish_reaches_done() {
         let mut writer = CodecWriter::new(Vec::new(), rot13(), vec![0u8; 64]);

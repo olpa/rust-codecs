@@ -379,20 +379,35 @@ pub fn base64_dec() -> Base64Dec {
     Base64Dec::with_engine(STANDARD)
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "std")]
     use std::io::{Cursor, Read, Write};
 
+    #[cfg(feature = "alloc")]
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-    use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
-    use crate::{stream_to_stream, Codec, DrainCodec, DriveError, Drain, Progress};
+    use super::base64_dec;
+    #[cfg(feature = "alloc")]
+    use super::base64_enc;
+    #[cfg(feature = "alloc")]
+    use super::{Base64Dec, Base64Enc};
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
+    use crate::{Codec, DrainCodec, Drain, Progress};
+    #[cfg(feature = "alloc")]
+    use crate::{stream_to_stream, DriveError};
+    #[cfg(feature = "std")]
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
+    #[cfg(feature = "alloc")]
     use crate::sources_and_sinks::vec::{VecSource, VecSink};
 
+    #[cfg(feature = "alloc")]
     const INPUT: &[u8] = b"Hello, World! 123";
+    #[cfg(feature = "alloc")]
     const ENCODED: &[u8] = b"SGVsbG8sIFdvcmxkISAxMjM=";
 
+    #[cfg(feature = "alloc")]
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
         let mut input = VecSource::new(bytes.to_vec());
         let mut output = VecSink::default();
@@ -404,16 +419,19 @@ mod tests {
         Ok(output.into_inner())
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn encode_with_vec_adapters() {
         assert_eq!(collect(base64_enc(), INPUT).unwrap(), ENCODED);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn decode_with_vec_adapters() {
         assert_eq!(collect(base64_dec(), ENCODED).unwrap(), INPUT);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn encode_reader_with_one_byte_buffers() {
         // Buffers below the 4-byte encoded group size used to be
@@ -432,6 +450,7 @@ mod tests {
         assert_eq!(out, ENCODED);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn decode_reader_with_small_output_buffer() {
         let mut reader = CodecReader::new(Cursor::new(ENCODED), base64_dec(), vec![0u8; 3]);
@@ -447,6 +466,7 @@ mod tests {
         assert_eq!(out, INPUT);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn encode_writer_finish_reaches_done() {
         let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 64]);
@@ -457,6 +477,7 @@ mod tests {
         assert_eq!(out, ENCODED);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn decode_writer_finish_reaches_done() {
         let mut writer = CodecWriter::new(Vec::new(), base64_dec(), vec![0u8; 64]);
@@ -467,6 +488,7 @@ mod tests {
         assert_eq!(out, INPUT);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn writer_finish_with_buffer_below_group_size_works() {
         // A 2-byte scratch buffer is smaller than the 4-byte padded
@@ -479,6 +501,7 @@ mod tests {
         assert_eq!(out, b"QQ==");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn round_trip_small_input_chunks() {
         let encoded = collect(base64_enc(), INPUT).unwrap();
@@ -487,6 +510,7 @@ mod tests {
         assert_eq!(decoded, INPUT);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn decode_truncated_padded_stream_errors() {
         // finish() decodes a short trailing group instead of always
@@ -497,6 +521,7 @@ mod tests {
         assert!(collect(base64_dec(), truncated).is_err());
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn round_trip_with_custom_engine() {
         // URL_SAFE_NO_PAD drops the trailing '=' that STANDARD adds,
@@ -508,6 +533,7 @@ mod tests {
         assert_eq!(decoded, INPUT);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn decode_rejects_padding_before_end_in_one_call() {
         // "QQ==" ("A") followed by more encoded data is corrupt: padding
@@ -542,6 +568,7 @@ mod tests {
         assert_eq!(&out[..1], b"A");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn encode_into_one_byte_outputs() {
         // Drive process/finish by hand with a 1-byte output each call:
