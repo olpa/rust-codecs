@@ -204,18 +204,16 @@ extern crate alloc;
 mod protocol;
 pub use protocol::{
     Codec, Drain, DrainCodec, Error, ErrorKind, Progress, EndCapableCodec, EndCapableProgress,
+    Sink, Source,
 };
-
-mod stream;
-pub use stream::{Sink, Source};
 
 mod carry;
 pub use carry::{Carry, CarryError};
 
 mod step;
 
-mod pump;
-pub use pump::{stream_to_stream, DriveError, Pump, Totals};
+mod stream;
+pub use stream::{stream_to_stream, DriveError, Pump, Totals};
 
 mod chain;
 pub use chain::Chain;

@@ -23,7 +23,7 @@ use std::io::{self, BufRead, Read, Write};
 
 use core::convert::Infallible;
 
-use crate::pump::Pump;
+use crate::stream::Pump;
 use crate::sources_and_sinks::shared_io::{
     pump_finish, pump_flush, pump_read, pump_write, ReadGranularity,
 };

@@ -1,6 +1,5 @@
-//! The [`Codec`]/[`EndCapableCodec`] traits and the vocabulary their
-//! methods speak in: [`Progress`], [`EndCapableProgress`], [`Drain`],
-//! [`Error`]. See `CREATING-CODECS.md` for how to write a codec.
+//! The codec traits and the vocabulary their methods speak in. Also
+//! the contracts used by I/O backends.
 
 // ----
 // Progress
@@ -376,7 +375,7 @@ pub trait Codec: DrainCodec {
 ///
 /// A codec intended to yield several tokens or boundaries from one
 /// instance is not a `EndCapableCodec` in the usual driver sense —
-/// drivers like [`Pump`](crate::pump::Pump) latch permanently after the
+/// drivers like [`Pump`](crate::stream::Pump) latch permanently after the
 /// first `End`. Driving `process` directly, call by call, still allows
 /// reusing one instance across multiple logical streams (see
 /// `core/tests/early_stop_input.rs`); a driver that shouldn't latch has
@@ -438,6 +437,50 @@ impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
 impl<C: Codec + ?Sized> Codec for Box<C> {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         (**self).process(input, output)
+    }
+}
+
+// ----
+// I/O backend contracts
+// ----
+
+/// A byte source which lends its current input chunk to the pump.
+pub trait Source {
+    type Error;
+
+    /// Return the current non-empty chunk, or `None` at end of input.
+    ///
+    /// "Current" is load-bearing: this is whatever hasn't been
+    /// released by `consume` yet, not necessarily fresh bytes. A
+    /// caller is never required to consume a whole chunk in one call
+    /// (a codec may only take part of it, e.g. when output runs out
+    /// first) — the unconsumed remainder is exactly what the next
+    /// `chunk()` call returns, so consecutive chunks can overlap.
+    /// Implementations must not hand out new bytes ahead of `pos`
+    /// until the old ones are released.
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
+
+    /// Release the first `amount` bytes of the current chunk.
+    fn consume(&mut self, amount: usize);
+}
+
+/// A byte destination which lends writable space to the pump.
+pub trait Sink {
+    type Error;
+
+    /// Return writable space, or `None` when the destination is full.
+    ///
+    /// A caller is never required to commit any of it before calling
+    /// `spare` again — an uncommitted call may simply be re-issued,
+    /// returning the same (or an equivalent) span.
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
+
+    /// Commit the first `amount` bytes of the space returned by `spare`.
+    fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
+
+    /// Complete the destination after the codec stream has ended.
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 

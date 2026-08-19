@@ -1,4 +1,4 @@
-//! Codec-call normalization shared by [`Pump`](crate::pump::Pump) and
+//! Codec-call normalization shared by [`Pump`](crate::stream::Pump) and
 //! [`Chain`](crate::Chain): validates a codec's reported progress
 //! against the buffers it was actually given, and turns it into exact
 //! counts callers can use without re-deriving them. Neither `Pump` nor

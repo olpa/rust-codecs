@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 
-use crate::pump::{DrainEnd, Pump, PumpEnd, StepEnd};
+use crate::stream::{DrainEnd, Pump, PumpEnd, StepEnd};
 use crate::sources_and_sinks::slice::SliceSink;
 use crate::{DriveError, Source, EndCapableCodec};
 

@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 
-use crate::pump::Pump;
+use crate::stream::Pump;
 use crate::sources_and_sinks::slice::SliceSource;
 use crate::{Codec, DriveError, Sink};
 
