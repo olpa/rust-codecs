@@ -75,31 +75,17 @@ where
     })?;
     totals.written += drained.written;
     match drained.end {
-        DrainEnd::Done => {
+        PumpDrainEnd::Done => {
             output.finish().map_err(DriveError::Sink)?;
             Ok(totals)
         }
-        DrainEnd::SinkExhausted => Err(DriveError::SinkExhausted),
+        PumpDrainEnd::SinkExhausted => Err(DriveError::SinkExhausted),
     }
 }
 
-/// Exact progress and boundary of one validated `finish` or `flush`
-/// call, as reported by [`Pump::finish_or_flush_step`] — renames
-/// [`DrainStop`] to `SinkExhausted`/`Done`, since at this layer
-/// `output` is always exactly one [`Sink::spare`] slice, so "the
-/// buffer filled" and "the sink ran out of room this round" coincide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PumpDrainStep {
-    pub(crate) written: usize,
-    pub(crate) end: DrainEnd,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DrainEnd {
-    SinkExhausted,
-    Done,
-}
-
+/// Result of one whole [`Pump::transfer_from`] run: accumulated
+/// `consumed`/`written` totals and which of the three ways it
+/// stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PumpTransfer {
     pub(crate) consumed: usize,
@@ -117,7 +103,7 @@ pub(crate) enum PumpEnd {
 /// Result of one [`Pump::transfer_step`] call — the single-step
 /// counterpart to [`PumpTransfer`]/[`PumpEnd`], which cover a whole
 /// [`Pump::transfer_from`] run. Distinct from `PumpTransfer` because
-/// [`StepEnd`] has a fourth case, [`StepEnd::Progressed`], that
+/// [`PumpStepEnd`] has a fourth case, [`PumpStepEnd::Progressed`], that
 /// `PumpEnd` deliberately has no room for: `transfer_from`'s loop
 /// consumes it internally (keep looping) and never lets it escape as
 /// its own `PumpEnd::End`/`SourceExhausted`/`SinkExhausted` result.
@@ -125,11 +111,11 @@ pub(crate) enum PumpEnd {
 pub(crate) struct PumpStep {
     pub(crate) consumed: usize,
     pub(crate) written: usize,
-    pub(crate) end: StepEnd,
+    pub(crate) end: PumpStepEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StepEnd {
+pub(crate) enum PumpStepEnd {
     SourceExhausted,
     SinkExhausted,
     /// The step completed normally (the codec fully consumed its
@@ -140,14 +126,34 @@ pub(crate) enum StepEnd {
     End,
 }
 
-/// Same shape as [`PumpDrainStep`], but `written` is the accumulated
-/// total across every call `drain_to` made, not one call's
-/// contribution, kept as a distinct type so the two can't be mixed
-/// up at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PumpDrainEnd {
+    SinkExhausted,
+    Done,
+}
+
+/// Result of one whole `drain_to` run (behind [`Pump::finish_to`]/
+/// [`Pump::flush_to`]) — the [`PumpTransfer`] counterpart for the
+/// drain side: `written` accumulates across every call `drain_to`
+/// made, not one call's contribution, kept as a distinct type so the
+/// two can't be mixed up at a call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PumpDrainTransfer {
     pub(crate) written: usize,
-    pub(crate) end: DrainEnd,
+    pub(crate) end: PumpDrainEnd,
+}
+
+/// Exact progress and boundary of one validated `finish` or `flush`
+/// call, as reported by [`Pump::finish_or_flush_step`] — the
+/// single-call counterpart to [`PumpDrainTransfer`], which covers a
+/// whole `drain_to` run. Renames [`DrainStop`] to
+/// `SinkExhausted`/`Done`, since at this layer `output` is always
+/// exactly one [`Sink::spare`] slice, so "the buffer filled" and "the
+/// sink ran out of room this round" coincide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PumpDrainStep {
+    pub(crate) written: usize,
+    pub(crate) end: PumpDrainEnd,
 }
 
 /// A bufferless lifecycle wrapper around a codec.
@@ -226,7 +232,7 @@ impl<C: EndCapableCodec> Pump<C> {
     ///
     /// Each loop iteration is one [`Pump::transfer_step`] call; this
     /// just accumulates its `consumed`/`written` counts and keeps
-    /// looping past [`StepEnd::Progressed`].
+    /// looping past [`PumpStepEnd::Progressed`].
     ///
     /// Returns once one of three things happens: the source is
     /// exhausted (`PumpEnd::SourceExhausted`), the sink has no more
@@ -254,10 +260,10 @@ impl<C: EndCapableCodec> Pump<C> {
             consumed += step.consumed;
             written += step.written;
             let end = match step.end {
-                StepEnd::SourceExhausted => PumpEnd::SourceExhausted,
-                StepEnd::SinkExhausted => PumpEnd::SinkExhausted,
-                StepEnd::End => PumpEnd::End,
-                StepEnd::Progressed => continue,
+                PumpStepEnd::SourceExhausted => PumpEnd::SourceExhausted,
+                PumpStepEnd::SinkExhausted => PumpEnd::SinkExhausted,
+                PumpStepEnd::End => PumpEnd::End,
+                PumpStepEnd::Progressed => continue,
             };
             return Ok(PumpTransfer { consumed, written, end });
         }
@@ -295,14 +301,14 @@ impl<C: EndCapableCodec> Pump<C> {
             return Ok(PumpStep {
                 consumed: 0,
                 written: 0,
-                end: StepEnd::SourceExhausted,
+                end: PumpStepEnd::SourceExhausted,
             });
         };
         let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
             return Ok(PumpStep {
                 consumed: 0,
                 written: 0,
-                end: StepEnd::SinkExhausted,
+                end: PumpStepEnd::SinkExhausted,
             });
         };
         // A call may make progress with an empty `spare` (e.g. a
@@ -348,9 +354,9 @@ impl<C: EndCapableCodec> Pump<C> {
             consumed: moved.consumed,
             written: moved.written,
             end: if moved.end == EndCapableStepEnd::End {
-                StepEnd::End
+                PumpStepEnd::End
             } else {
-                StepEnd::Progressed
+                PumpStepEnd::Progressed
             },
         })
     }
@@ -413,7 +419,7 @@ impl<C: EndCapableCodec> Pump<C> {
         loop {
             let moved = match output.spare().map_err(DriveError::Sink)? {
                 Some(spare) => match self.finish_or_flush_step(spare, op) {
-                    Ok(moved) if moved.written > 0 || moved.end == DrainEnd::Done => Ok(moved),
+                    Ok(moved) if moved.written > 0 || moved.end == PumpDrainEnd::Done => Ok(moved),
                     Ok(_) => return Err(DriveError::NoProgress),
                     Err(error) => {
                         let error = error
@@ -431,10 +437,10 @@ impl<C: EndCapableCodec> Pump<C> {
                         .map_err(DriveError::Codec)?;
                     return Ok(PumpDrainTransfer {
                         written,
-                        end: if moved.end == DrainEnd::Done {
-                            DrainEnd::Done
+                        end: if moved.end == PumpDrainEnd::Done {
+                            PumpDrainEnd::Done
                         } else {
-                            DrainEnd::SinkExhausted
+                            PumpDrainEnd::SinkExhausted
                         },
                     });
                 }
@@ -444,10 +450,10 @@ impl<C: EndCapableCodec> Pump<C> {
                 output.commit(moved.written).map_err(DriveError::Sink)?;
             }
             written += moved.written;
-            if moved.end == DrainEnd::Done {
+            if moved.end == PumpDrainEnd::Done {
                 return Ok(PumpDrainTransfer {
                     written,
-                    end: DrainEnd::Done,
+                    end: PumpDrainEnd::Done,
                 });
             }
         }
@@ -474,15 +480,15 @@ impl<C: EndCapableCodec> Pump<C> {
         if self.done {
             return Ok(PumpDrainStep {
                 written: 0,
-                end: DrainEnd::Done,
+                end: PumpDrainEnd::Done,
             });
         }
         let step = op.step(&mut self.codec, output)?;
         Ok(PumpDrainStep {
             written: step.written,
             end: match step.stop {
-                DrainStop::OutputFilled => DrainEnd::SinkExhausted,
-                DrainStop::Done => DrainEnd::Done,
+                DrainStop::OutputFilled => PumpDrainEnd::SinkExhausted,
+                DrainStop::Done => PumpDrainEnd::Done,
             },
         })
     }
@@ -490,7 +496,7 @@ impl<C: EndCapableCodec> Pump<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrainEnd, EndCapableStep, EndCapableStepEnd, Pump, PumpEnd};
+    use super::{PumpDrainEnd, EndCapableStep, EndCapableStepEnd, Pump, PumpEnd};
     use crate::step::{end_capable_step, DrainOp};
     use crate::{
         Codec, Drain, DrainCodec, DriveError, Error, ErrorKind, Progress, Sink, Source,
@@ -729,7 +735,7 @@ mod tests {
             pump.finish_or_flush_step(&mut [], DrainOp::Finish)
                 .unwrap()
                 .end,
-            DrainEnd::Done
+            PumpDrainEnd::Done
         );
         let repeated = pump.latched_step(b"trailing", &mut [0; 4]).unwrap();
         assert_eq!(repeated.consumed, 0);
@@ -747,7 +753,7 @@ mod tests {
             .finish_or_flush_step(&mut [0; 3], DrainOp::Finish)
             .unwrap();
         assert_eq!(moved.written, 3);
-        assert_eq!(moved.end, DrainEnd::SinkExhausted);
+        assert_eq!(moved.end, PumpDrainEnd::SinkExhausted);
         assert!(!filled.is_done());
 
         // `finish_or_flush_step` reaching `Done` is only point-3 self-idempotency,
@@ -763,7 +769,7 @@ mod tests {
             .finish_or_flush_step(&mut [0; 3], DrainOp::Finish)
             .unwrap();
         assert_eq!(moved.written, 2);
-        assert_eq!(moved.end, DrainEnd::Done);
+        assert_eq!(moved.end, PumpDrainEnd::Done);
         assert!(!done.is_done());
         let resumed = done.latched_step(b"abc", &mut [0; 8]).unwrap();
         assert_eq!(resumed.written, 5);
@@ -779,7 +785,7 @@ mod tests {
             .finish_or_flush_step(&mut [0; 3], DrainOp::Flush)
             .unwrap();
         assert_eq!(moved.written, 2);
-        assert_eq!(moved.end, DrainEnd::Done);
+        assert_eq!(moved.end, PumpDrainEnd::Done);
         assert!(!pump.is_done());
     }
 

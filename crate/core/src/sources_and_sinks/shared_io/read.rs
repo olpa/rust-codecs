@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 
-use crate::stream::{DrainEnd, Pump, PumpEnd, StepEnd};
+use crate::stream::{PumpDrainEnd, Pump, PumpEnd, PumpStepEnd};
 use crate::sources_and_sinks::slice::SliceSink;
 use crate::{DriveError, Source, EndCapableCodec};
 
@@ -48,7 +48,7 @@ pub fn pump_read<I: Source, C: EndCapableCodec>(
             pump.transfer_from(input, &mut output)?.end == PumpEnd::SourceExhausted
         }
         ReadGranularity::SingleRead => {
-            pump.transfer_step(input, &mut output)?.end == StepEnd::SourceExhausted
+            pump.transfer_step(input, &mut output)?.end == PumpStepEnd::SourceExhausted
         }
     };
     if source_exhausted {
@@ -56,7 +56,7 @@ pub fn pump_read<I: Source, C: EndCapableCodec>(
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
-        debug_assert!(matches!(drained.end, DrainEnd::Done | DrainEnd::SinkExhausted));
+        debug_assert!(matches!(drained.end, PumpDrainEnd::Done | PumpDrainEnd::SinkExhausted));
     }
     Ok(output.written())
 }
