@@ -1,190 +1,46 @@
-//! The codec traits and the vocabulary their methods speak in. Also
-//! the contracts used by I/O backends.
+//! The vocabulary and contracts for codecs and I/O backends.
 
 // ----
-// Progress
+// I/O backend contracts
 // ----
 
-/// Progress of one [`Codec::process`] call. Every variant states an
-/// invariant a driver can rely on without inspecting byte counts —
-/// "made no progress and can't say why" is not expressible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Progress {
-    /// All of `input` was consumed; `written` bytes were produced
-    /// (possibly zero, when everything went into internal buffering).
-    /// The driver's move: supply more input, or `finish`.
-    InputConsumed { written: usize },
-    /// All of `output` was filled; `consumed` bytes of input were
-    /// taken (possibly zero, when output pending from an earlier call
-    /// filled the buffer by itself). The driver's move: drain the
-    /// output and call again.
-    OutputFilled { consumed: usize },
+/// A byte source which lends its current input chunk to the pump.
+pub trait Source {
+    type Error;
+
+    /// Return the current non-empty chunk, or `None` at end of input.
+    ///
+    /// "Current" is load-bearing: this is whatever hasn't been
+    /// released by `consume` yet, not necessarily fresh bytes. A
+    /// caller is never required to consume a whole chunk in one call
+    /// (a codec may only take part of it, e.g. when output runs out
+    /// first) — the unconsumed remainder is exactly what the next
+    /// `chunk()` call returns, so consecutive chunks can overlap.
+    /// Implementations must not hand out new bytes ahead of `pos`
+    /// until the old ones are released.
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
+
+    /// Release the first `amount` bytes of the current chunk.
+    fn consume(&mut self, amount: usize);
 }
 
-/// Progress of one [`EndCapableCodec::process`] call: everything
-/// [`Progress`] can report, plus an in-band end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndCapableProgress {
-    /// All of `input` was consumed; `written` bytes were produced
-    /// (possibly zero, when everything went into internal buffering).
-    /// The driver's move: supply more input, or `finish`.
-    InputConsumed { written: usize },
-    /// All of `output` was filled; `consumed` bytes of input were
-    /// taken (possibly zero, when output pending from an earlier call
-    /// filled the buffer by itself). The driver's move: drain the
-    /// output and call again.
-    OutputFilled { consumed: usize },
-    /// The stream ended in-band (self-terminating format): nothing
-    /// more will ever be produced, and input past the stream's end was
-    /// left unconsumed. Neither side is necessarily "full".
-    End { consumed: usize, written: usize },
-}
+/// A byte destination which lends writable space to the pump.
+pub trait Sink {
+    type Error;
 
-impl From<Progress> for EndCapableProgress {
-    fn from(progress: Progress) -> Self {
-        match progress {
-            Progress::InputConsumed { written } => Self::InputConsumed { written },
-            Progress::OutputFilled { consumed } => Self::OutputFilled { consumed },
-        }
-    }
-}
+    /// Return writable space, or `None` when the destination is full.
+    ///
+    /// A caller is never required to commit any of it before calling
+    /// `spare` again — an uncommitted call may simply be re-issued,
+    /// returning the same (or an equivalent) span.
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
 
-// ----
-// Draining
-// ----
+    /// Commit the first `amount` bytes of the space returned by `spare`.
+    fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
 
-/// Progress of one [`DrainCodec::finish`] or [`DrainCodec::flush`] call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Drain {
-    /// All of `output` was filled and there is more to come — call
-    /// again with a fresh (or drained) buffer.
-    OutputFilled,
-    /// Everything owed was delivered; the final `written` bytes (at
-    /// most the output's length) landed in this call. For `finish`
-    /// this is the end of the stream; for `flush`, the sync point.
-    Done { written: usize },
-}
-
-// ----
-// Errors and validation
-// ----
-
-/// What kind of failure a codec reported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    /// The encoded stream is malformed.
-    Corrupt,
-    /// The stream ended somewhere it shouldn't have. Either direction:
-    /// too little data — `finish` was called while the codec still
-    /// needed more input to complete a unit — or too much — a
-    /// downstream codec in a composition (e.g. `second` in
-    /// [`Chain`](crate::Chain)) ended its stream while bytes an
-    /// upstream codec had already handed it were still unconsumed,
-    /// which would otherwise be silently lost. Neither case has a
-    /// reasonable recovery beyond surfacing it: there's no more input
-    /// to give in the first, and no way to un-lose the bytes in the
-    /// second.
-    UnexpectedEnd,
-    /// The codec's internal carry buffer couldn't hold an atomic
-    /// output unit — a codec bug (the carry is sized statically to the
-    /// codec's largest unit), or a format whose units are unbounded.
-    BufferOverrun,
-    /// The codec reported byte counts exceeding the buffers it was
-    /// given — a codec bug, caught at the driver's trust boundary (see
-    /// [`Progress::validated`]/[`Drain::validated`]) before it can
-    /// corrupt positions, panic on a later slice, or make an adapter
-    /// break its host contract (`std::io::Read` must never report more
-    /// bytes than the buffer holds). The error's `consumed`/`written`
-    /// are zero: the reported counts are exactly what can't be
-    /// trusted.
-    ContractViolation,
-}
-
-/// A codec failure, carrying how far the call got before failing so
-/// the caller knows which bytes were already accounted for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Error {
-    pub kind: ErrorKind,
-    /// Bytes of `input` consumed by this call before the failure.
-    pub consumed: usize,
-    /// Bytes written to `output` by this call before the failure.
-    pub written: usize,
-}
-
-impl Error {
-    pub fn new(kind: ErrorKind, consumed: usize, written: usize) -> Self {
-        Self {
-            kind,
-            consumed,
-            written,
-        }
-    }
-
-    /// Check the progress carried by an error against the buffers used by
-    /// the failing call. Error progress crosses the same trust boundary as
-    /// successful progress and must not be allowed to advance endpoints
-    /// beyond the slices the codec received.
-    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Self, Self> {
-        if self.consumed <= input_len && self.written <= output_len {
-            Ok(self)
-        } else {
-            Err(Self::new(ErrorKind::ContractViolation, 0, 0))
-        }
-    }
-}
-
-impl Progress {
-    /// Check the reported byte counts against the buffer sizes the
-    /// call was actually given, turning a lying codec into
-    /// [`ErrorKind::ContractViolation`] instead of letting bogus
-    /// counts corrupt driver state. Every driver in this crate applies
-    /// this at its codec trust boundary; a driver of your own should
-    /// too.
-    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Progress, Error> {
-        let honest = match self {
-            Progress::InputConsumed { written } => written <= output_len,
-            Progress::OutputFilled { consumed } => consumed <= input_len,
-        };
-        if honest {
-            Ok(self)
-        } else {
-            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
-        }
-    }
-}
-
-impl EndCapableProgress {
-    /// The [`Progress::validated`] counterpart for
-    /// [`EndCapableCodec::process`].
-    pub fn validated(
-        self,
-        input_len: usize,
-        output_len: usize,
-    ) -> Result<EndCapableProgress, Error> {
-        let honest = match self {
-            EndCapableProgress::InputConsumed { written } => written <= output_len,
-            EndCapableProgress::OutputFilled { consumed } => consumed <= input_len,
-            EndCapableProgress::End { consumed, written } => {
-                consumed <= input_len && written <= output_len
-            }
-        };
-        if honest {
-            Ok(self)
-        } else {
-            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
-        }
-    }
-}
-
-impl Drain {
-    /// The [`Progress::validated`] counterpart for `finish`/`flush`.
-    pub fn validated(self, output_len: usize) -> Result<Drain, Error> {
-        match self {
-            Drain::Done { written } if written > output_len => {
-                Err(Error::new(ErrorKind::ContractViolation, 0, 0))
-            }
-            honest => Ok(honest),
-        }
+    /// Complete the destination after the codec stream has ended.
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -302,10 +158,10 @@ pub trait DrainCodec {
 /// time. But the caller has no way to know how many retries are
 /// normal, and how many mean the codec is stuck or broken.
 ///
-/// This is not an imaginary edge case: a [`Source`](crate::Source)
-/// reading from a network socket may hand over data one byte at a
-/// time, so the caller could easily need many retries just to gather
-/// enough input for the codec to do anything.
+/// This is not an imaginary edge case: a [`Source`] reading from a
+/// network socket may hand over data one byte at a time, so the
+/// caller could easily need many retries just to gather enough input
+/// for the codec to do anything.
 ///
 /// Beyond that corner case, there is a broader question of where the
 /// complexity should live: on the codec side or on the caller side.
@@ -316,9 +172,9 @@ pub trait DrainCodec {
 ///   based on experience.
 /// - This matters beyond this crate: we expect people to build on
 ///   top of the `Codec` trait not only new codecs, but also wrappers
-///   around custom [`Source`](crate::Source)s and
-///   [`Sink`](crate::Sink)s — and that caller-side code deserves to
-///   stay less complicated just as much as codec implementations do.
+///   around custom [`Source`]s and [`Sink`]s — and that caller-side
+///   code deserves to stay less complicated just as much as codec
+///   implementations do.
 ///
 /// # Creating a codec
 ///
@@ -413,7 +269,122 @@ impl<C: Codec> EndCapableCodec for C {
 }
 
 // ----
-// Allocation-backed delegation
+// Progress
+// ----
+
+/// Progress of one [`Codec::process`] call. Every variant states an
+/// invariant a driver can rely on without inspecting byte counts —
+/// "made no progress and can't say why" is not expressible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// All of `input` was consumed; `written` bytes were produced
+    /// (possibly zero, when everything went into internal buffering).
+    /// The driver's move: supply more input, or `finish`.
+    InputConsumed { written: usize },
+    /// All of `output` was filled; `consumed` bytes of input were
+    /// taken (possibly zero, when output pending from an earlier call
+    /// filled the buffer by itself). The driver's move: drain the
+    /// output and call again.
+    OutputFilled { consumed: usize },
+}
+
+/// Progress of one [`EndCapableCodec::process`] call: everything
+/// [`Progress`] can report, plus an in-band end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndCapableProgress {
+    /// All of `input` was consumed; `written` bytes were produced
+    /// (possibly zero, when everything went into internal buffering).
+    /// The driver's move: supply more input, or `finish`.
+    InputConsumed { written: usize },
+    /// All of `output` was filled; `consumed` bytes of input were
+    /// taken (possibly zero, when output pending from an earlier call
+    /// filled the buffer by itself). The driver's move: drain the
+    /// output and call again.
+    OutputFilled { consumed: usize },
+    /// The stream ended in-band (self-terminating format): nothing
+    /// more will ever be produced, and input past the stream's end was
+    /// left unconsumed. Neither side is necessarily "full".
+    End { consumed: usize, written: usize },
+}
+
+impl From<Progress> for EndCapableProgress {
+    fn from(progress: Progress) -> Self {
+        match progress {
+            Progress::InputConsumed { written } => Self::InputConsumed { written },
+            Progress::OutputFilled { consumed } => Self::OutputFilled { consumed },
+        }
+    }
+}
+
+/// Progress of one [`DrainCodec::finish`] or [`DrainCodec::flush`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drain {
+    /// All of `output` was filled and there is more to come — call
+    /// again with a fresh (or drained) buffer.
+    OutputFilled,
+    /// Everything owed was delivered; the final `written` bytes (at
+    /// most the output's length) landed in this call. For `finish`
+    /// this is the end of the stream; for `flush`, the sync point.
+    Done { written: usize },
+}
+
+impl Progress {
+    /// Check the reported byte counts against the buffer sizes the
+    /// call was actually given, turning a lying codec into
+    /// [`ErrorKind::ContractViolation`] instead of letting bogus
+    /// counts corrupt driver state. Every driver in this crate applies
+    /// this at its codec trust boundary; a driver of your own should
+    /// too.
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Progress, Error> {
+        let honest = match self {
+            Progress::InputConsumed { written } => written <= output_len,
+            Progress::OutputFilled { consumed } => consumed <= input_len,
+        };
+        if honest {
+            Ok(self)
+        } else {
+            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+        }
+    }
+}
+
+impl EndCapableProgress {
+    /// The [`Progress::validated`] counterpart for
+    /// [`EndCapableCodec::process`].
+    pub fn validated(
+        self,
+        input_len: usize,
+        output_len: usize,
+    ) -> Result<EndCapableProgress, Error> {
+        let honest = match self {
+            EndCapableProgress::InputConsumed { written } => written <= output_len,
+            EndCapableProgress::OutputFilled { consumed } => consumed <= input_len,
+            EndCapableProgress::End { consumed, written } => {
+                consumed <= input_len && written <= output_len
+            }
+        };
+        if honest {
+            Ok(self)
+        } else {
+            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+        }
+    }
+}
+
+impl Drain {
+    /// The [`Progress::validated`] counterpart for `finish`/`flush`.
+    pub fn validated(self, output_len: usize) -> Result<Drain, Error> {
+        match self {
+            Drain::Done { written } if written > output_len => {
+                Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+            }
+            honest => Ok(honest),
+        }
+    }
+}
+
+// ----
+// Boxing support
 // ----
 
 // Mirrors std's `impl<R: Read + ?Sized> Read for Box<R>`: lets a `Box<dyn
@@ -441,46 +412,70 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 }
 
 // ----
-// I/O backend contracts
+// Errors and validation
 // ----
 
-/// A byte source which lends its current input chunk to the pump.
-pub trait Source {
-    type Error;
-
-    /// Return the current non-empty chunk, or `None` at end of input.
-    ///
-    /// "Current" is load-bearing: this is whatever hasn't been
-    /// released by `consume` yet, not necessarily fresh bytes. A
-    /// caller is never required to consume a whole chunk in one call
-    /// (a codec may only take part of it, e.g. when output runs out
-    /// first) — the unconsumed remainder is exactly what the next
-    /// `chunk()` call returns, so consecutive chunks can overlap.
-    /// Implementations must not hand out new bytes ahead of `pos`
-    /// until the old ones are released.
-    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
-
-    /// Release the first `amount` bytes of the current chunk.
-    fn consume(&mut self, amount: usize);
+/// What kind of failure a codec reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The encoded stream is malformed.
+    Corrupt,
+    /// The stream ended somewhere it shouldn't have. Either direction:
+    /// too little data — `finish` was called while the codec still
+    /// needed more input to complete a unit — or too much — a
+    /// downstream codec in a composition (e.g. `second` in
+    /// [`Chain`](crate::Chain)) ended its stream while bytes an
+    /// upstream codec had already handed it were still unconsumed,
+    /// which would otherwise be silently lost. Neither case has a
+    /// reasonable recovery beyond surfacing it: there's no more input
+    /// to give in the first, and no way to un-lose the bytes in the
+    /// second.
+    UnexpectedEnd,
+    /// The codec's internal carry buffer couldn't hold an atomic
+    /// output unit — a codec bug (the carry is sized statically to the
+    /// codec's largest unit), or a format whose units are unbounded.
+    BufferOverrun,
+    /// The codec reported byte counts exceeding the buffers it was
+    /// given — a codec bug, caught at the driver's trust boundary (see
+    /// [`Progress::validated`]/[`Drain::validated`]) before it can
+    /// corrupt positions, panic on a later slice, or make an adapter
+    /// break its host contract (`std::io::Read` must never report more
+    /// bytes than the buffer holds). The error's `consumed`/`written`
+    /// are zero: the reported counts are exactly what can't be
+    /// trusted.
+    ContractViolation,
 }
 
-/// A byte destination which lends writable space to the pump.
-pub trait Sink {
-    type Error;
+/// A codec failure, carrying how far the call got before failing so
+/// the caller knows which bytes were already accounted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error {
+    pub kind: ErrorKind,
+    /// Bytes of `input` consumed by this call before the failure.
+    pub consumed: usize,
+    /// Bytes written to `output` by this call before the failure.
+    pub written: usize,
+}
 
-    /// Return writable space, or `None` when the destination is full.
-    ///
-    /// A caller is never required to commit any of it before calling
-    /// `spare` again — an uncommitted call may simply be re-issued,
-    /// returning the same (or an equivalent) span.
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
+impl Error {
+    pub fn new(kind: ErrorKind, consumed: usize, written: usize) -> Self {
+        Self {
+            kind,
+            consumed,
+            written,
+        }
+    }
 
-    /// Commit the first `amount` bytes of the space returned by `spare`.
-    fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
-
-    /// Complete the destination after the codec stream has ended.
-    fn finish(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+    /// Check the progress carried by an error against the buffers used by
+    /// the failing call. Error progress crosses the same trust boundary as
+    /// successful progress and must not be allowed to advance endpoints
+    /// beyond the slices the codec received.
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Self, Self> {
+        if self.consumed <= input_len && self.written <= output_len {
+            Ok(self)
+        } else {
+            Err(Self::new(ErrorKind::ContractViolation, 0, 0))
+        }
     }
 }
 
@@ -490,7 +485,7 @@ pub trait Sink {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drain, Error, ErrorKind, Progress, EndCapableProgress};
+    use super::{Drain, EndCapableProgress, Error, ErrorKind, Progress};
 
     const CV: Error = Error {
         kind: ErrorKind::ContractViolation,
