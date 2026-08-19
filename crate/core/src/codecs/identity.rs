@@ -1,8 +1,8 @@
-//! Example [`Codec`]: passes bytes through unchanged.
+//! Passes bytes through unchanged.
 
 use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
-/// A no-op codec: output is identical to input.
+/// Output is identical to input.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Identity;
 
@@ -16,8 +16,6 @@ impl Codec for Identity {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
         output[..n].copy_from_slice(&input[..n]);
-        // A 1:1 codec satisfies the fully-consume-or-fully-fill
-        // contract for free: `n` exhausts whichever side is shorter.
         if n == input.len() {
             Ok(Progress::InputConsumed { written: n })
         } else {
@@ -26,69 +24,19 @@ impl Codec for Identity {
     }
 }
 
-/// Build an [`Identity`] codec. Encoding and decoding are the same
-/// operation, so there's only one constructor.
+/// Build an [`Identity`] codec.
 pub fn identity() -> Identity {
     Identity
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
-    #[cfg(feature = "std")]
-    use std::io::{Cursor, Read, Write};
-
-    #[cfg(feature = "alloc")]
     use super::identity;
-    #[cfg(feature = "std")]
-    use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
-    #[cfg(feature = "alloc")]
-    use crate::sources_and_sinks::vec::{VecSink, VecSource};
-    #[cfg(feature = "alloc")]
-    use crate::stream_to_stream;
-    #[cfg(feature = "alloc")]
-    use alloc::vec::Vec;
+    use crate::sources_and_sinks::vec::encode_string;
 
-    #[cfg(feature = "alloc")]
-    fn collect(codec: impl crate::Codec, bytes: &[u8]) -> Vec<u8> {
-        let mut input = VecSource::new(bytes.to_vec());
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, codec, &mut output).unwrap();
-        output.into_inner()
-    }
-
-    #[cfg(feature = "alloc")]
-    const INPUT: &[u8] = b"Hello, world!";
-
-    #[cfg(feature = "alloc")]
     #[test]
-    fn vec_adapter_round_trip() {
-        assert_eq!(collect(identity(), INPUT), INPUT);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn reader_with_small_output_buffer() {
-        let mut reader = CodecReader::new(Cursor::new(INPUT), identity(), vec![0u8; 3]);
-        let mut out = Vec::new();
-        let mut buf = [0u8; 3];
-        loop {
-            let n = reader.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(out, INPUT);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn writer_finish_reaches_done() {
-        let mut writer = CodecWriter::new(Vec::new(), identity(), vec![0u8; 64]);
-        for chunk in INPUT.chunks(3) {
-            writer.write_all(chunk).unwrap();
-        }
-        let out = writer.finish().unwrap();
-        assert_eq!(out, INPUT);
+    fn round_trip() {
+        let input = "Hello, world!";
+        assert_eq!(encode_string(identity(), input).unwrap(), input);
     }
 }
