@@ -6,7 +6,7 @@
 
 mod adapter;
 
-pub use adapter::{VecSource, VecSink};
+pub use adapter::{VecSink, VecSource};
 
 #[cfg(feature = "alloc")]
 use crate::{stream_to_stream, DriveError, EndCapableCodec};

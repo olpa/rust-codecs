@@ -15,7 +15,7 @@
 //! goes through.
 
 use crate::step::{end_capable_step, DrainOp, DrainStop, EndCapableStep, EndCapableStepEnd};
-use crate::{Error, Sink, Source, EndCapableCodec};
+use crate::{EndCapableCodec, Error, Sink, Source};
 
 /// How much moved through [`stream_to_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +265,11 @@ impl<C: EndCapableCodec> Pump<C> {
                 PumpStepEnd::End => PumpEnd::End,
                 PumpStepEnd::Progressed => continue,
             };
-            return Ok(PumpTransfer { consumed, written, end });
+            return Ok(PumpTransfer {
+                consumed,
+                written,
+                end,
+            });
         }
     }
 
@@ -496,11 +500,11 @@ impl<C: EndCapableCodec> Pump<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PumpDrainEnd, EndCapableStep, EndCapableStepEnd, Pump, PumpEnd};
+    use super::{EndCapableStep, EndCapableStepEnd, Pump, PumpDrainEnd, PumpEnd};
     use crate::step::{end_capable_step, DrainOp};
     use crate::{
-        Codec, Drain, DrainCodec, DriveError, Error, ErrorKind, Progress, Sink, Source,
-        EndCapableCodec, EndCapableProgress,
+        Codec, Drain, DrainCodec, DriveError, EndCapableCodec, EndCapableProgress, Error,
+        ErrorKind, Progress, Sink, Source,
     };
 
     struct Scripted {

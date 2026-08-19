@@ -22,8 +22,8 @@ use core::convert::Infallible;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
 use rust_codecs_core::{
-    stream_to_stream, Drain, DrainCodec, DriveError, Error, Source, EndCapableCodec,
-    EndCapableProgress,
+    stream_to_stream, Drain, DrainCodec, DriveError, EndCapableCodec, EndCapableProgress, Error,
+    Source,
 };
 
 struct QuoteEnd;

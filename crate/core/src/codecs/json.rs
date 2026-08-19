@@ -70,7 +70,12 @@ pub struct JsonEnc {
 }
 
 impl JsonEnc {
-    fn stage_escape(&mut self, escape: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
+    fn stage_escape(
+        &mut self,
+        escape: &[u8],
+        consumed: usize,
+        written: usize,
+    ) -> Result<(), Error> {
         let buffer = self
             .carry
             .buffer()
@@ -198,32 +203,30 @@ mod tests {
     use super::escape_bytes;
     use super::{json_enc, JsonEnc};
     #[cfg(feature = "std")]
-    use alloc::vec;
-    #[cfg(feature = "alloc")]
-    use alloc::vec::Vec;
-    #[cfg(feature = "std")]
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     #[cfg(feature = "alloc")]
     use crate::sources_and_sinks::vec::{VecSink, VecSource};
-    use crate::{Codec, Drain, DrainCodec, ErrorKind, Progress};
     #[cfg(feature = "alloc")]
     use crate::DriveError;
+    use crate::{Codec, Drain, DrainCodec, ErrorKind, Progress};
+    #[cfg(feature = "std")]
+    use alloc::vec;
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
 
     #[cfg(feature = "alloc")]
     const INPUT: &[u8] = b"He said \"hi\"\n\tBack\\slash\x01\x1f\x7f\xc3\xa9";
     #[cfg(feature = "alloc")]
-    const ESCAPED: &[u8] =
-        b"He said \\\"hi\\\"\\n\\tBack\\\\slash\\u0001\\u001f\x7f\xc3\xa9";
+    const ESCAPED: &[u8] = b"He said \\\"hi\\\"\\n\\tBack\\\\slash\\u0001\\u001f\x7f\xc3\xa9";
 
     #[cfg(feature = "alloc")]
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
         let mut input = VecSource::new(bytes.to_vec());
         let mut output = VecSink::default();
-        crate::stream_to_stream(&mut input, codec, &mut output)
-            .map_err(|error| match error {
-                DriveError::Codec(error) => error,
-                _ => unreachable!("infallible Vec adapter"),
-            })?;
+        crate::stream_to_stream(&mut input, codec, &mut output).map_err(|error| match error {
+            DriveError::Codec(error) => error,
+            _ => unreachable!("infallible Vec adapter"),
+        })?;
         Ok(output.into_inner())
     }
 
@@ -236,7 +239,10 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn passes_through_plain_bytes_unchanged() {
-        assert_eq!(collect(json_enc(), b"plain text 123").unwrap(), b"plain text 123");
+        assert_eq!(
+            collect(json_enc(), b"plain text 123").unwrap(),
+            b"plain text 123"
+        );
     }
 
     #[cfg(feature = "alloc")]
@@ -428,8 +434,17 @@ mod tests {
     fn finish_is_idempotent_once_done() {
         let mut codec = json_enc();
         let mut output = [0u8; 16];
-        assert_eq!(codec.process(b"hi", &mut output).unwrap(), Progress::InputConsumed { written: 2 });
-        assert_eq!(codec.finish(&mut output).unwrap(), Drain::Done { written: 0 });
-        assert_eq!(codec.finish(&mut output).unwrap(), Drain::Done { written: 0 });
+        assert_eq!(
+            codec.process(b"hi", &mut output).unwrap(),
+            Progress::InputConsumed { written: 2 }
+        );
+        assert_eq!(
+            codec.finish(&mut output).unwrap(),
+            Drain::Done { written: 0 }
+        );
+        assert_eq!(
+            codec.finish(&mut output).unwrap(),
+            Drain::Done { written: 0 }
+        );
     }
 }

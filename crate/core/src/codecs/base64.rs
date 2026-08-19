@@ -72,7 +72,12 @@ impl<E: Engine> Base64Enc<E> {
     /// Build a [`Base64Enc`] that encodes with a caller-supplied `Engine`
     /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
     pub fn with_engine(engine: E) -> Self {
-        Self { engine, pending_group: [0; GROUP], len: 0, carry: Carry::new() }
+        Self {
+            engine,
+            pending_group: [0; GROUP],
+            len: 0,
+            carry: Carry::new(),
+        }
     }
 
     /// Encode one group directly into the carry. Partial input groups
@@ -161,7 +166,10 @@ impl<E: Engine> Codec for Base64Enc<E> {
             let out_bytes = groups * ENCODED_GROUP;
             out_pos += self
                 .engine
-                .encode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
+                .encode_slice(
+                    &input[in_pos..in_pos + in_bytes],
+                    &mut output[out_pos..out_pos + out_bytes],
+                )
                 .map_err(|_| Error::new(ErrorKind::Corrupt, in_pos, out_pos))?;
             in_pos += in_bytes;
         }
@@ -214,7 +222,12 @@ impl<E: Engine> Base64Dec<E> {
     /// Build a [`Base64Dec`] that decodes with a caller-supplied `Engine`
     /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
     pub fn with_engine(engine: E) -> Self {
-        Self { engine, pending_group: [0; ENCODED_GROUP], len: 0, carry: Carry::new() }
+        Self {
+            engine,
+            pending_group: [0; ENCODED_GROUP],
+            len: 0,
+            carry: Carry::new(),
+        }
     }
 
     fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
@@ -248,7 +261,10 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
             self.stage_group(&group[..self.len], 0, out_pos)
                 .map_err(|error| {
                     if error.kind == ErrorKind::Corrupt {
-                        Error { kind: ErrorKind::UnexpectedEnd, ..error }
+                        Error {
+                            kind: ErrorKind::UnexpectedEnd,
+                            ..error
+                        }
                     } else {
                         error
                     }
@@ -323,7 +339,10 @@ impl<E: Engine> Codec for Base64Dec<E> {
         let remaining_in = input.len() - in_pos;
         let remaining_out = output.len() - out_pos;
         let mut groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
-        if let Some(pad_pos) = input[in_pos..in_pos + groups * ENCODED_GROUP].iter().position(|&b| b == b'=') {
+        if let Some(pad_pos) = input[in_pos..in_pos + groups * ENCODED_GROUP]
+            .iter()
+            .position(|&b| b == b'=')
+        {
             groups = pad_pos / ENCODED_GROUP;
         }
         if groups > 0 {
@@ -331,7 +350,10 @@ impl<E: Engine> Codec for Base64Dec<E> {
             let out_bytes = groups * GROUP;
             out_pos += self
                 .engine
-                .decode_slice(&input[in_pos..in_pos + in_bytes], &mut output[out_pos..out_pos + out_bytes])
+                .decode_slice(
+                    &input[in_pos..in_pos + in_bytes],
+                    &mut output[out_pos..out_pos + out_bytes],
+                )
                 .map_err(|_| Error::new(ErrorKind::Corrupt, in_pos, out_pos))?;
             in_pos += in_bytes;
         }
@@ -392,15 +414,15 @@ mod tests {
     use super::base64_enc;
     #[cfg(feature = "alloc")]
     use super::{Base64Dec, Base64Enc};
-    #[cfg(feature = "alloc")]
-    use alloc::vec::Vec;
-    use crate::{Codec, DrainCodec, Drain, Progress};
-    #[cfg(feature = "alloc")]
-    use crate::{stream_to_stream, DriveError};
     #[cfg(feature = "std")]
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     #[cfg(feature = "alloc")]
-    use crate::sources_and_sinks::vec::{VecSource, VecSink};
+    use crate::sources_and_sinks::vec::{VecSink, VecSource};
+    #[cfg(feature = "alloc")]
+    use crate::{stream_to_stream, DriveError};
+    use crate::{Codec, Drain, DrainCodec, Progress};
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
 
     #[cfg(feature = "alloc")]
     const INPUT: &[u8] = b"Hello, World! 123";
@@ -411,11 +433,10 @@ mod tests {
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
         let mut input = VecSource::new(bytes.to_vec());
         let mut output = VecSink::default();
-        stream_to_stream(&mut input, codec, &mut output)
-            .map_err(|error| match error {
-                DriveError::Codec(error) => error,
-                _ => unreachable!("infallible Vec adapter"),
-            })?;
+        stream_to_stream(&mut input, codec, &mut output).map_err(|error| match error {
+            DriveError::Codec(error) => error,
+            _ => unreachable!("infallible Vec adapter"),
+        })?;
         Ok(output.into_inner())
     }
 

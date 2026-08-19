@@ -21,19 +21,32 @@ use rust_codecs_core::{stream_to_stream, Chain, Codec};
 /// Staging buffer size for each link in a `--readers`/`--writers` chain.
 const STAGING: usize = 4 * 1024;
 
+/// A codec name paired with its constructor.
+type CodecEntry = (&'static str, fn() -> Box<dyn Codec>);
+
 /// Single source of truth for known codec names: `make_codec`, the
 /// "unknown codec" error, and `--help`'s codec list all read from
 /// this instead of repeating the name list.
-const CODECS: &[(&str, fn() -> Box<dyn Codec>)] = &[
-    ("identity", || Box::new(rust_codecs_core::identity::identity())),
+const CODECS: &[CodecEntry] = &[
+    ("identity", || {
+        Box::new(rust_codecs_core::identity::identity())
+    }),
     ("rot13", || Box::new(rust_codecs_core::rot13::rot13())),
-    ("base64-enc", || Box::new(rust_codecs_core::base64::base64_enc())),
-    ("base64-dec", || Box::new(rust_codecs_core::base64::base64_dec())),
+    ("base64-enc", || {
+        Box::new(rust_codecs_core::base64::base64_enc())
+    }),
+    ("base64-dec", || {
+        Box::new(rust_codecs_core::base64::base64_dec())
+    }),
     ("json-enc", || Box::new(rust_codecs_core::json::json_enc())),
 ];
 
 fn usage() -> String {
-    let names = CODECS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+    let names = CODECS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "\
 Test harness for chaining codecs: folds --readers into one Chain and
@@ -75,10 +88,18 @@ Example:
 }
 
 fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
-    CODECS.iter().find(|(n, _)| *n == name).map(|(_, ctor)| ctor()).ok_or_else(|| {
-        let names = CODECS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ");
-        format!("unknown codec {name:?} (expected one of: {names})")
-    })
+    CODECS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, ctor)| ctor())
+        .ok_or_else(|| {
+            let names = CODECS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown codec {name:?} (expected one of: {names})")
+        })
 }
 
 enum Mode {
@@ -117,7 +138,9 @@ fn parse_args(
                     "copy" => Engine::Copy,
                     "stream" => Engine::Stream,
                     other => {
-                        return Err(format!("unknown engine {other:?} (expected copy or stream)"))
+                        return Err(format!(
+                            "unknown engine {other:?} (expected copy or stream)"
+                        ))
                     }
                 };
             }
@@ -174,8 +197,8 @@ fn run_io<R: Read, W: Write>(
     let reader_codec = compose(reader_names)?;
     let writer_codec = compose(writer_names)?;
 
-    let mut reader =
-        CodecReader::new(input, reader_codec, vec![0u8; STAGING]).with_read_granularity(granularity);
+    let mut reader = CodecReader::new(input, reader_codec, vec![0u8; STAGING])
+        .with_read_granularity(granularity);
     let mut writer = CodecWriter::new(output, writer_codec, vec![0u8; STAGING]);
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
@@ -209,7 +232,13 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
     let (engine, granularity, reader_names, writer_names) = parse_args(args)?;
     match engine {
         Engine::Copy => {
-            run_io(&reader_names, &writer_names, granularity, io::stdin(), io::stdout())?;
+            run_io(
+                &reader_names,
+                &writer_names,
+                granularity,
+                io::stdin(),
+                io::stdout(),
+            )?;
         }
         Engine::Stream => {
             run_io_stream(&reader_names, &writer_names, io::stdin(), io::stdout())?;
@@ -263,9 +292,9 @@ mod tests {
     use std::io::{Cursor, Write};
     use std::rc::Rc;
 
-    use rust_codecs_core::stream_to_stream;
-    use rust_codecs_core::sources_and_sinks::vec::{VecSource, VecSink};
     use rust_codecs_core::rot13::rot13;
+    use rust_codecs_core::sources_and_sinks::vec::{VecSink, VecSource};
+    use rust_codecs_core::stream_to_stream;
 
     use rust_codecs_core::sources_and_sinks::std_io::ReadGranularity;
 
@@ -381,7 +410,8 @@ mod tests {
                 .unwrap();
         assert_eq!(granularity, ReadGranularity::SingleRead);
 
-        let (_, granularity, _, _) = parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
+        let (_, granularity, _, _) =
+            parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
         assert_eq!(granularity, ReadGranularity::FillBuffer);
     }
 

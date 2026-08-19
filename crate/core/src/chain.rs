@@ -124,7 +124,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// for `second` to drain, so the chain could never make progress —
     /// a caller bug, not a runtime condition.
     pub fn new(first: A, second: B, mut staging: S) -> Self {
-        assert!(!staging.as_mut().is_empty(), "Chain staging buffer must be non-empty");
+        assert!(
+            !staging.as_mut().is_empty(),
+            "Chain staging buffer must be non-empty"
+        );
         Self {
             first,
             second,
@@ -222,7 +225,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                             .validated(0, available)
                             .unwrap_or_else(|violation| violation);
                         self.stage_pos += error.written;
-                        return Err(Error { consumed: 0, written: out_pos, ..error });
+                        return Err(Error {
+                            consumed: 0,
+                            written: out_pos,
+                            ..error
+                        });
                     }
                 };
                 self.stage_pos += moved.written;
@@ -252,7 +259,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 };
                 return Ok(match moved.stop {
                     DrainStop::OutputFilled => Drain::OutputFilled,
-                    DrainStop::Done => Drain::Done { written: out_pos + moved.written },
+                    DrainStop::Done => Drain::Done {
+                        written: out_pos + moved.written,
+                    },
                 });
             }
             if out_pos == output.len() {
@@ -305,7 +314,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                             .unwrap_or_else(|violation| violation);
                         in_pos += error.consumed;
                         self.stage_pos += error.written;
-                        return Err(Error { consumed: in_pos, written: out_pos, ..error });
+                        return Err(Error {
+                            consumed: in_pos,
+                            written: out_pos,
+                            ..error
+                        });
                     }
                 };
                 in_pos += moved.consumed;
@@ -342,9 +355,9 @@ mod tests {
     #[cfg(feature = "base64")]
     use crate::base64::{base64_dec, base64_enc};
     use crate::identity::identity;
-    use crate::{stream_to_stream, DriveError};
-    use crate::sources_and_sinks::vec::{VecSource, VecSink};
     use crate::rot13::rot13;
+    use crate::sources_and_sinks::vec::{VecSink, VecSource};
+    use crate::{stream_to_stream, DriveError};
     use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
     const INPUT: &[u8] = b"Hello, World! 123";
@@ -352,11 +365,10 @@ mod tests {
     fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, Error> {
         let mut input = VecSource::new(bytes.to_vec());
         let mut output = VecSink::default();
-        stream_to_stream(&mut input, codec, &mut output)
-            .map_err(|error| match error {
-                DriveError::Codec(error) => error,
-                _ => unreachable!("infallible Vec adapter"),
-            })?;
+        stream_to_stream(&mut input, codec, &mut output).map_err(|error| match error {
+            DriveError::Codec(error) => error,
+            _ => unreachable!("infallible Vec adapter"),
+        })?;
         Ok(output.into_inner())
     }
 
@@ -412,7 +424,12 @@ mod tests {
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, &mut out).unwrap();
-        assert_eq!(outcome, Progress::InputConsumed { written: INPUT.len() });
+        assert_eq!(
+            outcome,
+            Progress::InputConsumed {
+                written: INPUT.len()
+            }
+        );
         assert_eq!(&out[..INPUT.len()], INPUT);
     }
 
@@ -539,7 +556,12 @@ mod tests {
         let outcome = chain.process(INPUT, &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         let drain = chain.flush(&mut out).unwrap();
-        assert_eq!(drain, Drain::Done { written: expected.len() });
+        assert_eq!(
+            drain,
+            Drain::Done {
+                written: expected.len()
+            }
+        );
         assert_eq!(&out[..expected.len()], expected.as_slice());
     }
 
@@ -553,7 +575,12 @@ mod tests {
         let outcome = chain.process(INPUT, &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         let drain = chain.flush(&mut out).unwrap();
-        assert_eq!(drain, Drain::Done { written: expected.len() });
+        assert_eq!(
+            drain,
+            Drain::Done {
+                written: expected.len()
+            }
+        );
         assert_eq!(&out[..expected.len()], expected.as_slice());
     }
 
@@ -585,7 +612,12 @@ mod tests {
         chain.process(b"abc", &mut big).unwrap();
         let expected2 = collect(rot13(), b"abc").unwrap();
         let drain = chain.flush(&mut big).unwrap();
-        assert_eq!(drain, Drain::Done { written: expected2.len() });
+        assert_eq!(
+            drain,
+            Drain::Done {
+                written: expected2.len()
+            }
+        );
         assert_eq!(&big[..expected2.len()], expected2.as_slice());
     }
 
@@ -600,7 +632,9 @@ mod tests {
 
     impl Codec for Overclaimer {
         fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
-            Ok(Progress::OutputFilled { consumed: input.len() + 1 })
+            Ok(Progress::OutputFilled {
+                consumed: input.len() + 1,
+            })
         }
     }
 
@@ -612,7 +646,10 @@ mod tests {
         // validation turns it into a ContractViolation error.
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
         let result = collect(chain, INPUT);
-        assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ContractViolation);
+        assert_eq!(
+            result.unwrap_err().kind,
+            crate::ErrorKind::ContractViolation
+        );
     }
 
     struct FirstFailsOnce {

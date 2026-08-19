@@ -49,14 +49,14 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     use super::rot13;
-    #[cfg(feature = "alloc")]
-    use alloc::vec::Vec;
-    #[cfg(feature = "alloc")]
-    use crate::stream_to_stream;
     #[cfg(feature = "std")]
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     #[cfg(feature = "alloc")]
-    use crate::sources_and_sinks::vec::{VecSource, VecSink};
+    use crate::sources_and_sinks::vec::{VecSink, VecSource};
+    #[cfg(feature = "alloc")]
+    use crate::stream_to_stream;
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
 
     #[cfg(feature = "alloc")]
     fn collect(codec: impl crate::Codec, bytes: &[u8]) -> Vec<u8> {

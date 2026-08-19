@@ -203,7 +203,7 @@ extern crate alloc;
 
 mod protocol;
 pub use protocol::{
-    Codec, Drain, DrainCodec, Error, ErrorKind, Progress, EndCapableCodec, EndCapableProgress,
+    Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, ErrorKind, Progress,
     Sink, Source,
 };
 
@@ -242,10 +242,14 @@ mod feature_coverage {
         )),
         ignore = "some optional features are disabled — run `cargo test --all-features`"
     )]
+    #[allow(clippy::assertions_on_constants)]
     fn all_optional_features_are_enabled() {
         assert!(cfg!(feature = "std"), "feature \"std\" is off");
         assert!(cfg!(feature = "base64"), "feature \"base64\" is off");
         assert!(cfg!(feature = "json"), "feature \"json\" is off");
-        assert!(cfg!(feature = "embedded-io"), "feature \"embedded-io\" is off");
+        assert!(
+            cfg!(feature = "embedded-io"),
+            "feature \"embedded-io\" is off"
+        );
     }
 }

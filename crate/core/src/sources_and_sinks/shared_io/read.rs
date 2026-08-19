@@ -1,8 +1,8 @@
 use core::convert::Infallible;
 
-use crate::stream::{PumpDrainEnd, Pump, PumpEnd, PumpStepEnd};
 use crate::sources_and_sinks::slice::SliceSink;
-use crate::{DriveError, Source, EndCapableCodec};
+use crate::stream::{Pump, PumpDrainEnd, PumpEnd, PumpStepEnd};
+use crate::{DriveError, EndCapableCodec, Source};
 
 /// How much a single [`pump_read`] call (and so a single `Read::read`
 /// call on `CodecReader`/`BufReadCodecReader`) pulls from the wrapped
@@ -56,7 +56,10 @@ pub fn pump_read<I: Source, C: EndCapableCodec>(
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
-        debug_assert!(matches!(drained.end, PumpDrainEnd::Done | PumpDrainEnd::SinkExhausted));
+        debug_assert!(matches!(
+            drained.end,
+            PumpDrainEnd::Done | PumpDrainEnd::SinkExhausted
+        ));
     }
     Ok(output.written())
 }
@@ -128,7 +131,13 @@ mod tests {
 
         assert_eq!(&collected, b"final");
         assert_eq!(
-            pump_read(&mut pump, &mut source, &mut [0; 2], ReadGranularity::FillBuffer).unwrap(),
+            pump_read(
+                &mut pump,
+                &mut source,
+                &mut [0; 2],
+                ReadGranularity::FillBuffer
+            )
+            .unwrap(),
             0
         );
     }
@@ -186,12 +195,21 @@ mod tests {
         // for all of them: FillBuffer keeps pulling until the buffer
         // (or the source) is exhausted, but SingleRead must return
         // after the first pull alone.
-        let mut source = LimitedChunkSource { bytes: b"abcdefghi", pos: 0, chunk_size: 3 };
+        let mut source = LimitedChunkSource {
+            bytes: b"abcdefghi",
+            pos: 0,
+            chunk_size: 3,
+        };
         let mut pump = Pump::new(PassThrough);
         let mut buf = [0u8; 9];
 
-        let written =
-            pump_read(&mut pump, &mut source, &mut buf, ReadGranularity::SingleRead).unwrap();
+        let written = pump_read(
+            &mut pump,
+            &mut source,
+            &mut buf,
+            ReadGranularity::SingleRead,
+        )
+        .unwrap();
 
         assert_eq!(written, 3);
         assert_eq!(&buf[..3], b"abc");
@@ -203,12 +221,21 @@ mod tests {
         // Same source/buffer as `single_read_returns_after_one_source_pull`,
         // but under the default granularity: one `pump_read` call
         // drains the whole source across multiple `chunk()` pulls.
-        let mut source = LimitedChunkSource { bytes: b"abcdefghi", pos: 0, chunk_size: 3 };
+        let mut source = LimitedChunkSource {
+            bytes: b"abcdefghi",
+            pos: 0,
+            chunk_size: 3,
+        };
         let mut pump = Pump::new(PassThrough);
         let mut buf = [0u8; 9];
 
-        let written =
-            pump_read(&mut pump, &mut source, &mut buf, ReadGranularity::FillBuffer).unwrap();
+        let written = pump_read(
+            &mut pump,
+            &mut source,
+            &mut buf,
+            ReadGranularity::FillBuffer,
+        )
+        .unwrap();
 
         assert_eq!(written, 9);
         assert_eq!(&buf, b"abcdefghi");

@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 
-use crate::{Source, Sink};
+use crate::{Sink, Source};
 
 /// A borrowed `&[u8]` used directly as an input stream.
 pub struct SliceSource<'a> {
@@ -9,8 +9,12 @@ pub struct SliceSource<'a> {
 }
 
 impl<'a> SliceSource<'a> {
-    pub fn new(bytes: &'a [u8]) -> Self { Self { bytes, pos: 0 } }
-    pub fn consumed(&self) -> usize { self.pos }
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+    pub fn consumed(&self) -> usize {
+        self.pos
+    }
 }
 
 impl Source for SliceSource<'_> {
@@ -20,7 +24,9 @@ impl Source for SliceSource<'_> {
         // previous call's chunk.
         Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
     }
-    fn consume(&mut self, amount: usize) { self.pos += amount; }
+    fn consume(&mut self, amount: usize) {
+        self.pos += amount;
+    }
 }
 
 /// A borrowed `&mut [u8]` used directly as an output stream.
@@ -30,8 +36,12 @@ pub struct SliceSink<'a> {
 }
 
 impl<'a> SliceSink<'a> {
-    pub fn new(bytes: &'a mut [u8]) -> Self { Self { bytes, pos: 0 } }
-    pub fn written(&self) -> usize { self.pos }
+    pub fn new(bytes: &'a mut [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+    pub fn written(&self) -> usize {
+        self.pos
+    }
 }
 
 impl Sink for SliceSink<'_> {

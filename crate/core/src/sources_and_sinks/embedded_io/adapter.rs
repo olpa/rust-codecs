@@ -1,6 +1,6 @@
 use embedded_io::{Read, Write};
 
-use crate::{Source, Sink};
+use crate::{Sink, Source};
 
 pub struct EmbeddedSource<R, S> {
     inner: R,
@@ -132,10 +132,10 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
-    use super::{EmbeddedSource, EmbeddedSink};
+    use super::{EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
+    use crate::sources_and_sinks::vec::{VecSink, VecSource};
     use crate::stream_to_stream;
-    use crate::sources_and_sinks::vec::{VecSource, VecSink};
 
     #[test]
     fn embedded_input_can_feed_vec_output() {

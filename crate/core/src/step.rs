@@ -18,7 +18,7 @@
 //! caller needs a narrower type here, since `Drain` has no in-band-end
 //! counterpart to begin with.
 
-use crate::{Codec, Drain, DrainCodec, Error, Progress, EndCapableCodec, EndCapableProgress};
+use crate::{Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, Progress};
 
 /// Why one step of an ordinary [`Codec::process`] call stopped. No
 /// in-band end is possible — see [`EndCapableStepEnd`] for the

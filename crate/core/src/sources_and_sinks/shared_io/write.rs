@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 
-use crate::stream::Pump;
 use crate::sources_and_sinks::slice::SliceSource;
+use crate::stream::Pump;
 use crate::{Codec, DriveError, Sink};
 
 /// Drive `pump` from `buf`, writing transformed bytes into `output` —

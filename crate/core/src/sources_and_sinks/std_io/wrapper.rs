@@ -23,13 +23,13 @@ use std::io::{self, BufRead, Read, Write};
 
 use core::convert::Infallible;
 
-use crate::stream::Pump;
 use crate::sources_and_sinks::shared_io::{
     pump_finish, pump_flush, pump_read, pump_write, ReadGranularity,
 };
-use crate::{Codec, DriveError, Error, ErrorKind, EndCapableCodec};
+use crate::stream::Pump;
+use crate::{Codec, DriveError, EndCapableCodec, Error, ErrorKind};
 
-use super::adapter::{BufReadSource, StdSource, StdSink};
+use super::adapter::{BufReadSource, StdSink, StdSource};
 
 fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
@@ -263,7 +263,10 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// [`CodecReader::new`] does: it could never hold a byte for
     /// `inner` to receive.
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
-        Self { output: StdSink::new(inner, outbuf), pump: Pump::new(codec) }
+        Self {
+            output: StdSink::new(inner, outbuf),
+            pump: Pump::new(codec),
+        }
     }
 
     /// Direct access to the wrapped writer, bypassing the codec — e.g.
@@ -332,7 +335,7 @@ mod tests {
 
     use super::{BufReadCodecReader, CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::{Drain, DrainCodec, Error, EndCapableCodec, EndCapableProgress};
+    use crate::{Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error};
 
     #[test]
     fn buf_read_codec_reader_needs_no_scratch_buffer() {
@@ -372,13 +375,20 @@ mod tests {
     }
 
     impl EndCapableCodec for EarlyEnd {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error> {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [u8],
+        ) -> Result<EndCapableProgress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
             output[..n].copy_from_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
-                Ok(EndCapableProgress::End { consumed: n, written: n })
+                Ok(EndCapableProgress::End {
+                    consumed: n,
+                    written: n,
+                })
             } else if n == input.len() {
                 Ok(EndCapableProgress::InputConsumed { written: n })
             } else {
@@ -392,8 +402,11 @@ mod tests {
         // The codec ends after 3 bytes; the reader must yield exactly
         // those and then report EOF on every later call, without
         // touching the codec again.
-        let mut reader =
-            CodecReader::new(Cursor::new(b"Hello World".as_slice()), EarlyEnd { limit: 3, done: 0 }, vec![0u8; 8]);
+        let mut reader = CodecReader::new(
+            Cursor::new(b"Hello World".as_slice()),
+            EarlyEnd { limit: 3, done: 0 },
+            vec![0u8; 8],
+        );
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
         assert_eq!(out, b"Hel");

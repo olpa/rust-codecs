@@ -1,6 +1,6 @@
 use std::io::{BufRead, Read, Write};
 
-use crate::{Source, Sink};
+use crate::{Sink, Source};
 
 pub struct StdSource<R, S> {
     inner: R,
@@ -231,10 +231,10 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
 mod tests {
     use std::io::{BufReader, Cursor, Read};
 
-    use super::{BufReadSource, StdSource, StdSink};
+    use super::{BufReadSource, StdSink, StdSource};
     use crate::identity::identity;
+    use crate::sources_and_sinks::vec::{VecSink, VecSource};
     use crate::stream_to_stream;
-    use crate::sources_and_sinks::vec::{VecSource, VecSink};
     use crate::Source;
 
     /// Fails its first `read` with `Interrupted`, then delegates.
@@ -247,7 +247,10 @@ mod tests {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if !self.failed {
                 self.failed = true;
-                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "eintr"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "eintr",
+                ));
             }
             self.inner.read(buf)
         }
@@ -255,7 +258,10 @@ mod tests {
 
     #[test]
     fn std_source_retries_an_interrupted_read() {
-        let flaky = FlakyOnce { inner: Cursor::new(b"retry me".as_slice()), failed: false };
+        let flaky = FlakyOnce {
+            inner: Cursor::new(b"retry me".as_slice()),
+            failed: false,
+        };
         let mut input = StdSource::new(flaky, [0u8; 8]);
         let mut output = VecSink::default();
         stream_to_stream(&mut input, identity(), &mut output).unwrap();
@@ -267,7 +273,10 @@ mod tests {
         // `BufReader::fill_buf` calls the wrapped `Read::read` directly
         // when its own buffer is empty, so `FlakyOnce`'s interruption
         // surfaces through `fill_buf` too.
-        let flaky = FlakyOnce { inner: Cursor::new(b"retry me too".as_slice()), failed: false };
+        let flaky = FlakyOnce {
+            inner: Cursor::new(b"retry me too".as_slice()),
+            failed: false,
+        };
         let mut input = BufReadSource::new(BufReader::new(flaky));
         let mut output = VecSink::default();
         stream_to_stream(&mut input, identity(), &mut output).unwrap();

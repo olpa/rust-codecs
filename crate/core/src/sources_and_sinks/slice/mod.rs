@@ -5,4 +5,4 @@
 
 mod adapter;
 
-pub use adapter::{SliceSource, SliceSink};
+pub use adapter::{SliceSink, SliceSource};
