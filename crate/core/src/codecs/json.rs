@@ -197,63 +197,44 @@ pub fn json_enc() -> JsonEnc {
     JsonEnc::default()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
-    #[cfg(feature = "std")]
     use std::io::{Cursor, Read, Write};
 
-    #[cfg(feature = "std")]
-    use super::escape_bytes;
-    use super::{json_enc, JsonEnc};
-    #[cfg(feature = "std")]
+    use super::{escape_bytes, json_enc, JsonEnc};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
-    #[cfg(feature = "alloc")]
-    use crate::sources_and_sinks::vec::{VecSink, VecSource};
-    #[cfg(feature = "alloc")]
-    use crate::DriveError;
-    use crate::{Codec, Drain, DrainCodec, ErrorKind, Progress};
-    #[cfg(feature = "std")]
-    use alloc::vec;
-    #[cfg(feature = "alloc")]
-    use alloc::vec::Vec;
+    use crate::sources_and_sinks::vec::{encode_string, VecSink, VecSource};
+    use crate::{Codec, Drain, DrainCodec, DriveError, ErrorKind, Progress};
 
-    #[cfg(feature = "alloc")]
-    const INPUT: &[u8] = b"He said \"hi\"\n\tBack\\slash\x01\x1f\x7f\xc3\xa9";
-    #[cfg(feature = "alloc")]
-    const ESCAPED: &[u8] = b"He said \\\"hi\\\"\\n\\tBack\\\\slash\\u0001\\u001f\x7f\xc3\xa9";
-
-    #[cfg(feature = "alloc")]
-    fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
-        let mut input = VecSource::new(bytes.to_vec());
-        let mut output = VecSink::default();
-        crate::stream_to_stream(&mut input, codec, &mut output).map_err(|error| match error {
-            DriveError::Codec(error) => error,
-            _ => unreachable!("infallible Vec adapter"),
-        })?;
-        Ok(output.into_inner())
-    }
-
-    #[cfg(feature = "alloc")]
     #[test]
-    fn vec_adapter_round_trip() {
-        assert_eq!(collect(json_enc(), INPUT).unwrap(), ESCAPED);
+    fn round_trip() {
+        let input = "He said \"hi\"\n\tBack\\slash\x01\x1f\x7f\u{e9}";
+        let escaped = "He said \\\"hi\\\"\\n\\tBack\\\\slash\\u0001\\u001f\x7f\u{e9}";
+        assert_eq!(encode_string(json_enc(), input).unwrap(), escaped);
     }
 
-    #[cfg(feature = "alloc")]
     #[test]
     fn passes_through_plain_bytes_unchanged() {
         assert_eq!(
-            collect(json_enc(), b"plain text 123").unwrap(),
-            b"plain text 123"
+            encode_string(json_enc(), "plain text 123").unwrap(),
+            "plain text 123"
         );
     }
 
-    #[cfg(feature = "alloc")]
     #[test]
     fn passes_through_invalid_utf8_unchanged() {
         // Escaping never needs to decode characters, so bytes that aren't
-        // valid UTF-8 at all are still handled correctly.
-        assert_eq!(collect(json_enc(), b"\xff\xfe").unwrap(), b"\xff\xfe");
+        // valid UTF-8 at all are still handled correctly. `encode_string`
+        // requires valid UTF-8, so this drives the Vec adapters directly.
+        let mut input = VecSource::new(b"\xff\xfe".to_vec());
+        let mut output = VecSink::default();
+        crate::stream_to_stream(&mut input, json_enc(), &mut output)
+            .map_err(|error| match error {
+                DriveError::Codec(error) => error,
+                _ => unreachable!("infallible Vec adapter"),
+            })
+            .unwrap();
+        assert_eq!(output.into_inner(), b"\xff\xfe");
     }
 
     #[test]
@@ -279,7 +260,6 @@ mod tests {
     /// expected output from a single, non-streaming call to the
     /// underlying `escape_bytes`, independent of this codec's
     /// pending-state bookkeeping.
-    #[cfg(feature = "std")]
     fn escape_transitions_fixture() -> (Vec<u8>, Vec<u8>) {
         let mut input = Vec::new();
         input.extend_from_slice(&[b'A'; 5]); // long literal run
@@ -304,7 +284,6 @@ mod tests {
         (input, expected)
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn reader_matches_one_shot_escape_through_the_minimum_output_buffer() {
         // 6 bytes: the smallest buffer that can always fit an escape
@@ -325,7 +304,6 @@ mod tests {
         assert_eq!(via_reader, expected);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn writer_matches_one_shot_escape_fed_one_byte_at_a_time() {
         let (input, expected) = escape_transitions_fixture();
@@ -338,7 +316,6 @@ mod tests {
         assert_eq!(via_writer, expected);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn escape_spans_a_below_minimum_output_buffer() {
         // A 1-byte output buffer can never fit a whole escape sequence
@@ -370,57 +347,6 @@ mod tests {
         assert_eq!(result.unwrap_err().kind, ErrorKind::UnexpectedEnd);
     }
 
-    #[cfg(feature = "std")]
-    #[test]
-    fn long_literal_run_through_a_one_byte_output_buffer() {
-        // A literal run far longer than the output buffer, so it can
-        // only be drained a byte at a time across many `process` calls
-        // via `pending_literal`, never re-running `escape_bytes` over
-        // already-scanned bytes.
-        let input = vec![b'x'; 5000];
-        let mut reader = CodecReader::new(Cursor::new(input.clone()), json_enc(), vec![0u8; 1]);
-        let mut out = Vec::new();
-        let mut buf = [0u8; 1];
-        loop {
-            let n = reader.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(out, input);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn reader_with_small_output_buffer() {
-        // 6 bytes: the smallest buffer that can always fit an escape
-        // sequence atomically without spanning calls.
-        let mut reader = CodecReader::new(Cursor::new(INPUT), json_enc(), vec![0u8; 6]);
-        let mut out = Vec::new();
-        let mut buf = [0u8; 6];
-        loop {
-            let n = reader.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(out, ESCAPED);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn writer_finish_reaches_done() {
-        let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 64]);
-        for chunk in INPUT.chunks(3) {
-            writer.write_all(chunk).unwrap();
-        }
-        let out = writer.finish().unwrap();
-        assert_eq!(out, ESCAPED);
-    }
-
-    #[cfg(feature = "std")]
     #[test]
     fn writer_splits_a_multibyte_character_one_byte_at_a_time() {
         // \xf0\x9f\x98\x80 (😀), fed one byte per write: no stitching is

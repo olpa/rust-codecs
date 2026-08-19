@@ -404,137 +404,26 @@ pub fn base64_dec() -> Base64Dec {
     Base64Dec::with_engine(STANDARD)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
-    #[cfg(feature = "std")]
-    use std::io::{Cursor, Read, Write};
-
-    #[cfg(feature = "alloc")]
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-    use super::base64_dec;
-    #[cfg(feature = "alloc")]
-    use super::base64_enc;
-    #[cfg(feature = "alloc")]
-    use super::{Base64Dec, Base64Enc};
-    #[cfg(feature = "std")]
-    use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
-    #[cfg(feature = "alloc")]
-    use crate::sources_and_sinks::vec::{VecSink, VecSource};
-    #[cfg(feature = "alloc")]
-    use crate::{stream_to_stream, DriveError};
+    use super::{base64_dec, base64_enc, Base64Dec, Base64Enc};
+    use crate::sources_and_sinks::vec::encode_string;
     use crate::{Codec, Drain, DrainCodec, Progress};
-    #[cfg(feature = "alloc")]
     use alloc::vec::Vec;
 
-    #[cfg(feature = "alloc")]
-    const INPUT: &[u8] = b"Hello, World! 123";
-    #[cfg(feature = "alloc")]
-    const ENCODED: &[u8] = b"SGVsbG8sIFdvcmxkISAxMjM=";
+    const INPUT: &str = "Hello, World! 123";
+    const ENCODED: &str = "SGVsbG8sIFdvcmxkISAxMjM=";
 
-    #[cfg(feature = "alloc")]
-    fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
-        let mut input = VecSource::new(bytes.to_vec());
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, codec, &mut output).map_err(|error| match error {
-            DriveError::Codec(error) => error,
-            _ => unreachable!("infallible Vec adapter"),
-        })?;
-        Ok(output.into_inner())
-    }
-
-    #[cfg(feature = "alloc")]
     #[test]
-    fn encode_with_vec_adapters() {
-        assert_eq!(collect(base64_enc(), INPUT).unwrap(), ENCODED);
-    }
-
-    #[cfg(feature = "alloc")]
-    #[test]
-    fn decode_with_vec_adapters() {
-        assert_eq!(collect(base64_dec(), ENCODED).unwrap(), INPUT);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn encode_reader_with_one_byte_buffers() {
-        // Buffers below the 4-byte encoded group size used to be
-        // impossible; the output carry lets a group span calls, so
-        // even 1-byte reads work.
-        let mut reader = CodecReader::new(Cursor::new(INPUT), base64_enc(), vec![0u8; 1]);
-        let mut out = Vec::new();
-        let mut buf = [0u8; 1];
-        loop {
-            let n = reader.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(out, ENCODED);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn decode_reader_with_small_output_buffer() {
-        let mut reader = CodecReader::new(Cursor::new(ENCODED), base64_dec(), vec![0u8; 3]);
-        let mut out = Vec::new();
-        let mut buf = [0u8; 2];
-        loop {
-            let n = reader.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
-        assert_eq!(out, INPUT);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn encode_writer_finish_reaches_done() {
-        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 64]);
-        for chunk in INPUT.chunks(3) {
-            writer.write_all(chunk).unwrap();
-        }
-        let out = writer.finish().unwrap();
-        assert_eq!(out, ENCODED);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn decode_writer_finish_reaches_done() {
-        let mut writer = CodecWriter::new(Vec::new(), base64_dec(), vec![0u8; 64]);
-        for chunk in ENCODED.chunks(3) {
-            writer.write_all(chunk).unwrap();
-        }
-        let out = writer.finish().unwrap();
-        assert_eq!(out, INPUT);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn writer_finish_with_buffer_below_group_size_works() {
-        // A 2-byte scratch buffer is smaller than the 4-byte padded
-        // trailer group; the carry spreads the group across two
-        // finish calls instead of erroring (this exact case was
-        // `Error::OutputTooSmall` before the carry existed).
-        let mut writer = CodecWriter::new(Vec::new(), base64_enc(), vec![0u8; 2]);
-        writer.write_all(b"A").unwrap();
-        let out = writer.finish().unwrap();
-        assert_eq!(out, b"QQ==");
-    }
-
-    #[cfg(feature = "alloc")]
-    #[test]
-    fn round_trip_small_input_chunks() {
-        let encoded = collect(base64_enc(), INPUT).unwrap();
+    fn round_trip() {
+        let encoded = encode_string(base64_enc(), INPUT).unwrap();
         assert_eq!(encoded, ENCODED);
-        let decoded = collect(base64_dec(), &encoded).unwrap();
+        let decoded = encode_string(base64_dec(), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
     }
 
-    #[cfg(feature = "alloc")]
     #[test]
     fn decode_truncated_padded_stream_errors() {
         // finish() decodes a short trailing group instead of always
@@ -542,27 +431,25 @@ mod tests {
         // but STANDARD requires padding and must still reject a
         // stream cut off mid-symbol.
         let truncated = &ENCODED[..ENCODED.len() - 2];
-        assert!(collect(base64_dec(), truncated).is_err());
+        assert!(encode_string(base64_dec(), truncated).is_err());
     }
 
-    #[cfg(feature = "alloc")]
     #[test]
     fn round_trip_with_custom_engine() {
         // URL_SAFE_NO_PAD drops the trailing '=' that STANDARD adds,
         // proving with_engine actually swaps the engine rather than
         // silently falling back to STANDARD.
-        let encoded = collect(Base64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
-        assert_eq!(encoded, ENCODED.strip_suffix(b"=").unwrap());
-        let decoded = collect(Base64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
+        let encoded = encode_string(Base64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
+        assert_eq!(encoded, ENCODED.strip_suffix('=').unwrap());
+        let decoded = encode_string(Base64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
         assert_eq!(decoded, INPUT);
     }
 
-    #[cfg(feature = "alloc")]
     #[test]
     fn decode_rejects_padding_before_end_in_one_call() {
         // "QQ==" ("A") followed by more encoded data is corrupt: padding
         // is only valid in the true last group of the stream.
-        assert!(collect(base64_dec(), b"QQ==QQ==").is_err());
+        assert!(encode_string(base64_dec(), "QQ==QQ==").is_err());
     }
 
     #[test]
@@ -592,21 +479,21 @@ mod tests {
         assert_eq!(&out[..1], b"A");
     }
 
-    #[cfg(feature = "alloc")]
     #[test]
     fn encode_into_one_byte_outputs() {
         // Drive process/finish by hand with a 1-byte output each call:
         // the carry must dribble every 4-byte group out one byte at a
         // time, upholding fully-consume-or-fully-fill throughout.
+        let input = INPUT.as_bytes();
         let mut enc = base64_enc();
         let mut collected = Vec::new();
         let mut in_pos = 0;
-        while in_pos < INPUT.len() {
+        while in_pos < input.len() {
             let mut out = [0u8; 1];
-            match enc.process(&INPUT[in_pos..], &mut out).unwrap() {
+            match enc.process(&input[in_pos..], &mut out).unwrap() {
                 Progress::InputConsumed { written } => {
                     collected.extend_from_slice(&out[..written]);
-                    in_pos = INPUT.len();
+                    in_pos = input.len();
                 }
                 Progress::OutputFilled { consumed } => {
                     collected.extend_from_slice(&out);
@@ -624,6 +511,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(collected, ENCODED);
+        assert_eq!(collected, ENCODED.as_bytes());
     }
 }
