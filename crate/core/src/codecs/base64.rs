@@ -1,6 +1,9 @@
 //! Example [`Codec`]s: base64 encode/decode, built on the `base64`
 //! crate (<https://docs.rs/base64/>).
 //!
+//! This codec belongs in its own crate eventually. See the crate
+//! docs' note on why it lives here for now.
+//!
 //! Both codecs buffer at most one incomplete group on each side of the
 //! transform:
 //!

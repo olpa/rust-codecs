@@ -197,6 +197,15 @@
 //!
 //! See `tokenize_string_array_literal` in
 //! `core/tests/early_stop_input.rs` for the full working version.
+//!
+//! # A note on `base64` and `json`
+//!
+//! These two codecs live in this crate as a chicken-and-egg bootstrap:
+//! the [`Codec`] trait needed real implementations to shake out its
+//! design before this crate had any users, and there was no separate
+//! codec crate yet to put them in. Long-term they belong in their own
+//! crates outside `rust-codecs-core`, each depending on this crate
+//! rather than living inside it.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

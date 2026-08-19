@@ -1,5 +1,8 @@
 //! JSON string-content escaping, built on the [`json_escape`] crate.
 //!
+//! This codec belongs in its own crate eventually. See the crate
+//! docs' note on why it lives here for now.
+//!
 //! Escapes raw bytes into the form they'd take inside a JSON string
 //! literal (the content between the quotes, quotes not included).
 //! `json_escape::explicit::escape_bytes` does the actual escaping — it
