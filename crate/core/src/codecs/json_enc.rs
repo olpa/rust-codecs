@@ -1,52 +1,9 @@
-//! JSON string-content escaping, built on the [`json_escape`] crate.
+//! JSON string-content escaping codec, built on the [`json_escape`] crate.
 //!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
 //!
-//! Escapes raw bytes into the form they'd take inside a JSON string
-//! literal (the content between the quotes, quotes not included).
-//! `json_escape::explicit::escape_bytes` does the actual escaping — it
-//! scans for `"`, `\`, and control bytes and yields literal/escaped
-//! chunks directly over `&[u8]`, so this codec never needs to know or
-//! care about UTF-8 character boundaries, even when a `process` call's
-//! input slice splits a multi-byte character. The `explicit` module
-//! (rather than `token`) is used because it pairs each literal run with
-//! its trailing escape in one chunk instead of two separate tokens,
-//! which the crate's docs call out as measurably faster on inputs with a
-//! high density of escape sequences.
-//!
-//! A literal chunk is already a slice of `input`, so it's copied
-//! straight into `output` piece by piece — no buffering needed, at any
-//! output size. An escape sequence (`\uXXXX`, at most 6 bytes), same
-//! idea as base64's 4-byte encoded group, may need to span output
-//! buffers, so it's handed to a [`Carry`] rather than written in one
-//! shot — that's what lets any non-empty output buffer work, with no
-//! `OutputTooSmall` escape hatch needed.
-//!
-//! The tail of a literal run that's already been scanned but not yet
-//! copied out also outlives a `process` call when `output` runs out
-//! mid-chunk. The `Codec` contract guarantees a byte a call didn't
-//! consume is presented again, unchanged, at the front of the next
-//! call's `input` — so instead of re-running `escape_bytes` over it
-//! (which would rescan the same already-known-literal bytes on every
-//! call, turning one big literal run paired with a tiny output buffer
-//! into O(n²) work), `pending_literal` just remembers how many leading
-//! bytes of the next `input` are known-literal and copies them
-//! directly.
-//!
-//! A chunk pairs a literal run with its one trailing escape, and both
-//! can go unwritten in the same call if `output` runs out mid-literal —
-//! `chunk.escaped()` is already known at that point, so it's cached in
-//! `pending_escape` too rather than thrown away and rediscovered later.
-//! `pending_literal` must drain first: its bytes precede the escape's
-//! trigger byte in the stream, and a plain prefix length is all
-//! `Progress`'s consumed-count variants can express, so the literal
-//! tail in front of it has to actually be written out before the
-//! trigger byte can even be attempted. The trigger byte itself is only
-//! ever marked consumed at the moment its escape is handed to the
-//! carry — never earlier — so a cached `pending_escape` that hasn't
-//! been started yet leaves the trigger byte uncounted, to be
-//! re-presented (and retried) on the next call.
+//! This file's code is mostly AI-generated.
 
 use json_escape::explicit::escape_bytes;
 
