@@ -2,6 +2,8 @@
 //!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
+//!
+//! This file's code is mostly AI-generated.
 
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
@@ -48,6 +50,7 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
+            debug_assert_eq!(out_pos, output.len());
             return Ok(Drain::OutputFilled);
         }
         if !self.pending_input.is_empty() {
@@ -70,6 +73,7 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
                 })?;
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
+                debug_assert_eq!(out_pos, output.len());
                 return Ok(Drain::OutputFilled);
             }
         }
@@ -85,9 +89,9 @@ impl<E: Engine> Codec for Base64Dec<E> {
         // ## Drain pending output
         //
 
-        // Deliver the tail of a group from a previous call first.
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
+            debug_assert_eq!(out_pos, output.len());
             return Ok(Progress::OutputFilled { consumed: 0 });
         }
 
@@ -99,6 +103,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
         if !self.pending_input.is_empty() {
             in_pos += self.pending_input.fill(input);
             if !self.pending_input.is_full() {
+                debug_assert_eq!(in_pos, input.len());
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
             if self.pending_input.as_slice().contains(&b'=') {
@@ -118,6 +123,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
             self.stage_group(&group, in_pos, out_pos)?;
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
+                debug_assert_eq!(out_pos, output.len());
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
@@ -128,23 +134,6 @@ impl<E: Engine> Codec for Base64Dec<E> {
 
         // Bulk-decode as many whole groups as fit both remaining
         // input and output, straight from the caller's slices.
-        //
-        // This sizing has to be done by hand, same as the encoder:
-        // `decode_slice` is all-or-nothing on whatever slice it's
-        // given — it either decodes all of it or returns `Err` with
-        // nothing written if `output` is too small. Handing it a slice
-        // whose length isn't a multiple of `ENCODED_GROUP` would also
-        // make it treat that slice as the final chunk, applying
-        // end-of-stream padding validation to a group that isn't
-        // actually the last one.
-        //
-        // A group containing padding is excluded from the bulk batch
-        // even when it lands last in `input`: `decode_slice` validates
-        // padding placement only within the slice it's given, so
-        // padding at the end of *this* slice would be accepted even if
-        // more (non-padding) input follows in a later `process` call.
-        // Capping the batch before that group forces it through the
-        // single-group deferred path below instead.
         let remaining_in = input.len() - in_pos;
         let remaining_out = output.len() - out_pos;
         let mut groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
@@ -190,6 +179,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
             in_pos += ENCODED_GROUP;
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
+                debug_assert_eq!(out_pos, output.len());
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }

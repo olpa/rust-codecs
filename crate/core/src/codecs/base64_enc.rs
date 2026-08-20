@@ -2,6 +2,8 @@
 //!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
+//!
+//! This file's code is mostly AI-generated.
 
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
@@ -51,6 +53,7 @@ impl<E: Engine> DrainCodec for Base64Enc<E> {
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
+            debug_assert_eq!(out_pos, output.len());
             return Ok(Drain::OutputFilled);
         }
         if !self.pending_input.is_empty() {
@@ -61,6 +64,7 @@ impl<E: Engine> DrainCodec for Base64Enc<E> {
             self.stage_group(&group[..len], 0, out_pos)?;
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
+                debug_assert_eq!(out_pos, output.len());
                 return Ok(Drain::OutputFilled);
             }
         }
@@ -79,6 +83,7 @@ impl<E: Engine> Codec for Base64Enc<E> {
         // Deliver the tail of a group from a previous call first.
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
+            debug_assert_eq!(out_pos, output.len());
             return Ok(Progress::OutputFilled { consumed: 0 });
         }
 
@@ -92,12 +97,14 @@ impl<E: Engine> Codec for Base64Enc<E> {
             in_pos += self.pending_input.fill(input);
             if !self.pending_input.is_full() {
                 // The top-up took everything `input` had.
+                debug_assert_eq!(in_pos, input.len());
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
             let group = self.pending_input.take();
             self.stage_group(&group, in_pos, out_pos)?;
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
+                debug_assert_eq!(out_pos, output.len());
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
