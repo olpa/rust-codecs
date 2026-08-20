@@ -2,14 +2,12 @@
 //!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
-//!
-//! This file's code is mostly AI-generated.
 
 use json_escape::explicit::escape_bytes;
 
 use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
-/// An escape sequence known for the byte right after `pending_literal`'s
+/// An escape sequence known for the byte right after `pending_literal_len`'s
 /// bytes, tracked through its two possible states so the invalid
 /// combination (known-but-not-started *and* mid-write at once) isn't
 /// representable. Escape sequences are `&'static str`, so a partially
@@ -31,17 +29,11 @@ enum PendingEscape {
 pub struct JsonEnc {
     /// Leading bytes of the next `process` call's `input` already known
     /// (from a previous call's scan) to need no escaping.
-    pending_literal: usize,
+    pending_literal_len: usize,
     pending_escape: PendingEscape,
 }
 
 impl JsonEnc {
-    /// Drain whatever `process`/`finish` left pending from a previous
-    /// call: first a `Started` escape tail, then the literal tail
-    /// (copied straight from the front of `input`), then — only once
-    /// that's fully drained, since its bytes precede the escape's
-    /// trigger byte in the stream — a `NotStarted` escape. Returns
-    /// `(consumed, written)`.
     fn flush_pending(&mut self, input: &[u8], output: &mut [u8]) -> Result<(usize, usize), Error> {
         let mut consumed = 0;
         let mut written = 0;
@@ -58,13 +50,13 @@ impl JsonEnc {
             self.pending_escape = PendingEscape::None;
         }
 
-        if self.pending_literal > 0 {
-            let n = self.pending_literal.min(output.len() - written);
+        if self.pending_literal_len > 0 {
+            let n = self.pending_literal_len.min(output.len() - written);
             output[written..written + n].copy_from_slice(&input[..n]);
             written += n;
             consumed += n;
-            self.pending_literal -= n;
-            if self.pending_literal > 0 {
+            self.pending_literal_len -= n;
+            if self.pending_literal_len > 0 {
                 return Ok((consumed, written));
             }
         }
@@ -88,19 +80,11 @@ impl JsonEnc {
 
 impl DrainCodec for JsonEnc {
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        // A well-behaved driver never reaches this with pending_literal
+        // A well-behaved driver never reaches this with pending_literal_len
         // nonzero: as long as it's nonzero, `process` reports less than
         // full input consumed, which keeps the driver calling `process`
-        // again instead of `finish`. But those leftover literal bytes
-        // only ever existed in a previous `process` call's `input`,
-        // which `finish` has no access to — so a caller that violates
-        // the convention gets an error here instead of an out-of-bounds
-        // panic from indexing `&[]` in the shared helper below.
-        // `pending_literal` nonzero also means `pending_escape` is
-        // guaranteed not `Started` (nothing starts until the literal
-        // ahead of it has fully drained), so skipping straight to an
-        // error here never strands bytes it was already holding.
-        if self.pending_literal > 0 {
+        // again instead of `finish`.
+        if self.pending_literal_len > 0 {
             return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
         }
         let (_, written) = self.flush_pending(&[], output)?;
@@ -114,11 +98,12 @@ impl DrainCodec for JsonEnc {
 impl Codec for JsonEnc {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let (mut consumed, mut written) = self.flush_pending(input, output)?;
-        if self.pending_literal > 0 || matches!(self.pending_escape, PendingEscape::Started(_)) {
+        if self.pending_literal_len > 0 || matches!(self.pending_escape, PendingEscape::Started(_))
+        {
             // Still pending: either flush_pending ran out of output
             // mid-literal, or an escape's tail didn't fully drain.
             // Either way, re-scanning input[consumed..] now would
-            // rescan bytes already known to be part of pending_literal's
+            // rescan bytes already known to be part of pending_literal_len's
             // run.
             return Ok(Progress::OutputFilled { consumed });
         }
@@ -131,11 +116,11 @@ impl Codec for JsonEnc {
             consumed += n;
             if n < literal.len() {
                 // Output ran out mid-literal: remember both the
-                // unwritten literal tail (`pending_literal`) and this
+                // unwritten literal tail (`pending_literal_len`) and this
                 // chunk's already-computed trailing escape
                 // (`pending_escape`, if any), so the next call doesn't
                 // have to re-run `escape_bytes` to rediscover it.
-                self.pending_literal = literal.len() - n;
+                self.pending_literal_len = literal.len() - n;
                 self.pending_escape = match chunk.escaped() {
                     Some(s) => PendingEscape::NotStarted(s),
                     None => PendingEscape::None,
@@ -219,13 +204,13 @@ mod tests {
         let progress = codec.process(b"AAA\n", &mut output).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 2 });
         assert_eq!(&output, b"AA");
-        assert_eq!(codec.pending_literal, 1);
+        assert_eq!(codec.pending_literal_len, 1);
         assert_eq!(codec.pending_escape, PendingEscape::NotStarted("\\n"));
     }
 
     /// Input covering every kind of state transition: literal ->
     /// escape, escape -> escape, escape -> literal, and a literal run
-    /// long enough to need `pending_literal` on its own. Paired with the
+    /// long enough to need `pending_literal_len` on its own. Paired with the
     /// expected output from a single, non-streaming call to the
     /// underlying `escape_bytes`, independent of this codec's
     /// pending-state bookkeeping.
@@ -309,7 +294,7 @@ mod tests {
         let mut output = [0u8; 2];
         let progress = codec.process(b"AAA\n", &mut output).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 2 });
-        assert_eq!(codec.pending_literal, 1);
+        assert_eq!(codec.pending_literal_len, 1);
 
         let mut finish_output = [0u8; 16];
         let result = codec.finish(&mut finish_output);
