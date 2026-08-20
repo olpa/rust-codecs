@@ -195,17 +195,18 @@ impl<const N: usize> Default for PendingOutput<N> {
 /// Render one transform unit into `pending_output` via `render`
 /// (`Engine::decode_slice`/`encode_slice`), staging it for `drain`.
 /// Shared by `Base64Dec`/`Base64Enc`'s `stage_group`, which differ only
-/// in which `Engine` method they pass as `render`.
+/// in which `Engine` method they pass as `render` and which
+/// `ErrorKind` a rendering failure maps to.
 pub(super) fn stage_group<const N: usize>(
     pending_output: &mut PendingOutput<N>,
     consumed: usize,
     written: usize,
-    render: impl FnOnce(&mut [u8]) -> Result<usize, ()>,
+    render: impl FnOnce(&mut [u8]) -> Result<usize, ErrorKind>,
 ) -> Result<(), Error> {
     let buffer = pending_output
         .buffer()
         .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
-    let n = render(buffer).map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
+    let n = render(buffer).map_err(|kind| Error::new(kind, consumed, written))?;
     pending_output
         .set_len(n)
         .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))

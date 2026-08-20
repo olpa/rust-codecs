@@ -33,8 +33,21 @@ impl<E: Engine> Base64Dec<E> {
 
     fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
         let engine = &self.engine;
+        // Only `finish`'s deferred/partial call can ever hand this a
+        // short group; every `process`-time call passes a full one. A
+        // full group failing to decode is malformed data; a short one
+        // failing just means the stream ended before completing a
+        // unit — the base64 crate's own error variant for "too short"
+        // isn't consistent enough across lengths to key off instead
+        // (e.g. a 2-byte tail reports `InvalidPadding`, not
+        // `InvalidLength`).
+        let kind = if group.len() < ENCODED_GROUP {
+            ErrorKind::UnexpectedEnd
+        } else {
+            ErrorKind::Corrupt
+        };
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
-            engine.decode_slice(group, buffer).map_err(|_| ())
+            engine.decode_slice(group, buffer).map_err(|_| kind)
         })
     }
 }
@@ -53,17 +66,7 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
             // enforces that — a padded engine like STANDARD rejects an
             // unpadded partial group here.
             let (group, len) = self.pending_input.take_partial();
-            self.stage_group(&group[..len], 0, out_pos)
-                .map_err(|error| {
-                    if error.kind == ErrorKind::Corrupt {
-                        Error {
-                            kind: ErrorKind::UnexpectedEnd,
-                            ..error
-                        }
-                    } else {
-                        error
-                    }
-                })?;
+            self.stage_group(&group[..len], 0, out_pos)?;
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
                 debug_assert_eq!(out_pos, output.len());
@@ -204,7 +207,7 @@ mod tests {
     use super::{base64_dec, Base64Dec};
     use crate::codecs::base64_enc::{base64_enc, Base64Enc};
     use crate::sources_and_sinks::vec::encode_string;
-    use crate::{Codec, Drain, DrainCodec, Progress};
+    use crate::{Codec, Drain, DrainCodec, ErrorKind, Progress};
 
     const INPUT: &str = "Hello, World! 123";
     const ENCODED: &str = "SGVsbG8sIFdvcmxkISAxMjM=";
@@ -233,9 +236,28 @@ mod tests {
         // finish() decodes a short trailing group instead of always
         // erroring (so no-pad engines' final 2-3 char group works),
         // but STANDARD requires padding and must still reject a
-        // stream cut off mid-symbol.
+        // stream cut off mid-symbol. That's the stream ending too
+        // early, not malformed data, so it must be UnexpectedEnd
+        // rather than Corrupt.
         let truncated = &ENCODED[..ENCODED.len() - 2];
-        assert!(encode_string(base64_dec(), truncated).is_err());
+        let mut dec = base64_dec();
+        let mut out = [0u8; 32];
+        dec.process(truncated.as_bytes(), &mut out).unwrap();
+        let error = dec.finish(&mut out).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UnexpectedEnd);
+    }
+
+    #[test]
+    fn decode_misplaced_padding_is_corrupt_not_unexpected_end() {
+        // "A=BC" is a full 4-byte group with padding in the wrong
+        // position -- genuine corruption, not a stream cut short, even
+        // though (like a short trailing group) it's only detected once
+        // finish() confirms it's truly the last group.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 32];
+        dec.process(b"A=BC", &mut out).unwrap();
+        let error = dec.finish(&mut out).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Corrupt);
     }
 
     #[test]

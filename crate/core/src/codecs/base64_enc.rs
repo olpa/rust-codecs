@@ -31,13 +31,12 @@ impl<E: Engine> Base64Enc<E> {
         }
     }
 
-    /// Encode one group directly into pending_output. Partial input
-    /// groups are reserved for `finish`; partial output is handled by
-    /// draining the staged group afterward.
     fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
         let engine = &self.engine;
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
-            engine.encode_slice(group, buffer).map_err(|_| ())
+            engine
+                .encode_slice(group, buffer)
+                .map_err(|_| ErrorKind::Corrupt)
         })
     }
 }
