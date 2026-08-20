@@ -32,8 +32,8 @@ use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 #[derive(Debug, Clone)]
 pub struct Base64Dec<E: Engine = GeneralPurpose> {
     engine: E,
-    pending: PendingInput<ENCODED_GROUP>,
-    carry: Carry<GROUP>,
+    pending_input: PendingInput<ENCODED_GROUP>,
+    pending_output: Carry<GROUP>,
 }
 
 impl<E: Engine> Base64Dec<E> {
@@ -42,21 +42,21 @@ impl<E: Engine> Base64Dec<E> {
     pub fn with_engine(engine: E) -> Self {
         Self {
             engine,
-            pending: PendingInput::new(),
-            carry: Carry::new(),
+            pending_input: PendingInput::new(),
+            pending_output: Carry::new(),
         }
     }
 
     fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
         let engine = &self.engine;
         let buffer = self
-            .carry
+            .pending_output
             .buffer()
             .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
         let n = engine
             .decode_slice(group, buffer)
             .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
-        self.carry
+        self.pending_output
             .set_len(n)
             .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
     }
@@ -64,17 +64,17 @@ impl<E: Engine> Base64Dec<E> {
 
 impl<E: Engine> DrainCodec for Base64Dec<E> {
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        let mut out_pos = self.carry.drain(output);
-        if !self.carry.is_empty() {
+        let mut out_pos = self.pending_output.drain(output);
+        if !self.pending_output.is_empty() {
             return Ok(Drain::OutputFilled);
         }
-        if !self.pending.is_empty() {
+        if !self.pending_input.is_empty() {
             // A short trailing group is only valid at true
             // end-of-stream, and only for engines that don't require
             // padding (e.g. URL_SAFE_NO_PAD); the engine itself
             // enforces that — a padded engine like STANDARD rejects an
             // unpadded partial group here.
-            let (group, len) = self.pending.take_partial();
+            let (group, len) = self.pending_input.take_partial();
             self.stage_group(&group[..len], 0, out_pos)
                 .map_err(|error| {
                     if error.kind == ErrorKind::Corrupt {
@@ -86,8 +86,8 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
                         error
                     }
                 })?;
-            out_pos += self.carry.drain(&mut output[out_pos..]);
-            if !self.carry.is_empty() {
+            out_pos += self.pending_output.drain(&mut output[out_pos..]);
+            if !self.pending_output.is_empty() {
                 return Ok(Drain::OutputFilled);
             }
         }
@@ -100,26 +100,26 @@ impl<E: Engine> Codec for Base64Dec<E> {
         let mut in_pos = 0;
 
         //
-        // drain carry
+        // ## Drain pending output
         //
 
         // Deliver the tail of a group from a previous call first.
-        let mut out_pos = self.carry.drain(output);
-        if !self.carry.is_empty() {
+        let mut out_pos = self.pending_output.drain(output);
+        if !self.pending_output.is_empty() {
             return Ok(Progress::OutputFilled { consumed: 0 });
         }
 
         //
-        // collect and encode pending input
+        // ## Collect and encode pending input
         //
 
         // Top up a pending partial group with fresh input.
-        if !self.pending.is_empty() {
-            in_pos += self.pending.fill(input);
-            if !self.pending.is_full() {
+        if !self.pending_input.is_empty() {
+            in_pos += self.pending_input.fill(input);
+            if !self.pending_input.is_full() {
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
-            if self.pending.as_slice().contains(&b'=') {
+            if self.pending_input.as_slice().contains(&b'=') {
                 // Padding is only valid in the true last group of the
                 // whole stream, and `process` can't tell it's at the
                 // end — only `finish` can. Defer decoding this group
@@ -132,16 +132,16 @@ impl<E: Engine> Codec for Base64Dec<E> {
                 }
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
-            let group = self.pending.take();
+            let group = self.pending_input.take();
             self.stage_group(&group, in_pos, out_pos)?;
-            out_pos += self.carry.drain(&mut output[out_pos..]);
-            if !self.carry.is_empty() {
+            out_pos += self.pending_output.drain(&mut output[out_pos..]);
+            if !self.pending_output.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
 
         //
-        // encode step: fill output as much as possible
+        // ## Encode step: fill output as much as possible
         //
 
         // Bulk-decode as many whole groups as fit both remaining
@@ -188,13 +188,13 @@ impl<E: Engine> Codec for Base64Dec<E> {
         // After bulk, whole input groups may remain because the next
         // one contains padding (defer it: buffer and stop, `finish`
         // will confirm it's truly last) or because the output's
-        // remainder is under one decoded group (decode through the
-        // carry to fill it completely).
+        // remainder is under one decoded group (decode through
+        // pending_output to fill it completely).
         while input.len() - in_pos >= ENCODED_GROUP {
             let next_group: [u8; ENCODED_GROUP] =
                 input[in_pos..in_pos + ENCODED_GROUP].try_into().unwrap();
             if next_group.contains(&b'=') {
-                self.pending.set(&next_group);
+                self.pending_input.set(&next_group);
                 in_pos += ENCODED_GROUP;
                 if in_pos < input.len() {
                     return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
@@ -206,20 +206,20 @@ impl<E: Engine> Codec for Base64Dec<E> {
             }
             self.stage_group(&next_group, in_pos, out_pos)?;
             in_pos += ENCODED_GROUP;
-            out_pos += self.carry.drain(&mut output[out_pos..]);
-            if !self.carry.is_empty() {
+            out_pos += self.pending_output.drain(&mut output[out_pos..]);
+            if !self.pending_output.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
 
         //
-        // buffer leftover input
+        // ## Buffer leftover input
         //
 
         // Buffer any leftover < ENCODED_GROUP characters for the next
         // call.
         if in_pos < input.len() {
-            self.pending.set(&input[in_pos..]);
+            self.pending_input.set(&input[in_pos..]);
         }
         Ok(Progress::InputConsumed { written: out_pos })
     }

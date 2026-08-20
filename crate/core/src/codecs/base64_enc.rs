@@ -36,8 +36,8 @@ use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 #[derive(Debug, Clone)]
 pub struct Base64Enc<E: Engine = GeneralPurpose> {
     engine: E,
-    pending: PendingInput<GROUP>,
-    carry: Carry<ENCODED_GROUP>,
+    pending_input: PendingInput<GROUP>,
+    pending_output: Carry<ENCODED_GROUP>,
 }
 
 impl<E: Engine> Base64Enc<E> {
@@ -46,24 +46,24 @@ impl<E: Engine> Base64Enc<E> {
     pub fn with_engine(engine: E) -> Self {
         Self {
             engine,
-            pending: PendingInput::new(),
-            carry: Carry::new(),
+            pending_input: PendingInput::new(),
+            pending_output: Carry::new(),
         }
     }
 
-    /// Encode one group directly into the carry. Partial input groups
-    /// are reserved for `finish`; partial output is handled by draining
-    /// the staged group afterward.
+    /// Encode one group directly into pending_output. Partial input
+    /// groups are reserved for `finish`; partial output is handled by
+    /// draining the staged group afterward.
     fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
         let engine = &self.engine;
         let buffer = self
-            .carry
+            .pending_output
             .buffer()
             .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
         let n = engine
             .encode_slice(group, buffer)
             .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
-        self.carry
+        self.pending_output
             .set_len(n)
             .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
     }
@@ -71,18 +71,18 @@ impl<E: Engine> Base64Enc<E> {
 
 impl<E: Engine> DrainCodec for Base64Enc<E> {
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-        let mut out_pos = self.carry.drain(output);
-        if !self.carry.is_empty() {
+        let mut out_pos = self.pending_output.drain(output);
+        if !self.pending_output.is_empty() {
             return Ok(Drain::OutputFilled);
         }
-        if !self.pending.is_empty() {
+        if !self.pending_input.is_empty() {
             // The engine pads a final short group itself — that's why
             // partial groups are deferred to finish and never encoded
             // in process.
-            let (group, len) = self.pending.take_partial();
+            let (group, len) = self.pending_input.take_partial();
             self.stage_group(&group[..len], 0, out_pos)?;
-            out_pos += self.carry.drain(&mut output[out_pos..]);
-            if !self.carry.is_empty() {
+            out_pos += self.pending_output.drain(&mut output[out_pos..]);
+            if !self.pending_output.is_empty() {
                 return Ok(Drain::OutputFilled);
             }
         }
@@ -95,37 +95,37 @@ impl<E: Engine> Codec for Base64Enc<E> {
         let mut in_pos = 0;
 
         //
-        // drain carry
+        // ## Drain pending output
         //
 
         // Deliver the tail of a group from a previous call first.
-        let mut out_pos = self.carry.drain(output);
-        if !self.carry.is_empty() {
+        let mut out_pos = self.pending_output.drain(output);
+        if !self.pending_output.is_empty() {
             return Ok(Progress::OutputFilled { consumed: 0 });
         }
 
         //
-        // collect and encode pending input
+        // ## Collect and encode pending input
         //
 
         // Top up a pending partial group with fresh input; emit it
-        // through the carry once complete.
-        if !self.pending.is_empty() {
-            in_pos += self.pending.fill(input);
-            if !self.pending.is_full() {
+        // through pending_output once complete.
+        if !self.pending_input.is_empty() {
+            in_pos += self.pending_input.fill(input);
+            if !self.pending_input.is_full() {
                 // The top-up took everything `input` had.
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
-            let group = self.pending.take();
+            let group = self.pending_input.take();
             self.stage_group(&group, in_pos, out_pos)?;
-            out_pos += self.carry.drain(&mut output[out_pos..]);
-            if !self.carry.is_empty() {
+            out_pos += self.pending_output.drain(&mut output[out_pos..]);
+            if !self.pending_output.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
         }
 
         //
-        // encode step: fill output as much as possible
+        // ## Encode step: fill output as much as possible
         //
 
         // Bulk-encode as many whole groups as fit both remaining
@@ -157,13 +157,13 @@ impl<E: Engine> Codec for Base64Enc<E> {
 
         // After bulk, at most one of these holds: a whole input group
         // remains (the output's remainder is under one encoded group —
-        // emit through the carry to fill it completely), or the input
-        // remainder is under one group (buffer it and report the input
-        // consumed).
+        // emit through pending_output to fill it completely), or the
+        // input remainder is under one group (buffer it and report the
+        // input consumed).
         if input.len() - in_pos >= GROUP && out_pos < output.len() {
             self.stage_group(&input[in_pos..in_pos + GROUP], in_pos, out_pos)?;
             in_pos += GROUP;
-            out_pos += self.carry.drain(&mut output[out_pos..]);
+            out_pos += self.pending_output.drain(&mut output[out_pos..]);
         }
         if input.len() - in_pos >= GROUP {
             debug_assert_eq!(out_pos, output.len());
@@ -171,12 +171,12 @@ impl<E: Engine> Codec for Base64Enc<E> {
         }
 
         //
-        // buffer leftover input
+        // ## Buffer leftover input
         //
 
         // Buffer any leftover < GROUP bytes for the next call.
         if in_pos < input.len() {
-            self.pending.set(&input[in_pos..]);
+            self.pending_input.set(&input[in_pos..]);
         }
         Ok(Progress::InputConsumed { written: out_pos })
     }
@@ -201,8 +201,8 @@ mod tests {
     #[test]
     fn encode_into_one_byte_outputs() {
         // Drive process/finish by hand with a 1-byte output each call:
-        // the carry must dribble every 4-byte group out one byte at a
-        // time, upholding fully-consume-or-fully-fill throughout.
+        // pending_output must dribble every 4-byte group out one byte
+        // at a time, upholding fully-consume-or-fully-fill throughout.
         let input = INPUT.as_bytes();
         let mut enc = base64_enc();
         let mut collected = Vec::new();
