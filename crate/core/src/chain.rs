@@ -353,7 +353,8 @@ mod tests {
 
     use super::Chain;
     #[cfg(feature = "base64")]
-    use crate::base64::{base64_dec, base64_enc};
+    use crate::base64_dec::base64_dec;
+    use crate::base64_enc::base64_enc;
     use crate::identity::identity;
     use crate::rot13::rot13;
     use crate::sources_and_sinks::vec::{VecSink, VecSource};

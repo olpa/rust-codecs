@@ -1,7 +1,12 @@
-//! Base64 [`Codec`] decoder, built on the `base64` crate
-//! (<https://docs.rs/base64/>).
+//! Example [`Codec`]s: base64 encode/decode, built on the `base64`
+//! crate (<https://docs.rs/base64/>).
 //!
-//! Buffers at most one incomplete group on each side of the transform:
+//! This codec belongs in its own crate eventually. See the crate
+//! docs' note on why it lives here for now.
+//!
+//! This is the decoder half; see [`super::base64_enc`] for the
+//! encoder. Buffers at most one incomplete group on each side of the
+//! transform:
 //!
 //! - a [`PendingInput`] (input side): up to 3 leftover base64
 //!   characters, topped up from the next call's input.
@@ -21,7 +26,7 @@ use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 /// padding behavior) it decodes with.
 ///
 /// Generic over `E` rather than boxed as `dyn Engine` for the same
-/// reason as [`Base64Enc`](crate::codecs::base64::Base64Enc):
+/// reason as [`Base64Enc`](crate::codecs::base64_enc::Base64Enc):
 /// `encode_slice`/`decode_slice` are generic methods, which can't be
 /// called through a trait object.
 #[derive(Debug, Clone)]
@@ -229,11 +234,34 @@ pub fn base64_dec() -> Base64Dec {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
-    use super::base64_dec;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    use super::{base64_dec, Base64Dec};
+    use crate::codecs::base64_enc::{base64_enc, Base64Enc};
     use crate::sources_and_sinks::vec::encode_string;
     use crate::{Codec, Drain, DrainCodec, Progress};
 
+    const INPUT: &str = "Hello, World! 123";
     const ENCODED: &str = "SGVsbG8sIFdvcmxkISAxMjM=";
+
+    #[test]
+    fn round_trip() {
+        let encoded = encode_string(base64_enc(), INPUT).unwrap();
+        assert_eq!(encoded, ENCODED);
+        let decoded = encode_string(base64_dec(), &encoded).unwrap();
+        assert_eq!(decoded, INPUT);
+    }
+
+    #[test]
+    fn round_trip_with_custom_engine() {
+        // URL_SAFE_NO_PAD drops the trailing '=' that STANDARD adds,
+        // proving with_engine actually swaps the engine rather than
+        // silently falling back to STANDARD.
+        let encoded = encode_string(Base64Enc::with_engine(URL_SAFE_NO_PAD), INPUT).unwrap();
+        assert_eq!(encoded, ENCODED.strip_suffix('=').unwrap());
+        let decoded = encode_string(Base64Dec::with_engine(URL_SAFE_NO_PAD), &encoded).unwrap();
+        assert_eq!(decoded, INPUT);
+    }
 
     #[test]
     fn decode_truncated_padded_stream_errors() {

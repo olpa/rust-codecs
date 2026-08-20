@@ -33,10 +33,10 @@ const CODECS: &[CodecEntry] = &[
     }),
     ("rot13", || Box::new(rust_codecs_core::rot13::rot13())),
     ("base64-enc", || {
-        Box::new(rust_codecs_core::base64::base64_enc())
+        Box::new(rust_codecs_core::base64_enc::base64_enc())
     }),
     ("base64-dec", || {
-        Box::new(rust_codecs_core::base64::base64_dec())
+        Box::new(rust_codecs_core::base64_dec::base64_dec())
     }),
     ("json-enc", || Box::new(rust_codecs_core::json::json_enc())),
 ];

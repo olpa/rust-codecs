@@ -1,7 +1,12 @@
-//! Base64 [`Codec`] encoder, built on the `base64` crate
-//! (<https://docs.rs/base64/>).
+//! Example [`Codec`]s: base64 encode/decode, built on the `base64`
+//! crate (<https://docs.rs/base64/>).
 //!
-//! Buffers at most one incomplete group on each side of the transform:
+//! This codec belongs in its own crate eventually. See the crate
+//! docs' note on why it lives here for now.
+//!
+//! This is the encoder half; see [`super::base64_dec`] for the
+//! decoder. Buffers at most one incomplete group on each side of the
+//! transform:
 //!
 //! - a [`PendingInput`] (input side): up to 2 leftover raw bytes,
 //!   topped up from the next call's input.

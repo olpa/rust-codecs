@@ -67,7 +67,7 @@
 //! # {
 //! use embedded_io::Read;
 //!
-//! use rust_codecs_core::base64::base64_dec;
+//! use rust_codecs_core::base64_dec::base64_dec;
 //! use rust_codecs_core::sources_and_sinks::embedded_io::CodecReader;
 //!
 //! // Arrange
@@ -136,7 +136,7 @@
 //!
 //! ```ignore
 //! // TODO: gzip_enc() doesn't exist yet.
-//! use rust_codecs_core::base64::base64_enc;
+//! use rust_codecs_core::base64_enc::base64_enc;
 //! use rust_codecs_core::gzip::gzip_enc;
 //! use rust_codecs_core::Chain;
 //! use rust_codecs_core::sources_and_sinks::slice::SliceSource;

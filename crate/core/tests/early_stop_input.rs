@@ -367,7 +367,7 @@ fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
 #[cfg(feature = "base64")]
 #[test]
 fn tokenizes_a_string_array_literal_from_a_base64_decoded_two_byte_source() {
-    use rust_codecs_core::base64::base64_dec;
+    use rust_codecs_core::base64_dec::base64_dec;
 
     let encoded = b"bGV0IGEgPSBbInMxIiwgInMyIiwgInMzIl07";
     let mut source: CodecSource<_, _, 2> =
