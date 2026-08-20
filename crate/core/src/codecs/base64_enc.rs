@@ -8,7 +8,7 @@
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
-use super::base64_shared::{PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
+use super::base64_shared::{self, PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
 use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
@@ -36,16 +36,9 @@ impl<E: Engine> Base64Enc<E> {
     /// draining the staged group afterward.
     fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
         let engine = &self.engine;
-        let buffer = self
-            .pending_output
-            .buffer()
-            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
-        let n = engine
-            .encode_slice(group, buffer)
-            .map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
-        self.pending_output
-            .set_len(n)
-            .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
+        base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
+            engine.encode_slice(group, buffer).map_err(|_| ())
+        })
     }
 }
 

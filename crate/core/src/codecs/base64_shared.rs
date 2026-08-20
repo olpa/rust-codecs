@@ -17,6 +17,8 @@
 //! `PendingOutput` is checked the same way, via
 //! [`PendingOutput::is_empty`].
 
+use crate::{Error, ErrorKind};
+
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
 // of the base64 algorithm itself, not a detail of any one alphabet or
 // padding config. It's also a documented requirement of every `Engine`
@@ -188,6 +190,25 @@ impl<const N: usize> Default for PendingOutput<N> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Render one transform unit into `pending_output` via `render`
+/// (`Engine::decode_slice`/`encode_slice`), staging it for `drain`.
+/// Shared by `Base64Dec`/`Base64Enc`'s `stage_group`, which differ only
+/// in which `Engine` method they pass as `render`.
+pub(super) fn stage_group<const N: usize>(
+    pending_output: &mut PendingOutput<N>,
+    consumed: usize,
+    written: usize,
+    render: impl FnOnce(&mut [u8]) -> Result<usize, ()>,
+) -> Result<(), Error> {
+    let buffer = pending_output
+        .buffer()
+        .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
+    let n = render(buffer).map_err(|_| Error::new(ErrorKind::Corrupt, consumed, written))?;
+    pending_output
+        .set_len(n)
+        .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
 }
 
 #[cfg(test)]
