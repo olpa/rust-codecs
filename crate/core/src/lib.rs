@@ -26,7 +26,7 @@
 //! ## Wrapping an output
 //!
 //! Write a JSON string, escaping its content with
-//! [`json_enc`](json::json_enc), while the surrounding quotes go
+//! [`json_enc`](json_enc::json_enc), while the surrounding quotes go
 //! straight through to the base writer, unescaped.
 //!
 //! ```
@@ -34,7 +34,7 @@
 //! # {
 //! use std::io::Write;
 //!
-//! use rust_codecs_core::json::json_enc;
+//! use rust_codecs_core::json_enc::json_enc;
 //! use rust_codecs_core::sources_and_sinks::std_io::CodecWriter;
 //!
 //! // Arrange

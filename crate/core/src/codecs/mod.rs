@@ -13,4 +13,4 @@ pub mod base64_enc;
 mod base64_shared;
 
 #[cfg(feature = "json")]
-pub mod json;
+pub mod json_enc;

@@ -38,7 +38,9 @@ const CODECS: &[CodecEntry] = &[
     ("base64-dec", || {
         Box::new(rust_codecs_core::base64_dec::base64_dec())
     }),
-    ("json-enc", || Box::new(rust_codecs_core::json::json_enc())),
+    ("json-enc", || {
+        Box::new(rust_codecs_core::json_enc::json_enc())
+    }),
 ];
 
 fn usage() -> String {
