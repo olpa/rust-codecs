@@ -1,20 +1,7 @@
-//! Example [`Codec`]s: base64 encode/decode, built on the `base64`
-//! crate (<https://docs.rs/base64/>).
+//! Base64 encoding codec, built on the `base64` crate (<https://docs.rs/base64/>).
 //!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
-//!
-//! This is the encoder half; see [`super::base64_dec`] for the
-//! decoder. Buffers at most one incomplete group on each side of the
-//! transform:
-//!
-//! - a [`PendingInput`] (input side): up to 2 leftover raw bytes,
-//!   topped up from the next call's input.
-//! - a [`Carry`] (output side): the tail of an emitted group that
-//!   didn't fit the caller's output buffer, delivered first on the
-//!   next call. This is what upholds the fully-consume-or-fully-fill
-//!   contract even though base64 can only ever emit whole groups —
-//!   any non-empty output buffer works, including a 1-byte one.
 
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
@@ -24,15 +11,6 @@ use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it encodes with.
-///
-/// Generic over `E` rather than boxed as `dyn Engine`: `encode_slice`/
-/// `decode_slice` (what this codec actually calls) are generic methods
-/// on `Engine`, and generic methods can't go in a trait object's
-/// vtable — there's no fixed function pointer for an unbounded set of
-/// monomorphizations. `Engine` also has associated types (`Config`,
-/// `DecodeEstimate`) that differ per implementation, so a single `dyn
-/// Engine` couldn't represent more than one concrete engine type
-/// anyway. Monomorphized generics are the only option here.
 #[derive(Debug, Clone)]
 pub struct Base64Enc<E: Engine = GeneralPurpose> {
     engine: E,

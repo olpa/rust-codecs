@@ -1,20 +1,7 @@
-//! Example [`Codec`]s: base64 encode/decode, built on the `base64`
-//! crate (<https://docs.rs/base64/>).
+//! Base64 decoding codec, built on the `base64` crate (<https://docs.rs/base64/>).
 //!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
-//!
-//! This is the decoder half; see [`super::base64_enc`] for the
-//! encoder. Buffers at most one incomplete group on each side of the
-//! transform:
-//!
-//! - a [`PendingInput`] (input side): up to 3 leftover base64
-//!   characters, topped up from the next call's input.
-//! - a [`Carry`] (output side): the tail of an emitted group that
-//!   didn't fit the caller's output buffer, delivered first on the
-//!   next call. This is what upholds the fully-consume-or-fully-fill
-//!   contract even though base64 can only ever emit whole groups —
-//!   any non-empty output buffer works, including a 1-byte one.
 
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
@@ -24,11 +11,6 @@ use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it decodes with.
-///
-/// Generic over `E` rather than boxed as `dyn Engine` for the same
-/// reason as [`Base64Enc`](crate::codecs::base64_enc::Base64Enc):
-/// `encode_slice`/`decode_slice` are generic methods, which can't be
-/// called through a trait object.
 #[derive(Debug, Clone)]
 pub struct Base64Dec<E: Engine = GeneralPurpose> {
     engine: E,
