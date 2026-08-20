@@ -8,8 +8,8 @@
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
-use super::base64_shared::{PendingInput, ENCODED_GROUP, GROUP};
-use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
+use super::base64_shared::{PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
+use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it decodes with.
@@ -17,7 +17,7 @@ use crate::{Carry, Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
 pub struct Base64Dec<E: Engine = GeneralPurpose> {
     engine: E,
     pending_input: PendingInput<ENCODED_GROUP>,
-    pending_output: Carry<GROUP>,
+    pending_output: PendingOutput<GROUP>,
 }
 
 impl<E: Engine> Base64Dec<E> {
@@ -27,7 +27,7 @@ impl<E: Engine> Base64Dec<E> {
         Self {
             engine,
             pending_input: PendingInput::new(),
-            pending_output: Carry::new(),
+            pending_output: PendingOutput::new(),
         }
     }
 

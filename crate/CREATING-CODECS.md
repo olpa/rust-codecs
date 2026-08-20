@@ -89,33 +89,46 @@ driver, apply the same check at your codec boundary.
 Two consequences worth spelling out:
 
 - **"I need more input before I can produce anything" is expressed by
-  consuming.** Buffer the partial unit internally (see
-  `pending_group` in `core/src/codecs/base64.rs`) and return
+  consuming.** Buffer the partial unit internally (see `pending_input`
+  in `core/src/codecs/base64_enc.rs`/`base64_dec.rs`) and return
   `InputConsumed { written: 0 }`; the driver feeds the next chunk,
   and at end of stream `finish` drains what you buffered. Drivers
   never coalesce input into a larger contiguous slice for you.
 - **"This output buffer is too small for my atomic unit" does not
   exist.** A codec that can only emit whole units (base64: 4-byte
-  encoded groups) uses a [`Carry`] at the output boundary. Find the
-  largest prefix of whole input units whose transformed output fits,
-  and transform it directly into the caller's output. If that
-  underfills the output, but adding one more input unit would overfill
-  it, transform that one extra unit into `carry.buffer()`, then record
-  the rendered length with `carry.set_len()`.
-  `carry.drain(remaining_output)` fills the output and retains the tail
-  for the next call. Size the carry to your largest atomic unit — it's
-  a compile-time constant of the format. This is what makes every
-  buffer size legal everywhere: 1-byte staging in a `Chain`, 1-byte
-  slots in `stream_to_stream`, 1-byte reads from a `CodecReader`.
+  encoded groups) needs a small **carry buffer** at the output
+  boundary: a fixed-size array sized to your largest atomic unit — a
+  compile-time constant of the format — holding a write position and a
+  read position/length, so a unit rendered in full can still be
+  delivered a few bytes at a time across as many calls as it takes.
+  Usage pattern inside `process`/`finish`/`flush`:
 
-  For base64 encoding with 10 bytes of output space, encode two 3-byte
-  input groups directly to the first 8 output bytes, then encode one
-  more group directly into a 4-byte carry: drain 2 bytes to fill the
-  output and retain 2. Encoding every group separately into the carry
-  is functionally correct, but it adds a copy and staging call per
-  group and defeats the base64 engine's bulk/SIMD implementation. The
-  carry-staging path should handle at most the one group that
-  straddles the output boundary.
+  1. First thing: drain whatever the carry buffer already holds into
+     `output`. If it's still non-empty afterward, `output` is now
+     full — return `OutputFilled`.
+  2. Choose the largest prefix of `input` made of whole transform
+     units for which the transformed output fits in the *remaining*
+     `output`. Transform it directly into `output` — no buffering
+     needed for this part.
+  3. If that underfilled `output`, but one more unit would overfill
+     it: render that one extra unit into the carry buffer, then drain
+     it into the remainder of `output`, retaining whatever didn't fit
+     for the next call.
+
+  This is what makes every buffer size legal everywhere: 1-byte
+  staging in a `Chain`, 1-byte slots in `stream_to_stream`, 1-byte
+  reads from a `CodecReader`.
+
+  For base64 encoding with 10 bytes of output space: encode two 3-byte
+  input groups directly into the first 8 output bytes (step 2), then
+  render one more group into a 4-byte carry buffer (step 3) — drain 2
+  bytes to fill the output and retain 2 for the next call. Rendering
+  every group separately through the carry buffer is functionally
+  correct, but it adds a copy and staging call per group and defeats
+  the base64 engine's bulk/SIMD implementation; the carry-staging path
+  should handle at most the one group that straddles the output
+  boundary. See `PendingOutput` in `core/src/codecs/base64_shared.rs`
+  for a worked implementation.
 
 Degenerate buffers: with empty `input`, `process` drains pending
 output (if any) and reports `InputConsumed`; drivers avoid calling

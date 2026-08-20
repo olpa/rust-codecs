@@ -360,8 +360,8 @@ fn tokenizes_a_string_array_literal_from_a_two_byte_source() {
 /// that hands out the *encoded* bytes 2 at a time. Two narrow windows
 /// stacked on each other: `TwoByteSource` stresses `Base64Dec`'s own
 /// input handling, and `CodecSource`'s 2-byte decode buffer (smaller
-/// than `Base64Dec`'s 3-byte atomic output group) stresses its
-/// `Carry`. Neither `read_span` nor `tokenize_string_array_literal`
+/// than `Base64Dec`'s 3-byte atomic output group) stresses its carry
+/// buffer. Neither `read_span` nor `tokenize_string_array_literal`
 /// know or care that they're reading through a codec instead of raw
 /// bytes.
 #[cfg(feature = "base64")]

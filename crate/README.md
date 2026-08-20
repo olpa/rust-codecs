@@ -19,8 +19,6 @@ pub enum Progress { /* InputConsumed, OutputFilled, StreamEnd */ }
 pub enum Drain { /* OutputFilled, Done */ }
 pub struct Error { /* kind + consumed/written progress */ }
 
-pub struct Carry<const N: usize>; // helper for atomic-output codecs
-
 // The lending stream contract, independent of any particular byte
 // transport, plus one entry point that drives it to completion.
 pub trait Source { /* ... */ }
