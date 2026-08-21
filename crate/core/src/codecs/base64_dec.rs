@@ -18,6 +18,7 @@ pub struct Base64Dec<E: Engine = GeneralPurpose> {
     engine: E,
     pending_input: PendingInput<ENCODED_GROUP>,
     pending_output: PendingOutput<GROUP>,
+    done: bool,
 }
 
 impl<E: Engine> Base64Dec<E> {
@@ -28,10 +29,16 @@ impl<E: Engine> Base64Dec<E> {
             engine,
             pending_input: PendingInput::new(),
             pending_output: PendingOutput::new(),
+            done: false,
         }
     }
 
-    fn stage_group(&mut self, group: &[u8], consumed: usize, written: usize) -> Result<(), Error> {
+    fn stage_group(
+        &mut self,
+        group: &[u8],
+        consumed: usize,
+        written: usize,
+    ) -> Result<usize, Error> {
         let engine = &self.engine;
         // Only `finish`'s deferred/partial call can ever hand this a
         // short group; every `process`-time call passes a full one. A
@@ -48,7 +55,8 @@ impl<E: Engine> Base64Dec<E> {
         };
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
             engine.decode_slice(group, buffer).map_err(|_| kind)
-        })
+        })?;
+        Ok(self.pending_output.len())
     }
 }
 
@@ -91,32 +99,31 @@ impl<E: Engine> Codec for Base64Dec<E> {
             return Ok(Progress::OutputFilled { consumed: 0 });
         }
 
+        if self.done {
+            if !input.is_empty() {
+                return Err(Error::new(ErrorKind::Corrupt, 0, out_pos));
+            }
+            return Ok(Progress::InputConsumed { written: out_pos });
+        }
+
         //
         // ## Collect and encode pending input
         //
 
-        // Top up a pending partial group with fresh input.
         if !self.pending_input.is_empty() {
             in_pos += self.pending_input.fill(input);
             if !self.pending_input.is_full() {
                 debug_assert_eq!(in_pos, input.len());
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
-            if self.pending_input.as_slice().contains(&b'=') {
-                // Padding is only valid in the true last group of the
-                // whole stream, and `process` can't tell it's at the
-                // end — only `finish` can. Defer decoding this group
-                // until then. If more input shows up first (right here,
-                // or on a future call while the pending group is still
-                // full), that proves this wasn't the last group after
-                // all.
+            let group = self.pending_input.take();
+            let produced = self.stage_group(&group, in_pos, out_pos)?;
+            if produced < GROUP {
+                self.done = true;
                 if in_pos < input.len() {
                     return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
                 }
-                return Ok(Progress::InputConsumed { written: out_pos });
             }
-            let group = self.pending_input.take();
-            self.stage_group(&group, in_pos, out_pos)?;
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
                 debug_assert_eq!(out_pos, output.len());
@@ -132,47 +139,47 @@ impl<E: Engine> Codec for Base64Dec<E> {
         // input and output, straight from the caller's slices.
         let remaining_in = input.len() - in_pos;
         let remaining_out = output.len() - out_pos;
-        let mut groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
-        if let Some(pad_pos) = input[in_pos..in_pos + groups * ENCODED_GROUP]
-            .iter()
-            .position(|&b| b == b'=')
-        {
-            groups = pad_pos / ENCODED_GROUP;
-        }
+        let groups = (remaining_in / ENCODED_GROUP).min(remaining_out / GROUP);
         if groups > 0 {
             let in_bytes = groups * ENCODED_GROUP;
             let out_bytes = groups * GROUP;
-            out_pos += self
+            let written = self
                 .engine
                 .decode_slice(
                     &input[in_pos..in_pos + in_bytes],
                     &mut output[out_pos..out_pos + out_bytes],
                 )
                 .map_err(|_| Error::new(ErrorKind::Corrupt, in_pos, out_pos))?;
+            out_pos += written;
             in_pos += in_bytes;
-        }
-
-        // After bulk, whole input groups may remain because the next
-        // one contains padding (defer it: buffer and stop, `finish`
-        // will confirm it's truly last) or because the output's
-        // remainder is under one decoded group (decode through
-        // pending_output to fill it completely).
-        while input.len() - in_pos >= ENCODED_GROUP {
-            let next_group: [u8; ENCODED_GROUP] =
-                input[in_pos..in_pos + ENCODED_GROUP].try_into().unwrap();
-            if next_group.contains(&b'=') {
-                self.pending_input.set(&next_group);
-                in_pos += ENCODED_GROUP;
+            if written < out_bytes {
+                self.done = true;
                 if in_pos < input.len() {
                     return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
                 }
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
+        }
+
+        // After bulk, whole input groups may remain because the
+        // output's remainder is under one decoded group (decode
+        // through pending_output to fill it completely) -- or, once
+        // one of them turns out to carry padding, because the rest
+        // needs to be checked for trailing input instead of decoded.
+        while input.len() - in_pos >= ENCODED_GROUP {
+            let next_group: [u8; ENCODED_GROUP] =
+                input[in_pos..in_pos + ENCODED_GROUP].try_into().unwrap();
             if out_pos == output.len() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
-            self.stage_group(&next_group, in_pos, out_pos)?;
+            let produced = self.stage_group(&next_group, in_pos, out_pos)?;
             in_pos += ENCODED_GROUP;
+            if produced < GROUP {
+                self.done = true;
+                if in_pos < input.len() {
+                    return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
+                }
+            }
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
                 debug_assert_eq!(out_pos, output.len());
@@ -250,13 +257,10 @@ mod tests {
     #[test]
     fn decode_misplaced_padding_is_corrupt_not_unexpected_end() {
         // "A=BC" is a full 4-byte group with padding in the wrong
-        // position -- genuine corruption, not a stream cut short, even
-        // though (like a short trailing group) it's only detected once
-        // finish() confirms it's truly the last group.
+        // position -- genuine corruption, not a stream cut short.
         let mut dec = base64_dec();
         let mut out = [0u8; 32];
-        dec.process(b"A=BC", &mut out).unwrap();
-        let error = dec.finish(&mut out).unwrap_err();
+        let error = dec.process(b"A=BC", &mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Corrupt);
     }
 
@@ -271,9 +275,9 @@ mod tests {
     fn decode_rejects_padding_before_end_split_across_calls() {
         // Same corrupt input as above, but fed as two process() calls
         // that each happen to align exactly on the padded group's
-        // boundary. Decoding a padded group must be deferred until
-        // finish() confirms it's truly last, or this slips through as
-        // "AA" instead of being rejected.
+        // boundary. The first call's padded group must not be trusted
+        // as final until a later call proves no more input follows, or
+        // this slips through as "AA" instead of being rejected.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
         dec.process(b"QQ==", &mut out).unwrap();
@@ -283,14 +287,75 @@ mod tests {
     #[test]
     fn decode_accepts_padded_final_group_as_sole_input() {
         // A legitimate padded final group handed to `process` on its
-        // own (not preceded by any other group in the same call) must
-        // still decode successfully once finish() confirms it's last.
+        // own (not preceded by any other group in the same call)
+        // decodes right away; finish() then has nothing left to do.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
         let outcome = dec.process(b"QQ==", &mut out).unwrap();
-        assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let drain = dec.finish(&mut out).unwrap();
-        assert_eq!(drain, Drain::Done { written: 1 });
+        assert_eq!(outcome, Progress::InputConsumed { written: 1 });
         assert_eq!(&out[..1], b"A");
+        let drain = dec.finish(&mut out).unwrap();
+        assert_eq!(drain, Drain::Done { written: 0 });
+    }
+
+    #[test]
+    fn decode_latches_done_after_padding_seen_via_top_up() {
+        // Exercise the top-up branch's padding check: "QQ==" split
+        // across two process() calls that land mid-group.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 16];
+        let outcome = dec.process(b"Q", &mut out).unwrap();
+        assert_eq!(outcome, Progress::InputConsumed { written: 0 });
+        let outcome = dec.process(b"Q==", &mut out).unwrap();
+        assert_eq!(outcome, Progress::InputConsumed { written: 1 });
+        assert_eq!(&out[..1], b"A");
+        assert!(dec.process(b"more", &mut out).is_err());
+    }
+
+    #[test]
+    fn decode_bulk_batch_ending_on_padded_group_latches_done_across_calls() {
+        // "SGVsbG8=" is a whole call's worth of input: two groups, the
+        // second one padded, nothing else in this call. The bulk path
+        // must not trust that padding as final until a later call
+        // proves no more input follows.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 16];
+        let outcome = dec.process(b"SGVsbG8=", &mut out).unwrap();
+        assert_eq!(outcome, Progress::InputConsumed { written: 5 });
+        assert_eq!(&out[..5], b"Hello");
+        assert!(dec.process(b"IFdvcmxkIQ==", &mut out).is_err());
+    }
+
+    #[test]
+    fn decode_bulk_batch_ending_on_padded_group_rejects_trailing_input_same_call() {
+        // Same padded-batch-boundary case, but the extra data arrives
+        // in the same call right after the batch.
+        assert!(encode_string(base64_dec(), "SGVsbG8=IFdvcmxkIQ==").is_err());
+    }
+
+    #[test]
+    fn decode_tail_loop_padded_group_latches_done_across_calls() {
+        // Output room for exactly one decoded group forces the bulk
+        // step to handle only "SGVs", leaving the padded "bG8=" for
+        // the tail loop to decode one group at a time.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 4];
+        let outcome = dec.process(b"SGVsbG8=", &mut out).unwrap();
+        assert_eq!(outcome, Progress::OutputFilled { consumed: 8 });
+        assert_eq!(&out[..4], b"Hell");
+        let mut out = [0u8; 16];
+        let outcome = dec.process(&[], &mut out).unwrap();
+        assert_eq!(outcome, Progress::InputConsumed { written: 1 });
+        assert_eq!(&out[..1], b"o");
+        assert!(dec.process(b"more", &mut out).is_err());
+    }
+
+    #[test]
+    fn decode_tail_loop_padded_group_rejects_trailing_input_same_call() {
+        // Same as above, but a further group follows the padded one
+        // within the same call.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 4];
+        assert!(dec.process(b"SGVsbG8=SGVs", &mut out).is_err());
     }
 }

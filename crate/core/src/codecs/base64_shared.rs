@@ -58,12 +58,6 @@ impl<const N: usize> PendingInput<N> {
         self.len == N
     }
 
-    /// The bytes held so far, for inspection (e.g. the decoder checking
-    /// for padding) before deciding whether to [`Self::take`] them.
-    pub(super) fn as_slice(&self) -> &[u8] {
-        &self.buf[..self.len]
-    }
-
     /// Copy as much of `input` as fits into the remaining room,
     /// advance the held length, and return how many bytes were taken
     /// so the caller can advance its own `in_pos`.
@@ -75,9 +69,7 @@ impl<const N: usize> PendingInput<N> {
     }
 
     /// Replace the held bytes with `tail` (0 to `N` bytes) for the
-    /// next call. Used both for a genuine leftover shorter than `N`
-    /// and for a full `N`-byte group the decoder must defer (pending a
-    /// padding/end-of-stream check).
+    /// next call. Used for a genuine leftover shorter than `N`.
     pub(super) fn set(&mut self, tail: &[u8]) {
         debug_assert!(tail.len() <= N);
         self.buf[..tail.len()].copy_from_slice(tail);
@@ -139,6 +131,11 @@ impl<const N: usize> PendingOutput<N> {
     /// Whether nothing is currently held.
     pub(super) fn is_empty(&self) -> bool {
         self.pos >= self.len
+    }
+
+    /// How many bytes are currently held, drained or not.
+    pub(super) fn len(&self) -> usize {
+        self.len - self.pos
     }
 
     /// Copy held bytes into the front of `out`; returns how many were
