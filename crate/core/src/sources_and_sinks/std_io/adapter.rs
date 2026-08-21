@@ -2,6 +2,8 @@ use std::io::{BufRead, Read, Write};
 
 use crate::{Sink, Source};
 
+/// A `Source` over `std::io::Read`, reading into an owned scratch
+/// buffer.
 pub struct StdSource<R, S> {
     inner: R,
     buffer: S,
@@ -11,6 +13,12 @@ pub struct StdSource<R, S> {
 }
 
 impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
+    /// Build a `StdSource`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `buffer`: it could never hold a byte read
+    /// from `inner`, so `chunk` could never return anything.
     pub fn new(inner: R, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),
@@ -108,6 +116,9 @@ impl<R: BufRead> BufReadSource<R> {
         &mut self.inner
     }
 
+    /// Return the wrapped reader. Unlike `StdSource::into_inner`,
+    /// nothing is lost: `BufReadSource` owns no scratch buffer of its
+    /// own, so any bytes `R` was still holding come back with it.
     pub fn into_inner(self) -> R {
         self.inner
     }
@@ -168,6 +179,8 @@ impl<R: BufRead> Source for BufReadSource<R> {
     }
 }
 
+/// A `Sink` over `std::io::Write`, staging writes in an owned scratch
+/// buffer.
 pub struct StdSink<W, S> {
     inner: W,
     buffer: S,
@@ -175,6 +188,12 @@ pub struct StdSink<W, S> {
 }
 
 impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
+    /// Build a `StdSink`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `buffer`: it could never hold a byte for
+    /// `commit` to write out.
     pub fn new(inner: W, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),

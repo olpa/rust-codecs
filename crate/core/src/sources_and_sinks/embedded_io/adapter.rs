@@ -2,6 +2,8 @@ use embedded_io::{Read, Write};
 
 use crate::{Sink, Source};
 
+/// A `Source` over `embedded_io::Read`, reading into an owned scratch
+/// buffer.
 pub struct EmbeddedSource<R, S> {
     inner: R,
     buffer: S,
@@ -11,6 +13,12 @@ pub struct EmbeddedSource<R, S> {
 }
 
 impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
+    /// Build an `EmbeddedSource`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `buffer`: it could never hold a byte read
+    /// from `inner`, so `chunk` could never return anything.
     pub fn new(inner: R, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),
@@ -70,6 +78,8 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
     }
 }
 
+/// A `Sink` over `embedded_io::Write`, staging writes in an owned
+/// scratch buffer.
 pub struct EmbeddedSink<W, S> {
     inner: W,
     buffer: S,
@@ -77,6 +87,12 @@ pub struct EmbeddedSink<W, S> {
 }
 
 impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
+    /// Build an `EmbeddedSink`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `buffer`: it could never hold a byte for
+    /// `commit` to write out.
     pub fn new(inner: W, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),
