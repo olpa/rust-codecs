@@ -69,6 +69,12 @@ pub struct CodecReader<R, C: EndCapableCodec, S> {
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Build a `CodecReader`. Reads at [`ReadGranularity::FillBuffer`]
     /// until changed via [`CodecReader::with_read_granularity`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `inbuf`: it could never hold a byte read
+    /// from `inner`, so the codec could never see any input — a caller
+    /// bug, not a runtime condition.
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
         Self {
             input: EmbeddedSource::new(inner, inbuf),
@@ -146,6 +152,13 @@ pub struct CodecWriter<W, C: Codec, S> {
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
+    /// Build a `CodecWriter`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty `outbuf`, for the same reason
+    /// [`CodecReader::new`] does: it could never hold a byte for
+    /// `inner` to receive.
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
         Self {
             output: EmbeddedSink::new(inner, outbuf),
