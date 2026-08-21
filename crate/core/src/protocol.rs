@@ -52,13 +52,21 @@ pub trait Sink {
 /// signalling end-of-input and reaching a sync point.
 pub trait DrainCodec {
     /// Signal "no more input is coming": flush any buffered state and,
-    /// for formats with one, write the trailer/checksum. Call
-    /// repeatedly (draining `output` between calls) until it reports
-    /// [`Drain::Done`]. Idempotent once `Done`: see [`Codec`] contract
+    /// for formats with one, write the trailer/checksum.
+    ///
+    /// One call is not enough: a single `finish` may report
+    /// `Drain::OutputFilled` rather than `Drain::Done` if `output` was
+    /// too small to hold everything owed. Call it again — draining
+    /// `output` between calls — until it reports [`Drain::Done`]. A
+    /// driver that calls `finish` exactly once and treats
+    /// `OutputFilled` as success will silently truncate the stream's
+    /// trailer/checksum/padding.
+    ///
+    /// Idempotent once `Done`: see [`Codec`] contract
     /// point 3. For a [`EndCapableCodec`], pinned to reporting `Done`
     /// forever once `process` has reported
     /// [`EndCapableProgress::End`]. Must always resolve to
-    /// `OutputFilled`, `Done`, or `Err`: see [`Codec`] contract point 7.
+    /// `OutputFilled`, `Done`, or `Err`: see [`Codec`] contract point 6.
     fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error>;
 
     /// Drain any bytes this codec is withholding to a sync boundary,
