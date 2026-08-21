@@ -134,30 +134,167 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     }
 }
 
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(test)]
 mod tests {
+    use embedded_io::{ErrorType, Read, Write};
+
     use super::{EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
-    use crate::sources_and_sinks::vec::{VecSink, VecSource};
     use crate::stream_to_stream;
+    use crate::{Sink, Source};
 
-    #[test]
-    fn embedded_input_can_feed_vec_output() {
-        let mut input = EmbeddedSource::new(&b"embedded to vec"[..], [0u8; 3]);
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"embedded to vec");
+    /// Wraps a `Read`, counting how many times `read` was actually
+    /// called on it — lets a test prove `chunk()` didn't refill ahead
+    /// of `pos` (the `Source` contract point that new bytes must not
+    /// be handed out until the old ones are released).
+    struct CountingReader<R> {
+        inner: R,
+        reads: usize,
+    }
+
+    impl<R: ErrorType> ErrorType for CountingReader<R> {
+        type Error = R::Error;
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            self.reads += 1;
+            self.inner.read(buf)
+        }
     }
 
     #[test]
-    fn vec_input_can_feed_embedded_output() {
-        let mut input = VecSource::new(b"vec to embedded".to_vec());
+    fn chunk_returns_none_at_genuine_eof() {
+        let mut input = EmbeddedSource::new(&b""[..], [0u8; 4]);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
+        let reader = CountingReader {
+            inner: &b"abcdef"[..],
+            reads: 0,
+        };
+        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(1);
+        // The unconsumed remainder reappears, overlapping the previous
+        // chunk — no new bytes were pulled in to produce it.
+        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    fn full_consume_triggers_a_refill() {
+        let reader = CountingReader {
+            inner: &b"abcdef"[..],
+            reads: 0,
+        };
+        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(4);
+        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
+        assert_eq!(input.get_ref().reads, 2);
+    }
+
+    #[test]
+    fn repeated_chunk_without_consume_is_idempotent() {
+        let reader = CountingReader {
+            inner: &b"abcd"[..],
+            reads: 0,
+        };
+        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn consume_more_than_available_panics() {
+        let mut input = EmbeddedSource::new(&b"ab"[..], [0u8; 4]);
+        input.chunk().unwrap();
+        input.consume(3);
+    }
+
+    #[test]
+    fn spare_offers_the_whole_buffer() {
         let mut bytes = [0u8; 32];
-        let remaining = {
+        let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 6]);
+        assert_eq!(output.spare().unwrap().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn spare_without_commit_is_reissuable() {
+        let mut bytes = [0u8; 32];
+        let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 6]);
+        let first_len = output.spare().unwrap().unwrap().len();
+        let second_len = output.spare().unwrap().unwrap().len();
+        assert_eq!(first_len, second_len);
+    }
+
+    #[test]
+    fn commit_writes_only_the_committed_prefix_through() {
+        let mut bytes = [0u8; 32];
+        let written = {
+            let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 8]);
+            let spare = output.spare().unwrap().unwrap();
+            spare[..5].copy_from_slice(b"abcde");
+            output.commit(3).unwrap();
+            32 - output.into_inner().len()
+        };
+        assert_eq!(&bytes[..written], b"abc");
+    }
+
+    #[test]
+    #[should_panic]
+    fn commit_more_than_offered_panics() {
+        let mut bytes = [0u8; 32];
+        let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 4]);
+        output.spare().unwrap();
+        output.commit(5).unwrap();
+    }
+
+    /// Counts `flush` calls made on the wrapped writer, to prove
+    /// `Sink::finish` actually reaches it.
+    struct RecordingWriter {
+        flushes: usize,
+    }
+
+    impl ErrorType for RecordingWriter {
+        type Error = core::convert::Infallible;
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn finish_flushes_the_inner_writer() {
+        let mut output = EmbeddedSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
+        output.finish().unwrap();
+        assert_eq!(output.get_ref().flushes, 1);
+    }
+
+    #[test]
+    fn embedded_source_feeds_embedded_sink_end_to_end() {
+        let mut input = EmbeddedSource::new(&b"embedded to embedded"[..], [0u8; 3]);
+        let mut bytes = [0u8; 32];
+        let written = {
             let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 3]);
             stream_to_stream(&mut input, identity(), &mut output).unwrap();
-            output.into_inner().len()
+            32 - output.into_inner().len()
         };
-        assert_eq!(&bytes[..bytes.len() - remaining], b"vec to embedded");
+        assert_eq!(&bytes[..written], b"embedded to embedded");
     }
 }

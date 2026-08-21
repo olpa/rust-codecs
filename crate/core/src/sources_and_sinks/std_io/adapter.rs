@@ -234,13 +234,85 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufReader, Cursor, Read};
+    use std::io::{BufReader, Cursor, Read, Write};
 
     use super::{BufReadSource, StdSink, StdSource};
     use crate::identity::identity;
-    use crate::sources_and_sinks::vec::{VecSink, VecSource};
     use crate::stream_to_stream;
-    use crate::Source;
+    use crate::{Sink, Source};
+
+    /// Wraps a `Read`, counting how many times `read` was actually
+    /// called on it — lets a test prove `chunk()` didn't refill ahead
+    /// of `pos` (the `Source` contract point that new bytes must not
+    /// be handed out until the old ones are released).
+    struct CountingReader<R> {
+        inner: R,
+        reads: usize,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.inner.read(buf)
+        }
+    }
+
+    #[test]
+    fn chunk_returns_none_at_genuine_eof() {
+        let mut input = StdSource::new(Cursor::new(b"".as_slice()), [0u8; 4]);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
+        let reader = CountingReader {
+            inner: Cursor::new(b"abcdef".as_slice()),
+            reads: 0,
+        };
+        let mut input = StdSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(1);
+        // The unconsumed remainder reappears, overlapping the previous
+        // chunk — no new bytes were pulled in to produce it.
+        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    fn full_consume_triggers_a_refill() {
+        let reader = CountingReader {
+            inner: Cursor::new(b"abcdef".as_slice()),
+            reads: 0,
+        };
+        let mut input = StdSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(4);
+        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
+        assert_eq!(input.get_ref().reads, 2);
+    }
+
+    #[test]
+    fn repeated_chunk_without_consume_is_idempotent() {
+        let reader = CountingReader {
+            inner: Cursor::new(b"abcd".as_slice()),
+            reads: 0,
+        };
+        let mut input = StdSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn consume_more_than_available_panics() {
+        let mut input = StdSource::new(Cursor::new(b"ab".as_slice()), [0u8; 4]);
+        input.chunk().unwrap();
+        input.consume(3);
+    }
 
     /// Fails its first `read` with `Interrupted`, then delegates.
     struct FlakyOnce<R> {
@@ -262,15 +334,21 @@ mod tests {
     }
 
     #[test]
-    fn std_source_retries_an_interrupted_read() {
+    fn chunk_retries_an_interrupted_read() {
         let flaky = FlakyOnce {
             inner: Cursor::new(b"retry me".as_slice()),
             failed: false,
         };
         let mut input = StdSource::new(flaky, [0u8; 8]);
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"retry me");
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
+    }
+
+    #[test]
+    fn buf_read_source_forwards_to_fill_buf() {
+        let mut input = BufReadSource::new(Cursor::new(b"hello".as_slice()));
+        assert_eq!(input.chunk().unwrap(), Some(b"hello".as_slice()));
+        input.consume(5);
+        assert_eq!(input.chunk().unwrap(), None);
     }
 
     #[test]
@@ -283,9 +361,7 @@ mod tests {
             failed: false,
         };
         let mut input = BufReadSource::new(BufReader::new(flaky));
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"retry me too");
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
     }
 
     /// Yields `b"hi"`, then a genuine EOF (`Ok(0)`), then errors with
@@ -316,18 +392,13 @@ mod tests {
     #[test]
     fn buf_read_source_does_not_refill_after_a_zero_length_fill() {
         let mut input = BufReadSource::new(BufReader::new(EofThenPoisoned { calls: 0 }));
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"hi");
+        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), None);
     }
 
     #[test]
     fn buf_read_source_latches_eof_across_repeated_chunk_calls() {
-        // `stream_to_stream` stops calling `chunk()` once it sees `None`,
-        // so this drives it directly — standing in for a plain `Codec`
-        // driven through `BufReadCodecReader`, where `Pump::is_done()`
-        // never latches and every `Read::read()` re-enters `chunk()`
-        // regardless of the source having ended already.
         let mut input = BufReadSource::new(BufReader::new(EofThenPoisoned { calls: 0 }));
         assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
         input.consume(2);
@@ -339,28 +410,65 @@ mod tests {
     }
 
     #[test]
-    fn std_input_can_feed_vec_output() {
-        let mut input = StdSource::new(Cursor::new(b"std to vec"), [0u8; 3]);
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"std to vec");
+    fn spare_offers_the_whole_buffer() {
+        let mut output = StdSink::new(Vec::new(), [0u8; 6]);
+        assert_eq!(output.spare().unwrap().unwrap().len(), 6);
     }
 
     #[test]
-    fn buf_read_input_can_feed_vec_output() {
-        // `Cursor<&[u8]>` implements `BufRead`, so no scratch buffer is
-        // supplied here, unlike `StdSource` above.
-        let mut input = BufReadSource::new(Cursor::new(b"bufread to vec".as_slice()));
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"bufread to vec");
+    fn spare_without_commit_is_reissuable() {
+        let mut output = StdSink::new(Vec::new(), [0u8; 6]);
+        let first_len = output.spare().unwrap().unwrap().len();
+        let second_len = output.spare().unwrap().unwrap().len();
+        assert_eq!(first_len, second_len);
     }
 
     #[test]
-    fn vec_input_can_feed_std_output() {
-        let mut input = VecSource::new(b"vec to std".to_vec());
+    fn commit_writes_only_the_committed_prefix_through() {
+        let mut output = StdSink::new(Vec::new(), [0u8; 8]);
+        let spare = output.spare().unwrap().unwrap();
+        spare[..5].copy_from_slice(b"abcde");
+        output.commit(3).unwrap();
+        assert_eq!(output.get_ref().as_slice(), b"abc");
+    }
+
+    #[test]
+    #[should_panic]
+    fn commit_more_than_offered_panics() {
+        let mut output = StdSink::new(Vec::new(), [0u8; 4]);
+        output.spare().unwrap();
+        output.commit(5).unwrap();
+    }
+
+    /// Counts `flush` calls made on the wrapped writer, to prove
+    /// `Sink::finish` actually reaches it.
+    struct RecordingWriter {
+        flushes: usize,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn finish_flushes_the_inner_writer() {
+        let mut output = StdSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
+        output.finish().unwrap();
+        assert_eq!(output.get_ref().flushes, 1);
+    }
+
+    #[test]
+    fn std_source_feeds_std_sink_end_to_end() {
+        let mut input = StdSource::new(Cursor::new(b"std to std".as_slice()), [0u8; 3]);
         let mut output = StdSink::new(Vec::new(), [0u8; 3]);
         stream_to_stream(&mut input, identity(), &mut output).unwrap();
-        assert_eq!(output.into_inner(), b"vec to std");
+        assert_eq!(output.into_inner(), b"std to std");
     }
 }
