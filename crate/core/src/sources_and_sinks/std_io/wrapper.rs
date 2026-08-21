@@ -117,9 +117,10 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Reclaim the reader, the codec, and the scratch buffer — e.g. to
     /// read state the codec holds (a checksum, a digest), or to reuse
     /// the buffer's allocation for another `CodecReader`. `into_inner`
-    /// discards all three; this is the exhaustive teardown. Same
-    /// caveat as `into_inner`: bytes already pulled from the reader
-    /// but not yet yielded to the caller are lost.
+    /// discards the codec and the buffer; this is the exhaustive
+    /// teardown, keeping all three. Same caveat as `into_inner`: bytes
+    /// already pulled from the reader but not yet yielded to the
+    /// caller are lost.
     pub fn into_parts(self) -> (R, C, S) {
         let (inner, buffer) = self.input.into_parts();
         (inner, self.pump.into_inner(), buffer)
@@ -236,19 +237,9 @@ impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
 /// `C` is bound to [`Codec`], not [`EndCapableCodec`]: an in-band end
 /// would otherwise become a permanent short write from `write`, which
 /// `write_all`/`io::copy` would then turn into `ErrorKind::WriteZero`.
-/// The caller must explicitly call [`CodecWriter::finish`] to finalize
-/// the codec; `Write::flush` is a resumable synchronization point, not
-/// a substitute for it.
-///
-/// # Don't forget to call `finish`
-///
-/// Dropping a `CodecWriter` without calling `finish` silently drops
-/// any trailer/padding/checksum bytes the codec was still holding —
-/// there is no compiler warning or runtime error, only truncated
-/// output discovered later, on decode. This is the same footgun as
-/// forgetting `std::io::BufWriter::flush`/`into_inner` or
-/// `flate2::write::GzEncoder::finish`: make sure `finish` runs on
-/// every path out of scope, including error paths.
+/// The caller must explicitly call [`finish`](CodecWriter::finish) to
+/// finalize the codec; `Write::flush` is a resumable synchronization
+/// point, not a substitute for it.
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,
     pump: Pump<C>,
@@ -298,8 +289,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 
     /// Drain the codec by calling its `finish` repeatedly until
     /// `Drain::Done` (delivering any trailer/checksum/padding bytes it
-    /// was still holding), finalize the sink itself ([`Sink::finish`](crate::Sink::finish) —
+    /// was still holding), finalize the sink itself ([`Sink::finish`](crate::Sink::finish),
     /// e.g. flushing the wrapped writer), and hand back ownership of it.
+    ///
+    /// Don't forget to call this: dropping a `CodecWriter` without
+    /// calling `finish` silently drops any trailer/padding/checksum
+    /// bytes the codec was still holding. There is no compiler
+    /// warning or runtime error, only truncated output discovered
+    /// later.
     pub fn finish(mut self) -> io::Result<W> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
         Ok(self.output.into_inner())
