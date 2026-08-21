@@ -1,10 +1,5 @@
 //! `embedded_io::Read`/`Write` wrappers over a [`Codec`](crate::Codec)
 //! or [`EndCapableCodec`](crate::EndCapableCodec).
-//!
-//! The ownership is directional and zero-copy at the codec boundary:
-//! [`CodecReader`] owns input scratch and writes directly into
-//! its caller's output, while [`CodecWriter`] reads directly
-//! from its caller and owns output scratch.
 
 use core::fmt;
 
@@ -25,11 +20,6 @@ pub enum EmbeddedError<E> {
     Codec(Error),
 }
 
-/// `SinkExhausted`/`NoProgress` never carry endpoint data of their own
-/// (`DriveError`'s two data-less variants) — they mean the pump/codec
-/// pairing itself is broken, the same class of failure the crate's own
-/// [`ErrorKind::ContractViolation`] already names, so both route
-/// through `EmbeddedError::Codec` like a codec error would.
 fn adapter_contract_violation<E>() -> EmbeddedError<E> {
     EmbeddedError::Codec(Error::new(ErrorKind::ContractViolation, 0, 0))
 }
@@ -70,8 +60,6 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 }
 
 /// Wraps an [`embedded_io::Read`], yielding bytes transformed by `C`.
-///
-/// `C` may be an ordinary [`Codec`] or a [`EndCapableCodec`].
 pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: EmbeddedSource<R, S>,
     pump: Pump<C>,
@@ -206,7 +194,10 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         self.pump.get_mut()
     }
 
-    /// Finish the codec stream, flush the endpoint, and return it.
+    /// Drain the codec by calling its `finish` repeatedly until
+    /// `Drain::Done` (delivering any trailer/checksum/padding bytes it
+    /// was still holding), finalize the sink itself ([`Sink::finish`](crate::Sink::finish) —
+    /// e.g. flushing the wrapped writer), and hand back ownership of it.
     pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
         Ok(self.output.into_inner())

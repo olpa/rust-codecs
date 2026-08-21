@@ -296,9 +296,10 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         self.pump.get_mut()
     }
 
-    /// Flush any bytes the codec was still holding, finalize the stream
-    /// (trailer, checksum, padding — for a stateful codec), and hand back
-    /// ownership of the wrapped writer.
+    /// Drain the codec by calling its `finish` repeatedly until
+    /// `Drain::Done` (delivering any trailer/checksum/padding bytes it
+    /// was still holding), finalize the sink itself ([`Sink::finish`](crate::Sink::finish) —
+    /// e.g. flushing the wrapped writer), and hand back ownership of it.
     pub fn finish(mut self) -> io::Result<W> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
         Ok(self.output.into_inner())
