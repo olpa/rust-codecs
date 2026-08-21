@@ -72,7 +72,6 @@ impl<E: Engine> Codec for Base64Enc<E> {
         // ## Drain pending output
         //
 
-        // Deliver the tail of a group from a previous call first.
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
             debug_assert_eq!(out_pos, output.len());
@@ -83,12 +82,9 @@ impl<E: Engine> Codec for Base64Enc<E> {
         // ## Collect and encode pending input
         //
 
-        // Top up a pending partial group with fresh input; emit it
-        // through pending_output once complete.
         if !self.pending_input.is_empty() {
             in_pos += self.pending_input.fill(input);
             if !self.pending_input.is_full() {
-                // The top-up took everything `input` had.
                 debug_assert_eq!(in_pos, input.len());
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
@@ -105,17 +101,6 @@ impl<E: Engine> Codec for Base64Enc<E> {
         // ## Encode step: fill output as much as possible
         //
 
-        // Bulk-encode as many whole groups as fit both remaining
-        // input and output, straight from the caller's slices.
-        //
-        // This sizing has to be done by hand: `encode_slice` is
-        // all-or-nothing on whatever slice it's given — it computes
-        // the padded encoded length of the *entire* input and either
-        // encodes all of it or returns `Err` with nothing written if
-        // `output` is too small, it never partially fills the buffer.
-        // Handing it a slice whose length isn't a multiple of `GROUP`
-        // would also make it treat that slice as the final chunk and
-        // add padding, which must only ever appear once, in `finish`.
         let remaining_in = input.len() - in_pos;
         let remaining_out = output.len() - out_pos;
         let groups = (remaining_in / GROUP).min(remaining_out / ENCODED_GROUP);
