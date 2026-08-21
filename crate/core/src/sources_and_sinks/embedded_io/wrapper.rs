@@ -243,7 +243,7 @@ mod tests {
 
     use super::{CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
-    use crate::{Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error};
+    use crate::{Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, Progress};
 
     const INPUT: &[u8] = b"embedded io";
 
@@ -280,6 +280,76 @@ mod tests {
         let mut output = [0u8; 1];
         let mut writer = CodecWriter::new(&mut output[..], identity(), [0u8; 2]);
         assert!(matches!(writer.write(b"ab"), Err(EmbeddedError::Io(_))));
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer must be non-empty")]
+    fn codec_reader_rejects_empty_buffer() {
+        let _ = CodecReader::new(INPUT, identity(), [0u8; 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer must be non-empty")]
+    fn codec_writer_rejects_empty_buffer() {
+        let mut output = [0u8; 8];
+        let _ = CodecWriter::new(&mut output[..], identity(), [0u8; 0]);
+    }
+
+    /// Buffers all input internally, emitting only on `flush`/`finish`
+    /// — exercises the "flush is a resumable sync point, finish ends
+    /// the stream" distinction `CodecWriter`'s docs draw. Uses a fixed
+    /// backing array rather than `Vec` so this test doesn't need the
+    /// `alloc` feature.
+    #[derive(Default)]
+    struct Hoarder {
+        buf: [u8; 16],
+        len: usize,
+    }
+
+    impl Hoarder {
+        fn emit(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            let n = self.len.min(output.len());
+            output[..n].copy_from_slice(&self.buf[..n]);
+            self.buf.copy_within(n..self.len, 0);
+            self.len -= n;
+            if self.len == 0 {
+                Ok(Drain::Done { written: n })
+            } else {
+                Ok(Drain::OutputFilled)
+            }
+        }
+    }
+
+    impl DrainCodec for Hoarder {
+        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            self.emit(output)
+        }
+
+        fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            self.emit(output)
+        }
+    }
+
+    impl Codec for Hoarder {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            self.buf[self.len..self.len + input.len()].copy_from_slice(input);
+            self.len += input.len();
+            Ok(Progress::InputConsumed { written: 0 })
+        }
+    }
+
+    #[test]
+    fn flush_does_not_end_the_stream() {
+        let mut output = [0u8; 32];
+        let remaining = {
+            let mut writer = CodecWriter::new(&mut output[..], Hoarder::default(), [0u8; 64]);
+            writer.write_all(b"first").unwrap();
+            writer.flush().unwrap();
+            writer.write_all(b"second").unwrap();
+            writer.finish().unwrap().len()
+        };
+        let written = output.len() - remaining;
+        assert_eq!(&output[..written], b"firstsecond");
     }
 
     /// Copies bytes 1:1 but ends its stream after `limit` bytes, like

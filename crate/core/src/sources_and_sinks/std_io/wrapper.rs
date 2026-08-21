@@ -329,11 +329,11 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor, Read, Write};
 
     use super::{BufReadCodecReader, CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::{Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error};
+    use crate::{Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, Progress};
 
     #[test]
     fn buf_read_codec_reader_needs_no_scratch_buffer() {
@@ -353,6 +353,66 @@ mod tests {
     #[should_panic(expected = "buffer must be non-empty")]
     fn codec_writer_rejects_empty_buffer() {
         let _ = CodecWriter::new(Vec::<u8>::new(), rot13(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn endpoint_errors_remain_distinguishable() {
+        // A codec error always comes back as `ErrorKind::InvalidData`
+        // (via `to_io_error`); a sink error must instead keep passing
+        // through with its own kind untouched, here `WriteZero` from
+        // `write_all` on the undersized `&mut [u8]` endpoint.
+        let mut output = [0u8; 1];
+        let mut writer = CodecWriter::new(&mut output[..], rot13(), vec![0u8; 2]);
+        let error = writer.write(b"ab").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+    }
+
+    /// Buffers all input internally, emitting only on `flush`/`finish`
+    /// — exercises the "flush is a resumable sync point, finish ends
+    /// the stream" distinction `CodecWriter`'s docs draw.
+    #[derive(Default)]
+    struct Hoarder {
+        buf: Vec<u8>,
+    }
+
+    impl Hoarder {
+        fn emit(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            let n = self.buf.len().min(output.len());
+            output[..n].copy_from_slice(&self.buf[..n]);
+            self.buf.drain(..n);
+            if self.buf.is_empty() {
+                Ok(Drain::Done { written: n })
+            } else {
+                Ok(Drain::OutputFilled)
+            }
+        }
+    }
+
+    impl DrainCodec for Hoarder {
+        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            self.emit(output)
+        }
+
+        fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            self.emit(output)
+        }
+    }
+
+    impl Codec for Hoarder {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            self.buf.extend_from_slice(input);
+            Ok(Progress::InputConsumed { written: 0 })
+        }
+    }
+
+    #[test]
+    fn flush_does_not_end_the_stream() {
+        let mut writer = CodecWriter::new(Vec::new(), Hoarder::default(), vec![0u8; 64]);
+        writer.write_all(b"first").unwrap();
+        writer.flush().unwrap();
+        writer.write_all(b"second").unwrap();
+        let out = writer.finish().unwrap();
+        assert_eq!(out, b"firstsecond");
     }
 
     /// Copies bytes 1:1 but ends its stream after `limit` bytes, like
@@ -404,6 +464,22 @@ mod tests {
             Cursor::new(b"Hello World".as_slice()),
             EarlyEnd { limit: 3, done: 0 },
             vec![0u8; 8],
+        );
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"Hel");
+        let mut buf = [0u8; 4];
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn buf_read_codec_reader_stops_at_in_band_end() {
+        // Same latching behavior as `CodecReader`, but through the
+        // no-scratch-buffer `BufReadCodecReader` path — its own doc
+        // claims "same end-of-stream behavior as `CodecReader`".
+        let mut reader = BufReadCodecReader::new(
+            Cursor::new(b"Hello World".as_slice()),
+            EarlyEnd { limit: 3, done: 0 },
         );
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
