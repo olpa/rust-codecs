@@ -33,14 +33,16 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
         &mut self.inner
     }
 
+    /// Reclaim the reader, discarding the scratch buffer and any
+    /// buffered, unconsumed bytes (already read from `inner` into the
+    /// buffer via `chunk`, but not yet passed to `consume`).
     pub fn into_inner(self) -> R {
         self.inner
     }
 
     /// Reclaim both the reader and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `EmbeddedSource`.
-    /// `into_inner` drops the buffer; this is the exhaustive teardown.
-    /// Any buffered, unconsumed bytes (already read from `inner` into
+    /// the buffer's allocation for another `EmbeddedSource`. Any
+    /// buffered, unconsumed bytes (already read from `inner` into
     /// the buffer via `chunk`, but not yet passed to `consume`) are
     /// discarded along with them.
     pub fn into_parts(self) -> (R, S) {
@@ -95,16 +97,17 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
         &mut self.inner
     }
 
+    /// Reclaim the writer, discarding the scratch buffer and any bytes
+    /// staged in it via `spare` but not yet handed to `commit` — they
+    /// are not written to `inner`.
     pub fn into_inner(self) -> W {
         self.inner
     }
 
     /// Reclaim both the writer and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `EmbeddedSink`.
-    /// `into_inner` drops the buffer; this is the exhaustive teardown.
-    /// Any bytes staged in the buffer via `spare` but not yet handed to
-    /// `commit` are discarded along with it, and are not written to
-    /// `inner`.
+    /// the buffer's allocation for another `EmbeddedSink`. Any bytes
+    /// staged in the buffer via `spare` but not yet handed to `commit`
+    /// are discarded along with it, and are not written to `inner`.
     pub fn into_parts(self) -> (W, S) {
         (self.inner, self.buffer)
     }
@@ -114,8 +117,9 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     type Error = W::Error;
 
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
-        self.offered = self.buffer.as_mut().len();
-        Ok(Some(self.buffer.as_mut()))
+        let buf = self.buffer.as_mut();
+        self.offered = buf.len();
+        Ok(Some(buf))
     }
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
