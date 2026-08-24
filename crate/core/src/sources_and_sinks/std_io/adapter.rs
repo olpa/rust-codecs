@@ -124,37 +124,22 @@ impl<R: BufRead> Source for BufReadSource<R> {
     type Error = std::io::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        // `fill_buf` already returns the current unconsumed window
-        // without over-reading, and an empty result means "nothing
-        // available this call" — the same contract `Source::chunk`
-        // asks for. It also doesn't retry `Interrupted` itself, so a
-        // signal landing mid-fill must be retried here — matching
-        // `std::io::copy`.
-        //
-        // The retry loop can't return the borrowed slice directly from
-        // within its own `match` (returning a borrow across a `continue`
-        // edge doesn't pass borrowck), so it retries against an owned
-        // length instead, then a final, non-looping call reads out the
-        // now-settled buffer. That second call is only made when `len`
-        // is non-zero: a non-zero length proves the buffer still has
-        // that many unconsumed bytes (nothing else touched `self.inner`
-        // in between), so `fill_buf` takes its no-I/O fast path and
-        // can't itself need retrying. Skipping it on `len == 0` avoids
-        // triggering a second, unguarded real read on the empty case —
-        // one that could hit its own `Interrupted` and propagate
-        // unretried, undoing the fix above.
-        let len = loop {
+        // There is a borrow-checker limitation that doesn't allow
+        // returning the buffer from the loop. The solution is to
+        // call `fill_buf` a second time.
+        // That second call doesn't trigger a read: after a non-empty
+        // `fill_buf`, the buffer stays available until `consume` is
+        // called, so it just re-borrows the same still-unconsumed window.
+        loop {
             match self.inner.fill_buf() {
-                Ok(buf) => break buf.len(),
+                Ok([]) => return Ok(None),
+                Ok(_) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
-        };
-        if len == 0 {
-            return Ok(None);
         }
-        let buf = self.inner.fill_buf()?;
-        Ok(Some(buf))
+
+        self.inner.fill_buf().map(Some)
     }
 
     fn consume(&mut self, amount: usize) {
