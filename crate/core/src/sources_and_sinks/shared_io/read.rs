@@ -1,54 +1,37 @@
 use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSink;
-use crate::stream::{Pump, PumpDrainEnd, PumpEnd, PumpStepEnd};
+use crate::stream::{Pump, PumpDrainEnd, PumpStepEnd};
 use crate::{DriveError, EndCapableCodec, Source};
-
-/// How much a single [`pump_read`] call (and so a single `Read::read`
-/// call on `CodecReader`/`BufReadCodecReader`) pulls from the wrapped
-/// source before returning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadGranularity {
-    /// Keep pulling more input until the caller's buffer is full or
-    /// the source is exhausted — best throughput, the default. Right
-    /// for bulk/piped transfers, where nothing is waiting on any one
-    /// chunk in particular.
-    #[default]
-    FillBuffer,
-    /// Return as soon as one pull from the wrapped source made any
-    /// progress, instead of chasing a full buffer. Matches the wrapped
-    /// source's own read granularity, so `read()` never blocks past
-    /// what a single inner read already blocked on.
-    ///
-    /// This is the interactive-application setting: use it whenever a
-    /// handler downstream of this reader should see each unit of input
-    /// (a typed terminal line, a network datagram) as soon as it
-    /// arrives, rather than only once enough of them have accumulated
-    /// to fill some buffer it has no visibility into.
-    SingleRead,
-}
 
 /// Drive `pump` against `input`, filling `buf` with transformed bytes —
 /// the transport-independent core of a `Read::read` impl, matching
 /// what `std_io`/`embedded_io`'s own `CodecReader` calls internally.
+/// Returns as soon as one pull from `input` yields output, instead of
+/// chasing a full `buf` — so `read()` never blocks past what a single
+/// pull from `input` already blocked on. A step that pulls input but
+/// produces no output yet (a codec buffering several input bytes
+/// before it can emit anything, e.g. `base64_dec`) doesn't count:
+/// looping past it is required to avoid `read()` returning `Ok(0)`
+/// before genuine end-of-stream, which callers would misread as EOF.
 /// Ends the codec's stream (running `finish`) once `input` reports
 /// exhaustion, so the caller never has to invoke `finish` itself.
 pub fn pump_read<I: Source, C: EndCapableCodec>(
     pump: &mut Pump<C>,
     input: &mut I,
     buf: &mut [u8],
-    granularity: ReadGranularity,
 ) -> Result<usize, DriveError<I::Error, Infallible>> {
     if buf.is_empty() || pump.is_done() {
         return Ok(0);
     }
     let mut output = SliceSink::new(buf);
-    let source_exhausted = match granularity {
-        ReadGranularity::FillBuffer => {
-            pump.transfer_from(input, &mut output)?.end == PumpEnd::SourceExhausted
+    let source_exhausted = loop {
+        let step = pump.transfer_step(input, &mut output)?;
+        if step.end == PumpStepEnd::SourceExhausted {
+            break true;
         }
-        ReadGranularity::SingleRead => {
-            pump.transfer_step(input, &mut output)?.end == PumpStepEnd::SourceExhausted
+        if step.end != PumpStepEnd::Progressed || output.written() > 0 {
+            break false;
         }
     };
     if source_exhausted {
@@ -81,7 +64,7 @@ fn widen<T>(error: DriveError<Infallible, Infallible>) -> DriveError<T, Infallib
 mod tests {
     use core::convert::Infallible;
 
-    use super::{pump_read, ReadGranularity};
+    use super::pump_read;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::{Codec, Drain, DrainCodec, Error, Progress, Pump, Source};
 
@@ -118,28 +101,13 @@ mod tests {
 
         while position < collected.len() {
             let end = (position + 2).min(collected.len());
-            let written = pump_read(
-                &mut pump,
-                &mut source,
-                &mut collected[position..end],
-                ReadGranularity::FillBuffer,
-            )
-            .unwrap();
+            let written = pump_read(&mut pump, &mut source, &mut collected[position..end]).unwrap();
             assert!(written > 0);
             position += written;
         }
 
         assert_eq!(&collected, b"final");
-        assert_eq!(
-            pump_read(
-                &mut pump,
-                &mut source,
-                &mut [0; 2],
-                ReadGranularity::FillBuffer
-            )
-            .unwrap(),
-            0
-        );
+        assert_eq!(pump_read(&mut pump, &mut source, &mut [0; 2]).unwrap(), 0);
     }
 
     /// A byte-identical copy codec with no feature-gated dependency
@@ -168,8 +136,9 @@ mod tests {
     /// A `Source` that never reveals more than `chunk_size` bytes from
     /// one `chunk()` call, no matter how much of `bytes` remains —
     /// stands in for a wrapped reader whose own `read()` returns in
-    /// bounded pieces (like a terminal line at a time), the case
-    /// `ReadGranularity::SingleRead` exists for.
+    /// bounded pieces (like a terminal line at a time), proving
+    /// `pump_read` returns after a single such pull instead of chasing
+    /// a full buffer.
     struct LimitedChunkSource<'a> {
         bytes: &'a [u8],
         pos: usize,
@@ -192,9 +161,8 @@ mod tests {
     #[test]
     fn single_read_returns_after_one_source_pull() {
         // 9 bytes available in 3-byte pulls, into a buffer big enough
-        // for all of them: FillBuffer keeps pulling until the buffer
-        // (or the source) is exhausted, but SingleRead must return
-        // after the first pull alone.
+        // for all of them: `pump_read` must return after the first
+        // pull alone, not chase a full buffer.
         let mut source = LimitedChunkSource {
             bytes: b"abcdefghi",
             pos: 0,
@@ -203,42 +171,10 @@ mod tests {
         let mut pump = Pump::new(PassThrough);
         let mut buf = [0u8; 9];
 
-        let written = pump_read(
-            &mut pump,
-            &mut source,
-            &mut buf,
-            ReadGranularity::SingleRead,
-        )
-        .unwrap();
+        let written = pump_read(&mut pump, &mut source, &mut buf).unwrap();
 
         assert_eq!(written, 3);
         assert_eq!(&buf[..3], b"abc");
         assert_eq!(source.pos, 3);
-    }
-
-    #[test]
-    fn fill_buffer_coalesces_every_source_pull() {
-        // Same source/buffer as `single_read_returns_after_one_source_pull`,
-        // but under the default granularity: one `pump_read` call
-        // drains the whole source across multiple `chunk()` pulls.
-        let mut source = LimitedChunkSource {
-            bytes: b"abcdefghi",
-            pos: 0,
-            chunk_size: 3,
-        };
-        let mut pump = Pump::new(PassThrough);
-        let mut buf = [0u8; 9];
-
-        let written = pump_read(
-            &mut pump,
-            &mut source,
-            &mut buf,
-            ReadGranularity::FillBuffer,
-        )
-        .unwrap();
-
-        assert_eq!(written, 9);
-        assert_eq!(&buf, b"abcdefghi");
-        assert_eq!(source.pos, 9);
     }
 }

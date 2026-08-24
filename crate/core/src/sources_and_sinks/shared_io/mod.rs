@@ -15,7 +15,7 @@
 //! error type.
 
 mod read;
-pub use read::{pump_read, ReadGranularity};
+pub use read::pump_read;
 
 mod write;
 pub use write::{pump_finish, pump_flush, pump_write};

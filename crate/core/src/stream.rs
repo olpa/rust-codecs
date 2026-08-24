@@ -282,15 +282,13 @@ impl<C: EndCapableCodec> Pump<C> {
     ///
     /// This is the single-step primitive `transfer_from` loops on, and
     /// is also driven directly by
-    /// [`crate::sources_and_sinks::shared_io::pump_read`] under
-    /// [`crate::sources_and_sinks::shared_io::ReadGranularity::SingleRead`],
-    /// so a `Read::read` call returns as soon as the wrapped source's
-    /// own read produced anything, instead of coalescing multiple
-    /// source reads into one call. That's the interactive-application
-    /// case `SingleRead` exists for: a handler downstream of the
-    /// `Read` should see each unit of input as soon as it arrives,
-    /// not only once enough of them have piled up to fill some
-    /// buffer it can't see into.
+    /// [`crate::sources_and_sinks::shared_io::pump_read`], so a
+    /// `Read::read` call returns as soon as the wrapped source's own
+    /// read produced anything, instead of coalescing multiple source
+    /// reads into one call. That's the interactive-application case
+    /// this exists for: a handler downstream of the `Read` should see
+    /// each unit of input as soon as it arrives, not only once enough
+    /// of them have piled up to fill some buffer it can't see into.
     ///
     /// Same stall/error handling as `transfer_from`'s loop body: a call
     /// that moves zero bytes on both sides without ending the stream is

@@ -5,7 +5,5 @@
 mod adapter;
 mod wrapper;
 
-pub use adapter::{EmbeddedSink, EmbeddedSource};
-pub use wrapper::{CodecReader, CodecWriter, EmbeddedError};
-
-pub use crate::sources_and_sinks::shared_io::ReadGranularity;
+pub use adapter::{BufReadSource, EmbeddedSink, EmbeddedSource};
+pub use wrapper::{BufReadCodecReader, CodecReader, CodecWriter, EmbeddedError};

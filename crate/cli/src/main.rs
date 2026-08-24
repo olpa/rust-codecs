@@ -13,9 +13,7 @@
 
 use std::io::{self, Read, Write};
 
-use rust_codecs_core::sources_and_sinks::std_io::{
-    CodecReader, CodecWriter, ReadGranularity, StdSink, StdSource,
-};
+use rust_codecs_core::sources_and_sinks::std_io::{CodecReader, CodecWriter, StdSink, StdSource};
 use rust_codecs_core::{stream_to_stream, Chain, Codec};
 
 /// Staging buffer size for each link in a `--readers`/`--writers` chain.
@@ -56,7 +54,7 @@ Test harness for chaining codecs: folds --readers into one Chain and
 the writers, to stdout.
 
 Usage:
-  cargo run -p cli -- [--engine copy|stream] [--granularity fill-buffer|single-read] [--readers CODEC...] [--writers CODEC...]
+  cargo run -p cli -- [--engine copy|stream] [--readers CODEC...] [--writers CODEC...]
 
 Codecs: {names}
 
@@ -64,19 +62,10 @@ Codecs: {names}
 wraps the chain in CodecReader/CodecWriter and drives it with
 std::io::copy; `stream` drives the same chain directly via
 stream_to_stream over StdSource/StdSink, with no Read/Write adapter
-in between.
-
---granularity only affects --engine copy (CodecReader always reads at
-ReadGranularity::FillBuffer under --engine stream's stream_to_stream
-path, which reacts immediately regardless). `fill-buffer` (default)
-keeps std::io::copy's read() calls filling its whole internal buffer
-before returning, which can stall an interactive pipe (e.g. a
-terminal) waiting for enough input to arrive. `single-read` is the
-interactive-application setting: read() returns as soon as one pull
-from the wrapped reader made progress, so a handler downstream (here,
-stdout) sees each unit of input — e.g. a typed terminal line — as
-soon as possible, instead of only once enough of them have piled up
-to fill std::io::copy's buffer.
+in between. CodecReader's read() always returns as soon as one pull
+from the wrapped reader made progress, instead of chasing a full
+buffer — so it never stalls an interactive pipe (e.g. a terminal)
+waiting for enough input to fill std::io::copy's buffer.
 
 Reader codecs apply in the order listed (first listed runs on the raw
 bytes first). Writer codecs also apply in the order listed (first
@@ -123,10 +112,9 @@ enum Engine {
 
 fn parse_args(
     args: impl Iterator<Item = String>,
-) -> Result<(Engine, ReadGranularity, Vec<String>, Vec<String>), String> {
+) -> Result<(Engine, Vec<String>, Vec<String>), String> {
     let mut mode = Mode::None;
     let mut engine = Engine::Copy;
-    let mut granularity = ReadGranularity::FillBuffer;
     let mut readers = Vec::new();
     let mut writers = Vec::new();
     let mut args = args.peekable();
@@ -146,20 +134,6 @@ fn parse_args(
                     }
                 };
             }
-            "--granularity" => {
-                let value = args.next().ok_or_else(|| {
-                    "--granularity requires a value (fill-buffer or single-read)".to_string()
-                })?;
-                granularity = match value.as_str() {
-                    "fill-buffer" => ReadGranularity::FillBuffer,
-                    "single-read" => ReadGranularity::SingleRead,
-                    other => {
-                        return Err(format!(
-                            "unknown granularity {other:?} (expected fill-buffer or single-read)"
-                        ))
-                    }
-                };
-            }
             "--readers" => mode = Mode::Readers,
             "--writers" => mode = Mode::Writers,
             _ => match mode {
@@ -173,7 +147,7 @@ fn parse_args(
             },
         }
     }
-    Ok((engine, granularity, readers, writers))
+    Ok((engine, readers, writers))
 }
 
 /// Fold `names` into a single `Codec`, first name applied first, closest
@@ -192,15 +166,13 @@ fn compose(names: &[String]) -> Result<Box<dyn Codec>, String> {
 fn run_io<R: Read, W: Write>(
     reader_names: &[String],
     writer_names: &[String],
-    granularity: ReadGranularity,
     input: R,
     output: W,
 ) -> Result<W, String> {
     let reader_codec = compose(reader_names)?;
     let writer_codec = compose(writer_names)?;
 
-    let mut reader = CodecReader::new(input, reader_codec, vec![0u8; STAGING])
-        .with_read_granularity(granularity);
+    let mut reader = CodecReader::new(input, reader_codec, vec![0u8; STAGING]);
     let mut writer = CodecWriter::new(output, writer_codec, vec![0u8; STAGING]);
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
@@ -231,16 +203,10 @@ fn run_io_stream<R: Read, W: Write>(
 }
 
 fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let (engine, granularity, reader_names, writer_names) = parse_args(args)?;
+    let (engine, reader_names, writer_names) = parse_args(args)?;
     match engine {
         Engine::Copy => {
-            run_io(
-                &reader_names,
-                &writer_names,
-                granularity,
-                io::stdin(),
-                io::stdout(),
-            )?;
+            run_io(&reader_names, &writer_names, io::stdin(), io::stdout())?;
         }
         Engine::Stream => {
             run_io_stream(&reader_names, &writer_names, io::stdin(), io::stdout())?;
@@ -298,8 +264,6 @@ mod tests {
     use rust_codecs_core::sources_and_sinks::vec::{VecSink, VecSource};
     use rust_codecs_core::stream_to_stream;
 
-    use rust_codecs_core::sources_and_sinks::std_io::ReadGranularity;
-
     use super::{compose, parse_args, run_io, run_io_stream, Engine};
 
     fn collect(codec: impl rust_codecs_core::Codec, bytes: &[u8]) -> Vec<u8> {
@@ -326,7 +290,6 @@ mod tests {
         let output = run_io(
             &reader_names,
             &writer_names,
-            ReadGranularity::FillBuffer,
             Cursor::new(input.to_vec()),
             Vec::new(),
         )
@@ -349,7 +312,6 @@ mod tests {
         let copy_output = run_io(
             &reader_names,
             &writer_names,
-            ReadGranularity::FillBuffer,
             Cursor::new(input.to_vec()),
             Vec::new(),
         )
@@ -366,66 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn single_read_granularity_matches_fill_buffer() {
-        // The granularity only changes how many `read()` calls it
-        // takes to move the bytes through, not the bytes themselves.
-        let reader_names = names(&["identity", "identity", "rot13"]);
-        let writer_names = names(&["rot13", "rot13", "identity"]);
-        let input = b"hello, world";
-
-        let fill_buffer_output = run_io(
-            &reader_names,
-            &writer_names,
-            ReadGranularity::FillBuffer,
-            Cursor::new(input.to_vec()),
-            Vec::new(),
-        )
-        .unwrap();
-        let single_read_output = run_io(
-            &reader_names,
-            &writer_names,
-            ReadGranularity::SingleRead,
-            Cursor::new(input.to_vec()),
-            Vec::new(),
-        )
-        .unwrap();
-
-        assert_eq!(single_read_output, fill_buffer_output);
-    }
-
-    #[test]
     fn parse_args_reads_engine_flag() {
-        let (engine, _, readers, writers) =
+        let (engine, readers, writers) =
             parse_args(names(&["--engine", "stream", "--readers", "rot13"]).into_iter()).unwrap();
         assert_eq!(engine, Engine::Stream);
         assert_eq!(readers, names(&["rot13"]));
         assert!(writers.is_empty());
 
-        let (engine, _, _, _) = parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
+        let (engine, _, _) = parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
         assert_eq!(engine, Engine::Copy);
-    }
-
-    #[test]
-    fn parse_args_reads_granularity_flag() {
-        let (_, granularity, _, _) =
-            parse_args(names(&["--granularity", "single-read", "--readers", "rot13"]).into_iter())
-                .unwrap();
-        assert_eq!(granularity, ReadGranularity::SingleRead);
-
-        let (_, granularity, _, _) =
-            parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
-        assert_eq!(granularity, ReadGranularity::FillBuffer);
     }
 
     #[test]
     fn parse_args_rejects_unknown_engine() {
         let err = parse_args(names(&["--engine", "bogus"]).into_iter()).unwrap_err();
-        assert!(err.contains("bogus"));
-    }
-
-    #[test]
-    fn parse_args_rejects_unknown_granularity() {
-        let err = parse_args(names(&["--granularity", "bogus"]).into_iter()).unwrap_err();
         assert!(err.contains("bogus"));
     }
 

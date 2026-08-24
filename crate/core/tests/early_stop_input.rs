@@ -412,7 +412,6 @@ impl<I: Source, C: EndCapableCodec, const N: usize> Source for CodecSource<I, C,
                 &mut self.pump,
                 &mut self.inner,
                 &mut self.buf,
-                rust_codecs_core::sources_and_sinks::shared_io::ReadGranularity::FillBuffer,
             )?;
             self.pos = 0;
         }

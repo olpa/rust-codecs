@@ -12,9 +12,9 @@
 //! trait impl over [`RecordingWriter`] and [`CountingReader`], since
 //! that's the one thing that's actually backend-specific.
 
-use crate::{Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error};
 #[cfg(feature = "alloc")]
 use crate::{Codec, Progress};
+use crate::{Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error};
 
 /// An [`EndCapableCodec`] that copies bytes 1:1 but ends its stream
 /// after `limit` bytes, like a self-describing format with an in-band

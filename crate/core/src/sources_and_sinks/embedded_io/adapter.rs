@@ -1,4 +1,4 @@
-use embedded_io::{Read, Write};
+use embedded_io::{BufRead, Read, Write};
 
 use crate::{Sink, Source};
 
@@ -78,6 +78,60 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
     }
 }
 
+/// An `embedded_io::BufRead` used directly as an input stream, with no
+/// scratch buffer of its own.
+///
+/// Unlike [`EmbeddedSource`], which owns a buffer and calls
+/// `Read::read` into it, this forwards straight to `fill_buf`/`consume`
+/// — `BufRead` is already a lending API with the same shape as
+/// [`Source`], so a reader that already implements it can be adapted
+/// with no extra copy.
+pub struct BufReadSource<R> {
+    inner: R,
+}
+
+impl<R: BufRead> BufReadSource<R> {
+    pub fn new(inner: R) -> Self {
+        Self { inner }
+    }
+
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
+    /// Return the wrapped reader. Unlike `EmbeddedSource::into_inner`,
+    /// nothing is lost: `BufReadSource` owns no scratch buffer of its
+    /// own, so any bytes `R` was still holding come back with it.
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: BufRead> Source for BufReadSource<R> {
+    type Error = R::Error;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        // There is a borrow-checker limitation that doesn't allow
+        // returning the buffer from the `match`. The solution is to
+        // call `fill_buf` a second time. That second call doesn't
+        // trigger a read: after a non-empty `fill_buf`, the buffer
+        // stays available until `consume` is called, so it just
+        // re-borrows the same still-unconsumed window.
+        if self.inner.fill_buf()?.is_empty() {
+            return Ok(None);
+        }
+        self.inner.fill_buf().map(Some)
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.inner.consume(amount);
+    }
+}
+
 /// A `Sink` over `embedded_io::Write`, staging writes in an owned
 /// scratch buffer.
 pub struct EmbeddedSink<W, S> {
@@ -154,7 +208,7 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
 mod tests {
     use embedded_io::{ErrorType, Read, Write};
 
-    use super::{EmbeddedSink, EmbeddedSource};
+    use super::{BufReadSource, EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
     use crate::sources_and_sinks::shared_io::test_support::{CountingReader, RecordingWriter};
     use crate::stream_to_stream;
@@ -298,5 +352,21 @@ mod tests {
             32 - output.into_inner().len()
         };
         assert_eq!(&bytes[..written], b"embedded to embedded");
+    }
+
+    #[test]
+    fn buf_read_source_forwards_to_fill_buf() {
+        let mut input = BufReadSource::new(&b"hello"[..]);
+        assert_eq!(input.chunk().unwrap(), Some(b"hello".as_slice()));
+        input.consume(5);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn buf_read_source_leaves_unconsumed_remainder_visible() {
+        let mut input = BufReadSource::new(&b"abcdef"[..]);
+        assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
     }
 }

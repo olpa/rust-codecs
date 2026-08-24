@@ -3,15 +3,13 @@
 
 use core::fmt;
 
-use embedded_io::{ErrorType, Read, Write};
+use embedded_io::{BufRead, ErrorType, Read, Write};
 
-use crate::sources_and_sinks::shared_io::{
-    pump_finish, pump_flush, pump_read, pump_write, ReadGranularity,
-};
+use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
 use crate::stream::Pump;
 use crate::{Codec, DriveError, EndCapableCodec, Error, ErrorKind};
 
-use super::adapter::{EmbeddedSink, EmbeddedSource};
+use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource};
 
 /// An endpoint error or a codec error from an embedded I/O wrapper.
 #[derive(Debug)]
@@ -63,12 +61,10 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: EmbeddedSource<R, S>,
     pump: Pump<C>,
-    granularity: ReadGranularity,
 }
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
-    /// Build a `CodecReader`. Reads at [`ReadGranularity::FillBuffer`]
-    /// until changed via [`CodecReader::with_read_granularity`].
+    /// Build a `CodecReader`.
     ///
     /// # Panics
     ///
@@ -79,16 +75,7 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         Self {
             input: EmbeddedSource::new(inner, inbuf),
             pump: Pump::new(codec),
-            granularity: ReadGranularity::default(),
         }
-    }
-
-    /// Set how much a single `read()` call pulls from the wrapped
-    /// reader before returning — see [`ReadGranularity`]. Chainable,
-    /// so it composes with `CodecReader::new`.
-    pub fn with_read_granularity(mut self, granularity: ReadGranularity) -> Self {
-        self.granularity = granularity;
-        self
     }
 
     /// Unwrap this reader, discarding the codec, and return the
@@ -139,7 +126,73 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        pump_read(&mut self.pump, &mut self.input, buf, self.granularity).map_err(reader_error)
+        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+    }
+}
+
+/// Like [`CodecReader`], but for an `R` that already implements
+/// `embedded_io::BufRead` — no caller-provided scratch buffer, since
+/// [`BufReadSource`] lends straight out of `R`'s own buffer instead of
+/// copying into one of its own. Same end-of-stream behavior as
+/// `CodecReader`.
+pub struct BufReadCodecReader<R, C: EndCapableCodec> {
+    input: BufReadSource<R>,
+    pump: Pump<C>,
+}
+
+impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
+    /// Build a `BufReadCodecReader`.
+    pub fn new(inner: R, codec: C) -> Self {
+        Self {
+            input: BufReadSource::new(inner),
+            pump: Pump::new(codec),
+        }
+    }
+
+    /// Unwrap this reader, discarding the codec, and return the wrapped
+    /// reader. Any bytes already buffered by `inner` but not yet
+    /// yielded to the caller are still there — unlike `CodecReader`,
+    /// nothing was copied out of `inner`'s own buffer.
+    pub fn into_inner(self) -> R {
+        self.input.into_inner()
+    }
+
+    /// Reclaim the reader and the codec — e.g. to read state the codec
+    /// holds (a checksum, a digest). Same caveat as `into_inner`.
+    pub fn into_parts(self) -> (R, C) {
+        (self.input.into_inner(), self.pump.into_inner())
+    }
+
+    /// Direct access to the wrapped reader, bypassing the codec.
+    pub fn get_ref(&self) -> &R {
+        self.input.get_ref()
+    }
+
+    /// Mutable counterpart to [`BufReadCodecReader::get_ref`].
+    pub fn get_mut(&mut self) -> &mut R {
+        self.input.get_mut()
+    }
+
+    /// Direct access to the codec — e.g. to read state a
+    /// `EndCapableCodec` call doesn't expose (a checksum, a digest)
+    /// once its stream has ended in-band.
+    pub fn codec_ref(&self) -> &C {
+        self.pump.get_ref()
+    }
+
+    /// Mutable counterpart to [`BufReadCodecReader::codec_ref`].
+    pub fn codec_mut(&mut self) -> &mut C {
+        self.pump.get_mut()
+    }
+}
+
+impl<R: BufRead, C: EndCapableCodec> ErrorType for BufReadCodecReader<R, C> {
+    type Error = EmbeddedError<R::Error>;
+}
+
+impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
     }
 }
 
@@ -241,7 +294,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 mod tests {
     use embedded_io::{Read, Write};
 
-    use super::{CodecReader, CodecWriter, EmbeddedError};
+    use super::{BufReadCodecReader, CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
     use crate::sources_and_sinks::shared_io::test_support::EarlyEnd;
     #[cfg(feature = "alloc")]
@@ -322,6 +375,41 @@ mod tests {
             EarlyEnd { limit: 3, done: 0 },
             [0u8; 8],
         );
+        let mut out = [0u8; 8];
+        let mut pos = 0;
+        loop {
+            let n = reader.read(&mut out[pos..]).unwrap();
+            if n == 0 {
+                break;
+            }
+            pos += n;
+        }
+        assert_eq!(&out[..pos], b"Hel");
+    }
+
+    #[test]
+    fn buf_read_codec_reader_needs_no_scratch_buffer() {
+        let mut reader = BufReadCodecReader::new(INPUT, identity());
+        let mut output = [0u8; INPUT.len()];
+        let mut pos = 0;
+        while pos < output.len() {
+            let read = reader.read(&mut output[pos..]).unwrap();
+            if read == 0 {
+                break;
+            }
+            pos += read;
+        }
+        assert_eq!(pos, INPUT.len());
+        assert_eq!(&output, INPUT);
+    }
+
+    #[test]
+    fn buf_read_codec_reader_stops_at_in_band_end() {
+        // Same latching behavior as `CodecReader`, but through the
+        // no-scratch-buffer `BufReadCodecReader` path — its own doc
+        // claims "same end-of-stream behavior as `CodecReader`".
+        let mut reader =
+            BufReadCodecReader::new(b"Hello World".as_slice(), EarlyEnd { limit: 3, done: 0 });
         let mut out = [0u8; 8];
         let mut pos = 0;
         loop {
