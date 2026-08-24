@@ -9,7 +9,6 @@ pub struct EmbeddedSource<R, S> {
     buffer: S,
     pos: usize,
     len: usize,
-    eof: bool,
 }
 
 impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
@@ -29,7 +28,6 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
             buffer,
             pos: 0,
             len: 0,
-            eof: false,
         }
     }
 
@@ -62,12 +60,9 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
     type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        // Only refills once the current window is fully consumed; an
-        // unconsumed remainder overlaps the previous call's chunk.
-        if self.pos == self.len && !self.eof {
+        if self.pos == self.len {
             self.len = self.inner.read(self.buffer.as_mut())?;
             self.pos = 0;
-            self.eof = self.len == 0;
         }
         if self.pos < self.len {
             let unconsumed = &self.buffer.as_mut()[self.pos..self.len];

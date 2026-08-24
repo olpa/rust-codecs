@@ -4,6 +4,19 @@ How to add a `Source`/`Sink` adapter for a new byte transport, in your
 own crate, against `rust-codecs-core`'s public API — the same shape as
 this crate's own `std_io`/`embedded_io` backends.
 
+Note what this crate's own backends deliberately don't do: `StdSource`/
+`EmbeddedSource`/`BufReadSource` never cache "the wrapped reader once
+returned nothing" — they just re-attempt the read on the very next
+`chunk()` call, with no memory of the last one. That's what lets one of
+these be handed a transport whose "nothing right now" isn't forever (a
+growing file, a pipe) and have it pick up later bytes on its own,
+instead of latching itself shut the first time it sees an empty read —
+at the cost of one real I/O attempt per `chunk()` call for as long as
+the transport stays empty. A backend for a transport with a genuine,
+final EOF (and no reason to expect more bytes ever) is free to cache
+that instead and skip the repeated attempts — the trait doesn't require
+either choice.
+
 ## Implement `Source`/`Sink` for your transport
 
 ```rust

@@ -9,7 +9,6 @@ pub struct StdSource<R, S> {
     buffer: S,
     pos: usize,
     len: usize,
-    eof: bool,
 }
 
 impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
@@ -29,7 +28,6 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
             buffer,
             pos: 0,
             len: 0,
-            eof: false,
         }
     }
 
@@ -62,12 +60,7 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
     type Error = std::io::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        // Only refills once the current window is fully consumed; an
-        // unconsumed remainder overlaps the previous call's chunk.
-        if self.pos == self.len && !self.eof {
-            // `Read::read` doesn't retry `Interrupted` itself (unlike
-            // `write_all`'s default impl), so a signal landing mid-read
-            // must be retried here — matching `std::io::copy`.
+        if self.pos == self.len {
             self.len = loop {
                 match self.inner.read(self.buffer.as_mut()) {
                     Ok(n) => break n,
@@ -76,7 +69,6 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
                 }
             };
             self.pos = 0;
-            self.eof = self.len == 0;
         }
         if self.pos < self.len {
             let unconsumed = &self.buffer.as_mut()[self.pos..self.len];
@@ -105,12 +97,11 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
 /// of `StdSource` minus the double allocation.
 pub struct BufReadSource<R> {
     inner: R,
-    eof: bool,
 }
 
 impl<R: BufRead> BufReadSource<R> {
     pub fn new(inner: R) -> Self {
-        Self { inner, eof: false }
+        Self { inner }
     }
 
     pub fn get_ref(&self) -> &R {
@@ -133,24 +124,12 @@ impl<R: BufRead> Source for BufReadSource<R> {
     type Error = std::io::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        // Once a fill has come back empty, latch it: `Pump` calls
-        // `chunk()` again on every subsequent driver call for as long as
-        // the caller keeps asking (a plain `Codec` never reports an
-        // in-band `End`, so nothing else stops that), and re-running
-        // `fill_buf` on an already-exhausted reader would re-enter its
-        // real-I/O path on every one of those calls — an unbounded
-        // stream of pointless syscalls on a `BufReader<File>` or
-        // `BufReader<TcpStream>`. `StdSource` avoids this the same way.
-        if self.eof {
-            return Ok(None);
-        }
-
         // `fill_buf` already returns the current unconsumed window
-        // without over-reading, and an empty result means EOF — the
-        // same contract `Source::chunk` asks for, so no bookkeeping of
-        // our own is needed beyond the latch above. It also doesn't
-        // retry `Interrupted` itself, so a signal landing mid-fill must
-        // be retried here — matching `std::io::copy`.
+        // without over-reading, and an empty result means "nothing
+        // available this call" — the same contract `Source::chunk`
+        // asks for. It also doesn't retry `Interrupted` itself, so a
+        // signal landing mid-fill must be retried here — matching
+        // `std::io::copy`.
         //
         // The retry loop can't return the borrowed slice directly from
         // within its own `match` (returning a borrow across a `continue`
@@ -161,8 +140,8 @@ impl<R: BufRead> Source for BufReadSource<R> {
         // that many unconsumed bytes (nothing else touched `self.inner`
         // in between), so `fill_buf` takes its no-I/O fast path and
         // can't itself need retrying. Skipping it on `len == 0` avoids
-        // triggering a second, unguarded real read on the EOF/boundary
-        // case — one that could hit its own `Interrupted` and propagate
+        // triggering a second, unguarded real read on the empty case —
+        // one that could hit its own `Interrupted` and propagate
         // unretried, undoing the fix above.
         let len = loop {
             match self.inner.fill_buf() {
@@ -172,7 +151,6 @@ impl<R: BufRead> Source for BufReadSource<R> {
             }
         };
         if len == 0 {
-            self.eof = true;
             return Ok(None);
         }
         let buf = self.inner.fill_buf()?;
@@ -380,15 +358,15 @@ mod tests {
         assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
     }
 
-    /// Yields `b"hi"`, then a genuine EOF (`Ok(0)`), then errors with
-    /// `Interrupted` on any further call — standing in for the second,
-    /// unguarded `fill_buf` call `chunk` must never make once it has
-    /// already seen a zero-length fill.
-    struct EofThenPoisoned {
+    /// Yields `b"hi"`, then an empty read, then `b"more"` — stands in
+    /// for a transport whose "nothing right now" isn't forever (a
+    /// growing file, a pipe), proving `chunk()` doesn't latch itself
+    /// shut after a single empty fill.
+    struct GrowsAfterAnEmptyRead {
         calls: usize,
     }
 
-    impl Read for EofThenPoisoned {
+    impl Read for GrowsAfterAnEmptyRead {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.calls += 1;
             match self.calls {
@@ -397,32 +375,22 @@ mod tests {
                     Ok(2)
                 }
                 2 => Ok(0),
-                _ => Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "chunk() must not fill_buf again after a zero-length fill",
-                )),
+                3 => {
+                    buf[..4].copy_from_slice(b"more");
+                    Ok(4)
+                }
+                _ => Ok(0),
             }
         }
     }
 
     #[test]
-    fn buf_read_source_does_not_refill_after_a_zero_length_fill() {
-        let mut input = BufReadSource::new(BufReader::new(EofThenPoisoned { calls: 0 }));
+    fn buf_read_source_revisits_the_wrapped_reader_after_an_empty_fill() {
+        let mut input = BufReadSource::new(BufReader::new(GrowsAfterAnEmptyRead { calls: 0 }));
         assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
         input.consume(2);
         assert_eq!(input.chunk().unwrap(), None);
-    }
-
-    #[test]
-    fn buf_read_source_latches_eof_across_repeated_chunk_calls() {
-        let mut input = BufReadSource::new(BufReader::new(EofThenPoisoned { calls: 0 }));
-        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
-        input.consume(2);
-        assert_eq!(input.chunk().unwrap(), None);
-        // A third call to the wrapped reader would return `Interrupted`;
-        // the `eof` latch must keep it from ever being made.
-        assert_eq!(input.chunk().unwrap(), None);
-        assert_eq!(input.chunk().unwrap(), None);
+        assert_eq!(input.chunk().unwrap(), Some(b"more".as_slice()));
     }
 
     #[test]
