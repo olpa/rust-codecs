@@ -78,7 +78,12 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
             self.pos = 0;
             self.eof = self.len == 0;
         }
-        Ok((self.pos < self.len).then_some(&self.buffer.as_mut()[self.pos..self.len]))
+        if self.pos < self.len {
+            let unconsumed = &self.buffer.as_mut()[self.pos..self.len];
+            Ok(Some(unconsumed))
+        } else {
+            Ok(None)
+        }
     }
 
     fn consume(&mut self, amount: usize) {
