@@ -333,7 +333,7 @@ mod tests {
 
     use super::{BufReadCodecReader, CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::{Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, Progress};
+    use crate::sources_and_sinks::shared_io::test_support::{EarlyEnd, Hoarder};
 
     #[test]
     fn buf_read_codec_reader_needs_no_scratch_buffer() {
@@ -367,44 +367,6 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
     }
 
-    /// Buffers all input internally, emitting only on `flush`/`finish`
-    /// — exercises the "flush is a resumable sync point, finish ends
-    /// the stream" distinction `CodecWriter`'s docs draw.
-    #[derive(Default)]
-    struct Hoarder {
-        buf: Vec<u8>,
-    }
-
-    impl Hoarder {
-        fn emit(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-            let n = self.buf.len().min(output.len());
-            output[..n].copy_from_slice(&self.buf[..n]);
-            self.buf.drain(..n);
-            if self.buf.is_empty() {
-                Ok(Drain::Done { written: n })
-            } else {
-                Ok(Drain::OutputFilled)
-            }
-        }
-    }
-
-    impl DrainCodec for Hoarder {
-        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-            self.emit(output)
-        }
-
-        fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-            self.emit(output)
-        }
-    }
-
-    impl Codec for Hoarder {
-        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
-            self.buf.extend_from_slice(input);
-            Ok(Progress::InputConsumed { written: 0 })
-        }
-    }
-
     #[test]
     fn flush_does_not_end_the_stream() {
         let mut writer = CodecWriter::new(Vec::new(), Hoarder::default(), vec![0u8; 64]);
@@ -413,46 +375,6 @@ mod tests {
         writer.write_all(b"second").unwrap();
         let out = writer.finish().unwrap();
         assert_eq!(out, b"firstsecond");
-    }
-
-    /// Copies bytes 1:1 but ends its stream after `limit` bytes, like
-    /// a self-describing format with an in-band terminator. A genuine
-    /// `EndCapableCodec` (not `Codec` — a `Codec` can never report an
-    /// in-band end), so only `CodecReader` (bound to `EndCapableCodec`)
-    /// can drive it; `CodecWriter` is bound to `Codec` and rejects it
-    /// at compile time.
-    struct EarlyEnd {
-        limit: usize,
-        done: usize,
-    }
-
-    impl DrainCodec for EarlyEnd {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-    }
-
-    impl EndCapableCodec for EarlyEnd {
-        fn process(
-            &mut self,
-            input: &[u8],
-            output: &mut [u8],
-        ) -> Result<EndCapableProgress, Error> {
-            let remaining = self.limit - self.done;
-            let n = input.len().min(output.len()).min(remaining);
-            output[..n].copy_from_slice(&input[..n]);
-            self.done += n;
-            if self.done >= self.limit {
-                Ok(EndCapableProgress::End {
-                    consumed: n,
-                    written: n,
-                })
-            } else if n == input.len() {
-                Ok(EndCapableProgress::InputConsumed { written: n })
-            } else {
-                Ok(EndCapableProgress::OutputFilled { consumed: n })
-            }
-        }
     }
 
     #[test]

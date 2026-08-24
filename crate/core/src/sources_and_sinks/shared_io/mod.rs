@@ -19,3 +19,13 @@ pub use read::{pump_read, ReadGranularity};
 
 mod write;
 pub use write::{pump_finish, pump_flush, pump_write};
+
+/// Test doubles for exercising a `Source`/`Sink` backend built on top
+/// of this module — a codec that ends its stream in-band, one that
+/// buffers everything until `flush`/`finish`, and readers/writers that
+/// record how often they were called. `std_io`'s and `embedded_io`'s
+/// own test suites use these; a third-party backend can too, via the
+/// `test-support` feature, rather than reimplementing the same doubles
+/// for its own tests.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;

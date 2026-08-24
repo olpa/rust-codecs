@@ -16,6 +16,9 @@ rot13 = []
 base64 = ["dep:base64"]
 json = ["dep:json-escape"]
 embedded-io = ["dep:embedded-io"]
+# Exposes `sources_and_sinks::shared_io::test_support` outside this
+# crate, for a third-party `Source`/`Sink` backend's own test suite.
+test-support = []
 
 [lib]
 name = "rust_codecs_core"

@@ -257,17 +257,9 @@ mod tests {
 
     use super::{BufReadSource, StdSink, StdSource};
     use crate::identity::identity;
+    use crate::sources_and_sinks::shared_io::test_support::{CountingReader, RecordingWriter};
     use crate::stream_to_stream;
     use crate::{Sink, Source};
-
-    /// Wraps a `Read`, counting how many times `read` was actually
-    /// called on it — lets a test prove `chunk()` didn't refill ahead
-    /// of `pos` (the `Source` contract point that new bytes must not
-    /// be handed out until the old ones are released).
-    struct CountingReader<R> {
-        inner: R,
-        reads: usize,
-    }
 
     impl<R: Read> Read for CountingReader<R> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -457,12 +449,6 @@ mod tests {
         let mut output = StdSink::new(Vec::new(), [0u8; 4]);
         output.spare().unwrap();
         output.commit(5).unwrap();
-    }
-
-    /// Counts `flush` calls made on the wrapped writer, to prove
-    /// `Sink::finish` actually reaches it.
-    struct RecordingWriter {
-        flushes: usize,
     }
 
     impl Write for RecordingWriter {
