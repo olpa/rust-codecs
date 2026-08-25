@@ -1,4 +1,4 @@
-use embedded_io::{BufRead, Read, Write};
+use embedded_io::{BufRead, Error as _, ErrorKind, Read, Write};
 
 use crate::{Sink, Source};
 
@@ -61,7 +61,13 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         if self.pos == self.len {
-            self.len = self.inner.read(self.buffer.as_mut())?;
+            self.len = loop {
+                match self.inner.read(self.buffer.as_mut()) {
+                    Ok(n) => break n,
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            };
             self.pos = 0;
         }
         if self.pos < self.len {
@@ -116,14 +122,20 @@ impl<R: BufRead> Source for BufReadSource<R> {
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         // There is a borrow-checker limitation that doesn't allow
-        // returning the buffer from the `match`. The solution is to
-        // call `fill_buf` a second time. That second call doesn't
-        // trigger a read: after a non-empty `fill_buf`, the buffer
-        // stays available until `consume` is called, so it just
-        // re-borrows the same still-unconsumed window.
-        if self.inner.fill_buf()?.is_empty() {
-            return Ok(None);
+        // returning the buffer from the loop. The solution is to
+        // call `fill_buf` a second time.
+        // That second call doesn't trigger a read: after a non-empty
+        // `fill_buf`, the buffer stays available until `consume` is
+        // called, so it just re-borrows the same still-unconsumed window.
+        loop {
+            match self.inner.fill_buf() {
+                Ok([]) => return Ok(None),
+                Ok(_) => break,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
         }
+
         self.inner.fill_buf().map(Some)
     }
 
@@ -194,7 +206,14 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         assert!(amount <= self.offered);
-        self.inner.write_all(&self.buffer.as_mut()[..amount])?;
+        let mut pos = 0;
+        while pos < amount {
+            match self.inner.write(&self.buffer.as_mut()[pos..amount]) {
+                Ok(n) => pos += n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
         self.offered = 0;
         Ok(())
     }
@@ -206,7 +225,7 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
 
 #[cfg(test)]
 mod tests {
-    use embedded_io::{ErrorType, Read, Write};
+    use embedded_io::{BufRead, ErrorKind, ErrorType, Read, Write};
 
     use super::{BufReadSource, EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
@@ -223,6 +242,119 @@ mod tests {
             self.reads += 1;
             self.inner.read(buf)
         }
+    }
+
+    /// An error that's either a genuine `Interrupted` or a wrapped
+    /// inner error, so a test double can report `Interrupted` even
+    /// when its wrapped reader's own `Error` (e.g. `Infallible` for
+    /// `&[u8]`) can't express it.
+    #[derive(Debug)]
+    enum FlakyError<E> {
+        Interrupted,
+        Inner(E),
+    }
+
+    impl<E: core::fmt::Debug> core::fmt::Display for FlakyError<E> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "{self:?}")
+        }
+    }
+
+    impl<E: embedded_io::Error> core::error::Error for FlakyError<E> {}
+
+    impl<E: embedded_io::Error> embedded_io::Error for FlakyError<E> {
+        fn kind(&self) -> ErrorKind {
+            match self {
+                FlakyError::Interrupted => ErrorKind::Interrupted,
+                FlakyError::Inner(e) => e.kind(),
+            }
+        }
+    }
+
+    /// Fails its first `read`/`fill_buf`/`write` with `Interrupted`,
+    /// then delegates.
+    struct FlakyOnce<R> {
+        inner: R,
+        failed: bool,
+    }
+
+    impl<R: ErrorType> ErrorType for FlakyOnce<R> {
+        type Error = FlakyError<R::Error>;
+    }
+
+    impl<R: Read> Read for FlakyOnce<R> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(FlakyError::Interrupted);
+            }
+            self.inner.read(buf).map_err(FlakyError::Inner)
+        }
+    }
+
+    impl<R: BufRead> BufRead for FlakyOnce<R> {
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(FlakyError::Interrupted);
+            }
+            self.inner.fill_buf().map_err(FlakyError::Inner)
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.inner.consume(amt);
+        }
+    }
+
+    impl<W: Write> Write for FlakyOnce<W> {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(FlakyError::Interrupted);
+            }
+            self.inner.write(buf).map_err(FlakyError::Inner)
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.flush().map_err(FlakyError::Inner)
+        }
+    }
+
+    #[test]
+    fn chunk_retries_an_interrupted_read() {
+        let flaky = FlakyOnce {
+            inner: &b"retry me"[..],
+            failed: false,
+        };
+        let mut input = EmbeddedSource::new(flaky, [0u8; 8]);
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
+    }
+
+    #[test]
+    fn buf_read_source_retries_an_interrupted_fill() {
+        let flaky = FlakyOnce {
+            inner: &b"retry me too"[..],
+            failed: false,
+        };
+        let mut input = BufReadSource::new(flaky);
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
+    }
+
+    #[test]
+    fn commit_retries_an_interrupted_write() {
+        let mut bytes = [0u8; 32];
+        let flaky = FlakyOnce {
+            inner: &mut bytes[..],
+            failed: false,
+        };
+        let written = {
+            let mut output = EmbeddedSink::new(flaky, [0u8; 8]);
+            let spare = output.spare().unwrap().unwrap();
+            spare[..5].copy_from_slice(b"abcde");
+            output.commit(5).unwrap();
+            32 - output.into_inner().inner.len()
+        };
+        assert_eq!(&bytes[..written], b"abcde");
     }
 
     #[test]
