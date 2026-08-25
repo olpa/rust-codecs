@@ -6,7 +6,7 @@
 
 #![cfg(feature = "test-support")]
 
-use rust_codecs_core::sources_and_sinks::shared_io::pump_read;
+use rust_codecs_core::sources_and_sinks::shared_io::end_capable_pump_read;
 use rust_codecs_core::sources_and_sinks::shared_io::test_support::EarlyEnd;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::Pump;
@@ -19,7 +19,7 @@ fn early_end_latches_after_the_codec_ends_in_band() {
     let mut out = [0u8; 8];
     let mut pos = 0;
     loop {
-        let n = pump_read(&mut pump, &mut input, &mut out[pos..]).unwrap();
+        let n = end_capable_pump_read(&mut pump, &mut input, &mut out[pos..]).unwrap();
         if n == 0 {
             break;
         }

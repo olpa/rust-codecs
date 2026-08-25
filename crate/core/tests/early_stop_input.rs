@@ -378,7 +378,7 @@ fn tokenizes_a_string_array_literal_from_a_base64_decoded_two_byte_source() {
 
 /// Wraps a [`Source`] with a codec, decoding through an owned,
 /// fixed-size scratch buffer of `N` bytes — turning the codec's output
-/// into a `Source` in its own right. Built on [`Pump`]/`pump_read`,
+/// into a `Source` in its own right. Built on [`Pump`]/`end_capable_pump_read`,
 /// the same pieces `std_io`/`embedded_io`'s own `CodecReader` uses
 /// internally to do the equivalent for `std::io::Read`/
 /// `embedded_io::Read`; see `CREATING-IO-BACKENDS.md` for the general
@@ -408,7 +408,7 @@ impl<I: Source, C: EndCapableCodec, const N: usize> Source for CodecSource<I, C,
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         if self.pos == self.len {
-            self.len = rust_codecs_core::sources_and_sinks::shared_io::pump_read(
+            self.len = rust_codecs_core::sources_and_sinks::shared_io::end_capable_pump_read(
                 &mut self.pump,
                 &mut self.inner,
                 &mut self.buf,

@@ -1,6 +1,6 @@
 //! The [`Pump`](crate::Pump)-driving core behind `std_io`/`embedded_io`'s
 //! `CodecReader`/`CodecWriter`: one function per `Read`/`Write`
-//! operation (`pump_read`/`pump_write`/`pump_finish`/`pump_flush`),
+//! operation (`end_capable_pump_read`/`pump_write`/`pump_finish`/`pump_flush`),
 //! each combining a [`Pump`](crate::Pump) with a
 //! [`Source`](crate::Source)/[`Sink`](crate::Sink) for exactly one
 //! bounded call.
@@ -15,7 +15,7 @@
 //! error type.
 
 mod read;
-pub use read::pump_read;
+pub use read::end_capable_pump_read;
 
 mod write;
 pub use write::{pump_finish, pump_flush, pump_write};

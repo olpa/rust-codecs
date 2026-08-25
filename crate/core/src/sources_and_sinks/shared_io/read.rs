@@ -7,16 +7,19 @@ use crate::{DriveError, EndCapableCodec, Source};
 /// Drive `pump` against `input`, filling `buf` with transformed bytes —
 /// the transport-independent core of a `Read::read` impl, matching
 /// what `std_io`/`embedded_io`'s own `CodecReader` calls internally.
-/// Returns as soon as one pull from `input` yields output, instead of
-/// chasing a full `buf` — so `read()` never blocks past what a single
-/// pull from `input` already blocked on. A step that pulls input but
-/// produces no output yet (a codec buffering several input bytes
-/// before it can emit anything, e.g. `base64_dec`) doesn't count:
-/// looping past it is required to avoid `read()` returning `Ok(0)`
-/// before genuine end-of-stream, which callers would misread as EOF.
-/// Ends the codec's stream (running `finish`) once `input` reports
-/// exhaustion, so the caller never has to invoke `finish` itself.
-pub fn pump_read<I: Source, C: EndCapableCodec>(
+///
+/// - Returns as soon as one pull from `input` yields output, instead of
+///   chasing a full `buf` — so `read()` never blocks past what a
+///   single pull from `input` already blocked on.
+/// - Loops past a step that pulls input but produces no output yet (a
+///   codec buffering several input bytes before it can emit anything,
+///   e.g. `base64_dec`): counting that as a stopping point would make
+///   `read()` return `Ok(0)`, which callers would misread as EOF
+///   before the stream has genuinely ended.
+/// - Ends the codec's stream (running `finish`) once `input` reports
+///   exhaustion. It's an extra responsibility, but there is no good
+///   way to let the caller do so.
+pub fn end_capable_pump_read<I: Source, C: EndCapableCodec>(
     pump: &mut Pump<C>,
     input: &mut I,
     buf: &mut [u8],
@@ -49,7 +52,7 @@ pub fn pump_read<I: Source, C: EndCapableCodec>(
 
 /// `finish_to`'s error is `DriveError<Infallible, Infallible>` (its
 /// input side never runs and its output side is the same `SliceSink`
-/// as `transfer_from`'s); widen it to line up with `pump_read`'s
+/// as `transfer_from`'s); widen it to line up with `end_capable_pump_read`'s
 /// return type so both calls share one `?`-friendly error type.
 fn widen<T>(error: DriveError<Infallible, Infallible>) -> DriveError<T, Infallible> {
     match error {
@@ -64,88 +67,21 @@ fn widen<T>(error: DriveError<Infallible, Infallible>) -> DriveError<T, Infallib
 mod tests {
     use core::convert::Infallible;
 
-    use super::pump_read;
-    use crate::sources_and_sinks::slice::SliceSource;
+    use super::end_capable_pump_read;
+    use crate::identity::identity;
     use crate::{Codec, Drain, DrainCodec, Error, Progress, Pump, Source};
 
-    struct Trailer {
-        position: usize,
-    }
-
-    impl DrainCodec for Trailer {
-        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-            const BYTES: &[u8] = b"final";
-            let written = (BYTES.len() - self.position).min(output.len());
-            output[..written].copy_from_slice(&BYTES[self.position..self.position + written]);
-            self.position += written;
-            if self.position == BYTES.len() {
-                Ok(Drain::Done { written })
-            } else {
-                Ok(Drain::OutputFilled)
-            }
-        }
-    }
-
-    impl Codec for Trailer {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
-            Ok(Progress::InputConsumed { written: 0 })
-        }
-    }
-
-    #[test]
-    fn finalization_resumes_after_filling_each_read_buffer() {
-        let mut source = SliceSource::new(&[]);
-        let mut pump = Pump::new(Trailer { position: 0 });
-        let mut collected = [0; 5];
-        let mut position = 0;
-
-        while position < collected.len() {
-            let end = (position + 2).min(collected.len());
-            let written = pump_read(&mut pump, &mut source, &mut collected[position..end]).unwrap();
-            assert!(written > 0);
-            position += written;
-        }
-
-        assert_eq!(&collected, b"final");
-        assert_eq!(pump_read(&mut pump, &mut source, &mut [0; 2]).unwrap(), 0);
-    }
-
-    /// A byte-identical copy codec with no feature-gated dependency
-    /// (unlike `crate::identity::identity()`), so these tests don't
-    /// need the `identity` feature enabled.
-    struct PassThrough;
-
-    impl DrainCodec for PassThrough {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-    }
-
-    impl Codec for PassThrough {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-            let n = input.len().min(output.len());
-            output[..n].copy_from_slice(&input[..n]);
-            if n == input.len() {
-                Ok(Progress::InputConsumed { written: n })
-            } else {
-                Ok(Progress::OutputFilled { consumed: n })
-            }
-        }
-    }
-
-    /// A `Source` that never reveals more than `chunk_size` bytes from
-    /// one `chunk()` call, no matter how much of `bytes` remains —
-    /// stands in for a wrapped reader whose own `read()` returns in
-    /// bounded pieces (like a terminal line at a time), proving
-    /// `pump_read` returns after a single such pull instead of chasing
-    /// a full buffer.
-    struct LimitedChunkSource<'a> {
+    /// A `Source` over a byte slice, yielding it in fixed-size pulls
+    /// no matter how much of `bytes` remains — stands in for a wrapped
+    /// reader whose own `read()` returns in bounded pieces (like a
+    /// terminal line at a time).
+    struct ChunkedSource<'a> {
         bytes: &'a [u8],
         pos: usize,
         chunk_size: usize,
     }
 
-    impl Source for LimitedChunkSource<'_> {
+    impl Source for ChunkedSource<'_> {
         type Error = Infallible;
 
         fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
@@ -159,22 +95,129 @@ mod tests {
     }
 
     #[test]
-    fn single_read_returns_after_one_source_pull() {
-        // 9 bytes available in 3-byte pulls, into a buffer big enough
-        // for all of them: `pump_read` must return after the first
-        // pull alone, not chase a full buffer.
-        let mut source = LimitedChunkSource {
-            bytes: b"abcdefghi",
+    fn smoke_test() {
+        let mut source = ChunkedSource {
+            bytes: b"ok",
             pos: 0,
-            chunk_size: 3,
+            chunk_size: 1,
         };
-        let mut pump = Pump::new(PassThrough);
-        let mut buf = [0u8; 9];
+        let mut pump = Pump::new(identity());
+        let mut buf = [0u8; 8];
 
-        let written = pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        let mut read = || {
+            let n = end_capable_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            buf[..n].to_vec()
+        };
 
-        assert_eq!(written, 3);
-        assert_eq!(&buf[..3], b"abc");
-        assert_eq!(source.pos, 3);
+        assert_eq!(read(), b"o");
+        assert_eq!(read(), b"k");
+        assert_eq!(read(), b"");
+        assert_eq!(read(), b"");
+        assert_eq!(read(), b"");
+    }
+
+    /// Buffers one byte silently, then emits both held bytes together
+    /// on the next `process` call — stands in for a codec like
+    /// `base64_dec` that must consume several input bytes before it
+    /// can produce any output.
+    #[derive(Default)]
+    struct BuffersOneByte {
+        held: Option<u8>,
+    }
+
+    impl DrainCodec for BuffersOneByte {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    impl Codec for BuffersOneByte {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+            match self.held.take() {
+                None => {
+                    self.held = Some(input[0]);
+                    Ok(Progress::InputConsumed { written: 0 })
+                }
+                Some(held) => {
+                    output[0] = held;
+                    output[1] = input[0];
+                    Ok(Progress::InputConsumed { written: 2 })
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loops_past_a_step_that_consumes_input_but_writes_nothing_yet() {
+        let mut source = ChunkedSource {
+            bytes: b"ok",
+            pos: 0,
+            chunk_size: 1,
+        };
+        let mut pump = Pump::new(BuffersOneByte::default());
+        let mut buf = [0u8; 8];
+
+        let mut read = || {
+            let n = end_capable_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            buf[..n].to_vec()
+        };
+
+        // The first pull only consumes 'o' and writes nothing — a
+        // buggy `end_capable_pump_read` that stopped there would
+        // return `b""` here instead of looping to the next pull.
+        assert_eq!(read(), b"ok");
+        assert_eq!(read(), b"");
+        assert_eq!(read(), b"");
+    }
+
+    /// A codec with nothing to process, only a multi-byte trailer to
+    /// emit from `finish` — stands in for a format whose finalization
+    /// (a checksum, a footer) is bigger than one `read()` buffer.
+    struct EmitsTrailerOnFinish {
+        position: usize,
+    }
+
+    impl DrainCodec for EmitsTrailerOnFinish {
+        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            const TRAILER: &[u8] = b"final";
+            let n = (TRAILER.len() - self.position).min(output.len());
+            output[..n].copy_from_slice(&TRAILER[self.position..self.position + n]);
+            self.position += n;
+            if self.position == TRAILER.len() {
+                Ok(Drain::Done { written: n })
+            } else {
+                Ok(Drain::OutputFilled)
+            }
+        }
+    }
+
+    impl Codec for EmitsTrailerOnFinish {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+            Ok(Progress::InputConsumed { written: 0 })
+        }
+    }
+
+    #[test]
+    fn resumes_finishing_across_reads_when_the_trailer_overflows_the_buffer() {
+        use crate::sources_and_sinks::slice::SliceSource;
+
+        let mut source = SliceSource::new(b"");
+        let mut pump = Pump::new(EmitsTrailerOnFinish { position: 0 });
+        let mut buf = [0u8; 2];
+
+        let mut read = || {
+            let n = end_capable_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            buf[..n].to_vec()
+        };
+
+        // Each call hits `SinkExhausted` (the 2-byte buffer can't hold
+        // all of "final" at once) before the trailer is fully drained
+        // — the next `read` must pick up where the last one left off,
+        // not restart or skip ahead.
+        assert_eq!(read(), b"fi");
+        assert_eq!(read(), b"na");
+        assert_eq!(read(), b"l");
+        assert_eq!(read(), b"");
+        assert_eq!(read(), b"");
     }
 }

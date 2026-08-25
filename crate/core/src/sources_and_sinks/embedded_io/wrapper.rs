@@ -5,7 +5,9 @@ use core::fmt;
 
 use embedded_io::{BufRead, ErrorType, Read, Write};
 
-use crate::sources_and_sinks::shared_io::{pump_finish, pump_flush, pump_read, pump_write};
+use crate::sources_and_sinks::shared_io::{
+    end_capable_pump_read, pump_finish, pump_flush, pump_write,
+};
 use crate::stream::Pump;
 use crate::{Codec, DriveError, EndCapableCodec, Error, ErrorKind};
 
@@ -126,7 +128,7 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
     }
 }
 
@@ -192,7 +194,7 @@ impl<R: BufRead, C: EndCapableCodec> ErrorType for BufReadCodecReader<R, C> {
 
 impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
     }
 }
 

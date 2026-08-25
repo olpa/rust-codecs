@@ -10,13 +10,13 @@
 use core::convert::Infallible;
 
 use rust_codecs_core::rot13::rot13;
-use rust_codecs_core::sources_and_sinks::shared_io::pump_read;
+use rust_codecs_core::sources_and_sinks::shared_io::end_capable_pump_read;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::{DriveError, EndCapableCodec, Pump, Source};
 
 /// A minimal incremental reader, built the same way
 /// `std_io`/`embedded_io`'s `CodecReader` is: a `Source` plus a
-/// `Pump`, driven one bounded call at a time by `pump_read`.
+/// `Pump`, driven one bounded call at a time by `end_capable_pump_read`.
 struct MinimalReader<I: Source, C: EndCapableCodec> {
     input: I,
     pump: Pump<C>,
@@ -31,7 +31,7 @@ impl<I: Source, C: EndCapableCodec> MinimalReader<I, C> {
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, DriveError<I::Error, Infallible>> {
-        pump_read(&mut self.pump, &mut self.input, buf)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
     }
 }
 

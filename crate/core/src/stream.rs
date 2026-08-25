@@ -163,7 +163,7 @@ pub(crate) struct PumpDrainStep {
 /// crate's own `std_io`/`embedded_io` backends do: hold a `Pump<C>`
 /// alongside your adapter, and drive it with
 /// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io)'s
-/// `pump_read`/`pump_write`/`pump_finish`/`pump_flush` rather than
+/// `end_capable_pump_read`/`pump_write`/`pump_finish`/`pump_flush` rather than
 /// calling its own methods directly — those stay crate-private.
 ///
 /// `C` is generic, not fixed to `EndCapableCodec` itself, because a
@@ -199,7 +199,7 @@ impl<C: EndCapableCodec> Pump<C> {
         self.codec
     }
 
-    /// Lets a caller like `shared_io::pump_read` short-circuit to a
+    /// Lets a caller like `shared_io::end_capable_pump_read` short-circuit to a
     /// no-op once the stream has ended, instead of re-entering
     /// `transfer_from`/`finish_to` on every repeated call past EOF.
     pub(crate) fn is_done(&self) -> bool {
@@ -282,7 +282,7 @@ impl<C: EndCapableCodec> Pump<C> {
     ///
     /// This is the single-step primitive `transfer_from` loops on, and
     /// is also driven directly by
-    /// [`crate::sources_and_sinks::shared_io::pump_read`], so a
+    /// [`crate::sources_and_sinks::shared_io::end_capable_pump_read`], so a
     /// `Read::read` call returns as soon as the wrapped source's own
     /// read produced anything, instead of coalescing multiple source
     /// reads into one call. That's the interactive-application case

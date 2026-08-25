@@ -92,7 +92,7 @@ way `std_io::wrapper::CodecReader`/`CodecWriter` hold one next to
 ```rust
 use core::convert::Infallible;
 
-use rust_codecs_core::sources_and_sinks::shared_io::pump_read;
+use rust_codecs_core::sources_and_sinks::shared_io::end_capable_pump_read;
 use rust_codecs_core::{DriveError, Pump, Source, EndCapableCodec};
 
 struct YourReader<I: Source, C: EndCapableCodec> {
@@ -110,18 +110,18 @@ impl<I: Source, C: EndCapableCodec> YourReader<I, C> {
     // your error type at the boundary (see `reader_error` in
     // `std_io::wrapper`/`embedded_io::wrapper` for the pattern).
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, DriveError<I::Error, Infallible>> {
-        pump_read(&mut self.pump, &mut self.input, buf)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
     }
 }
 ```
 
-`shared_io` has one function per operation — `pump_read`, `pump_write`,
+`shared_io` has one function per operation — `end_capable_pump_read`, `pump_write`,
 `pump_finish`, `pump_flush` — each the whole body of the matching
 `Read`/`Write` method. Map their `DriveError` result into your own
 error type at the call site (`reader_error`/`writer_error` in
 `std_io::wrapper`/`embedded_io::wrapper` are the templates).
 
-`pump_read` returns as soon as one pull from `input` actually yields
+`end_capable_pump_read` returns as soon as one pull from `input` actually yields
 output, instead of chasing a full `buf` — the interactive-application
 behavior: a handler downstream of your reader sees each unit `input`
 produces (a terminal line, a network datagram) as soon as it arrives,
@@ -129,7 +129,7 @@ not only once enough of them have piled up to fill whatever buffer a
 caller driving your reader through something like `std::io::copy`
 happens to be using. A pull that consumes input but produces no output
 yet (a codec buffering several input bytes before it can emit
-anything) doesn't count as a stopping point: `pump_read` loops past
+anything) doesn't count as a stopping point: `end_capable_pump_read` loops past
 those, since returning `0` there would be indistinguishable from EOF
 to the caller.
 
