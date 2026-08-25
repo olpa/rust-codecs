@@ -33,6 +33,13 @@ pub use sink::{RetryingWrite, ScratchSink};
 mod source;
 pub use source::{LendingSource, RetryingFillBuf, RetryingRead, ScratchSource};
 
+/// The retry-on-interrupted loop a `RetryingRead`/`RetryingWrite` impl
+/// needs for a single `read`/`write` call — shared because that loop
+/// is identical across backends once each supplies its own
+/// "is this error interrupted" predicate.
+mod retry;
+pub use retry::{retry_fill_buf, retry_on_interrupted, retry_write_all};
+
 /// Test doubles for exercising a `Source`/`Sink` backend built on top
 /// of this module — a codec that ends its stream in-band, one that
 /// buffers everything until `flush`/`finish`, and readers/writers that

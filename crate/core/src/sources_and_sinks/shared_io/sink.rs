@@ -13,14 +13,16 @@ use crate::Sink;
 /// [`ScratchSink`] needs.
 ///
 /// `std::io::Write::write_all` already retries on `Interrupted`
-/// internally, so a `std::io` backend can delegate `write_all`
-/// straight through. `embedded_io::Write::write_all` doesn't, so an
-/// `embedded_io` backend's `write_all` must track its own write
-/// position and retry the remainder itself.
+/// internally, so a `std::io` backend could delegate `write_all`
+/// straight through; `embedded_io::Write::write_all` doesn't, so an
+/// `embedded_io` backend's `retrying_write_all` must track its own
+/// write position and retry the remainder itself. Both backends drive
+/// the same shared `retry_write_all` helper regardless, so `commit`
+/// below can trust this call already retries — hence the name.
 pub trait RetryingWrite {
     type Error;
 
-    fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error>;
+    fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error>;
 
     fn flush(&mut self) -> Result<(), Self::Error>;
 }
@@ -88,7 +90,7 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         assert!(amount <= self.offered);
-        self.inner.write_all(&self.buffer.as_mut()[..amount])?;
+        self.inner.retrying_write_all(&self.buffer.as_mut()[..amount])?;
         self.offered = 0;
         Ok(())
     }

@@ -20,7 +20,7 @@ pub trait RetryingRead {
     /// Read some bytes into `buf`, retrying on an interrupted call.
     /// `Ok(0)` means EOF, same as `std::io::Read::read`/
     /// `embedded_io::Read::read`.
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+    fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
 }
 
 /// A `Source` over any [`RetryingRead`], reading into an owned scratch
@@ -83,7 +83,7 @@ impl<R: RetryingRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         if self.pos == self.len {
-            self.len = self.inner.read(self.buffer.as_mut())?;
+            self.len = self.inner.retrying_read(self.buffer.as_mut())?;
             self.pos = 0;
         }
         if self.pos < self.len {
@@ -110,7 +110,7 @@ pub trait RetryingFillBuf {
     /// more data from the inner reader if it is empty, and retrying
     /// on an interrupted call. An empty slice means EOF, same as
     /// `std::io::BufRead::fill_buf`/`embedded_io::BufRead::fill_buf`.
-    fn fill_buf(&mut self) -> Result<&[u8], Self::Error>;
+    fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error>;
 
     /// Tell this buffer that `amount` bytes have been consumed.
     fn consume(&mut self, amount: usize);
@@ -121,7 +121,7 @@ pub trait RetryingFillBuf {
 /// / `embedded_io::BufReadSource`.
 ///
 /// Unlike [`ScratchSource`], which owns a buffer and calls
-/// `RetryingRead::read` into it, this forwards straight to
+/// `RetryingRead::retrying_read` into it, this forwards straight to
 /// `fill_buf`/`consume` — `BufRead` is already a lending API with the
 /// same shape as [`Source`], so a reader that already implements it
 /// can be adapted with no extra copy.
@@ -154,7 +154,7 @@ impl<R: RetryingFillBuf> Source for LendingSource<R> {
     type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        let buf = self.inner.fill_buf()?;
+        let buf = self.inner.retrying_fill_buf()?;
         Ok((!buf.is_empty()).then_some(buf))
     }
 

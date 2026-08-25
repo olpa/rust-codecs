@@ -1,9 +1,14 @@
-use embedded_io::{BufRead, Error as _, ErrorKind, Read, Write};
+use embedded_io::{BufRead, ErrorKind, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    LendingSource, RetryingFillBuf, RetryingRead, RetryingWrite, ScratchSink, ScratchSource,
+    retry_fill_buf, retry_on_interrupted, retry_write_all, LendingSource, RetryingFillBuf,
+    RetryingRead, RetryingWrite, ScratchSink, ScratchSource,
 };
 use crate::{Sink, Source};
+
+fn is_interrupted<E: embedded_io::Error>(e: &E) -> bool {
+    e.kind() == ErrorKind::Interrupted
+}
 
 /// Wraps an `embedded_io::Read`, retrying `read` on `Interrupted` —
 /// the one piece of backend-specific knowledge [`ScratchSource`]
@@ -13,14 +18,8 @@ struct EmbeddedReader<R>(R);
 impl<R: Read> RetryingRead for EmbeddedReader<R> {
     type Error = R::Error;
 
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        loop {
-            match self.0.read(buf) {
-                Ok(n) => return Ok(n),
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
+    fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        retry_on_interrupted(|| self.0.read(buf), is_interrupted)
     }
 }
 
@@ -85,29 +84,8 @@ struct EmbeddedBufReader<R>(R);
 impl<R: BufRead> RetryingFillBuf for EmbeddedBufReader<R> {
     type Error = R::Error;
 
-    fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
-        // `Ok([])` must return immediately, in one physical call: a
-        // `BufRead` impl doesn't have to latch EOF, so calling it
-        // again right here (rather than leaving that to
-        // `LendingSource::chunk`'s own single call) would silently
-        // issue a second real read and could skip over a transient
-        // empty result (a growing file/pipe: "nothing right now"
-        // isn't necessarily EOF). `Ok(_)` (non-empty) is safe to
-        // re-fetch below: the buffer stays available, unconsumed,
-        // until `consume` is called, so the second call is a free
-        // re-borrow, not a new read — that's also the only way to
-        // return the buffer here at all, since a borrow-checker
-        // limitation doesn't allow returning it directly out of this
-        // loop.
-        loop {
-            match self.0.fill_buf() {
-                Ok([]) => return Ok(&[]),
-                Ok(_) => break,
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        self.0.fill_buf()
+    fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+        retry_fill_buf(&mut self.0, R::fill_buf, is_interrupted)
     }
 
     fn consume(&mut self, amount: usize) {
@@ -158,26 +136,21 @@ impl<R: BufRead> Source for BufReadSource<R> {
     }
 }
 
-/// Wraps an `embedded_io::Write`. Unlike `std::io::Write::write_all`,
-/// `embedded_io::Write::write_all` doesn't retry on `Interrupted`, so
-/// this tracks its own write position and retries the remainder
-/// itself — the one piece of backend-specific knowledge [`ScratchSink`]
-/// needs.
+/// Wraps an `embedded_io::Write`, retrying `write` on `Interrupted`
+/// and on a partial write — the one piece of backend-specific
+/// knowledge [`ScratchSink`] needs. Unlike `std::io::Write::write_all`,
+/// `embedded_io::Write::write_all` doesn't do this itself, which is
+/// exactly why `retry_write_all` exists as a shared helper rather than
+/// each backend either trusting or hand-rolling it.
 struct EmbeddedWriter<W>(W);
 
 impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
     type Error = W::Error;
 
-    fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-        let mut pos = 0;
-        while pos < buf.len() {
-            match self.0.write(&buf[pos..]) {
-                Ok(n) => pos += n,
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
+    fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+        retry_write_all(&mut self.0, W::write, buf, is_interrupted, || {
+            unreachable!("embedded_io::Write::write must not return Ok(0) for non-empty input")
+        })
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
