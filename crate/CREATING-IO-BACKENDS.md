@@ -65,6 +65,21 @@ not a runtime condition — panic, don't return a `Result`), plus
 `into_inner`/`get_mut` for reclaiming/bypassing the wrapped transport.
 `Self::Error` is whatever error type your transport itself reports.
 
+## Skipping the scratch-buffer bookkeeping
+
+You don't have to implement `Source`/`Sink` by hand. `std_io` and
+`embedded_io` share their scratch-buffer/`spare`/`commit` bookkeeping
+and interrupt-retry logic through `sources_and_sinks::shared_io`'s
+`ScratchSource`/`LendingSource`/`ScratchSink` — all public, along with
+the `RetryingRead`/`RetryingFillBuf`/`RetryingWrite` traits they're
+generic over. If your transport looks like a single retrying
+`read`/`write`/`fill_buf` call, you can build on these instead of
+reimplementing that bookkeeping yourself, the same way `std_io`'s and
+`embedded_io`'s own `Source`/`Sink` adapters do. See
+`sources_and_sinks::std_io::adapter`/`sources_and_sinks::embedded_io::adapter`
+(`StdSource`/`StdSink`, `EmbeddedSource`/`EmbeddedSink`) for the
+pattern to copy.
+
 ## Wrapping it as `Read`/`Write`
 
 Reuse `Pump` and `sources_and_sinks::shared_io` — don't hand-roll the
@@ -124,3 +139,23 @@ If your transport already exposes a lending, buffered read (an
 `BufReadSource`/`BufReadCodecReader` in `std_io`/`embedded_io` for the
 pattern: adapt straight from `fill_buf`/`consume` instead of copying
 into a buffer of your own.
+
+## Testing your `Read`/`Write` wrapper
+
+Enable `rust-codecs-core`'s `test-support` feature (dev-dependency
+only) to get `sources_and_sinks::shared_io::test_support`: `EarlyEnd`,
+an `EndCapableCodec` that ends its stream in-band after a fixed number
+of bytes, and `Hoarder` (needs `alloc`), a `Codec` that buffers
+everything until `flush`/`finish`. Both are plain `Codec`/
+`EndCapableCodec` implementations, so they drive your wrapper exactly
+like any real codec would — use them to prove your reader stops
+yielding bytes and reports EOF right at a codec's in-band end, and that
+your writer treats `flush` as a resumable sync point distinct from
+`finish` ending the stream, without writing a throwaway codec of your
+own for either check.
+
+Doubles that stand in for a transport instead of a codec (a fake
+`Read`, a counting wrapper, ...) aren't part of the public API — write
+your own against your own transport trait, the way this crate's
+`std_io`/`embedded_io` adapters each keep their own `FlakyOnce` for
+retry tests.
