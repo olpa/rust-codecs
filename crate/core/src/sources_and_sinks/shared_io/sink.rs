@@ -102,9 +102,55 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
 
 #[cfg(test)]
 mod tests {
-    use super::ScratchSink;
-    use crate::sources_and_sinks::shared_io::test_support::{RecordingWriter, SliceWriter};
+    use super::{RetryingWrite, ScratchSink};
     use crate::Sink;
+    use core::convert::Infallible;
+
+    /// A writer double that counts `flush` calls made on it, to prove
+    /// `ScratchSink::finish` actually reaches the wrapped writer.
+    #[derive(Default)]
+    struct RecordingWriter {
+        flushes: usize,
+    }
+
+    impl RetryingWrite for RecordingWriter {
+        type Error = Infallible;
+
+        fn retrying_write_all(&mut self, _buf: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    /// A minimal [`RetryingWrite`] over a borrowed byte slice, filling
+    /// it left to right — stands in for a real `std::io`/`embedded_io`
+    /// writer when testing `ScratchSink` itself. Panics (via the slice
+    /// index) if written past capacity; tests using this should size
+    /// the slice generously, the same way they'd size a real fixed
+    /// buffer.
+    struct SliceWriter<'a> {
+        remaining: &'a mut [u8],
+    }
+
+    impl<'a> RetryingWrite for SliceWriter<'a> {
+        type Error = Infallible;
+
+        fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+            let n = buf.len();
+            self.remaining[..n].copy_from_slice(buf);
+            let remaining = core::mem::take(&mut self.remaining);
+            self.remaining = &mut remaining[n..];
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn spare_offers_the_whole_buffer() {

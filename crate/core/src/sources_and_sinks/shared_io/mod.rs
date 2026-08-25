@@ -40,12 +40,12 @@ pub use source::{LendingSource, RetryingFillBuf, RetryingRead, ScratchSource};
 mod retry;
 pub use retry::{retry_fill_buf, retry_on_interrupted, retry_write_all};
 
-/// Test doubles for exercising a `Source`/`Sink` backend built on top
-/// of this module — a codec that ends its stream in-band, one that
-/// buffers everything until `flush`/`finish`, and readers/writers that
-/// record how often they were called. `std_io`'s and `embedded_io`'s
-/// own test suites use these; a third-party backend can too, via the
-/// `test-support` feature, rather than reimplementing the same doubles
-/// for its own tests.
+/// Test doubles for exercising a `CodecReader`/`CodecWriter`-style
+/// wrapper built on top of a `Source`/`Sink` backend: a codec that ends
+/// its stream in-band, and one that buffers everything until
+/// `flush`/`finish`. `std_io`'s and `embedded_io`'s own test suites use
+/// these; a third-party backend can too, via the `test-support`
+/// feature, rather than reimplementing the same doubles for its own
+/// tests.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

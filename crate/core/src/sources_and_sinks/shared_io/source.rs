@@ -165,11 +165,91 @@ impl<R: RetryingFillBuf> Source for LendingSource<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LendingSource, ScratchSource};
-    use crate::sources_and_sinks::shared_io::test_support::{
-        CountingReader, GrowsAfterAnEmptyFill, SliceReader,
-    };
+    use super::{LendingSource, RetryingFillBuf, RetryingRead, ScratchSource};
     use crate::Source;
+    use core::convert::Infallible;
+
+    /// Wraps a reader, counting how many times `read` was actually
+    /// called on it — lets a test prove `ScratchSource::chunk` didn't
+    /// refill ahead of its consumed position (the `Source` contract
+    /// point that new bytes must not be handed out until the old ones
+    /// are released via `consume`).
+    struct CountingReader<R> {
+        inner: R,
+        reads: usize,
+    }
+
+    impl<R: RetryingRead> RetryingRead for CountingReader<R> {
+        type Error = R::Error;
+
+        fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            self.reads += 1;
+            self.inner.retrying_read(buf)
+        }
+    }
+
+    /// A minimal [`RetryingRead`]/[`RetryingFillBuf`] over a borrowed
+    /// byte slice — stands in for a real `std::io`/`embedded_io` reader
+    /// when testing `ScratchSource`/`LendingSource`, which don't care
+    /// which backend supplies bytes.
+    struct SliceReader<'a> {
+        bytes: &'a [u8],
+    }
+
+    impl<'a> RetryingRead for SliceReader<'a> {
+        type Error = Infallible;
+
+        fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = buf.len().min(self.bytes.len());
+            buf[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    impl<'a> RetryingFillBuf for SliceReader<'a> {
+        type Error = Infallible;
+
+        fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            Ok(self.bytes)
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.bytes = &self.bytes[amount..];
+        }
+    }
+
+    /// A [`RetryingFillBuf`] that yields `b"hi"`, then an empty fill,
+    /// then `b"more"` — stands in for a transport whose "nothing right
+    /// now" isn't forever (a growing file, a pipe), proving a
+    /// `LendingSource` doesn't latch itself shut after a single empty
+    /// fill.
+    #[derive(Default)]
+    struct GrowsAfterAnEmptyFill {
+        stage: usize,
+        buf: &'static [u8],
+    }
+
+    impl RetryingFillBuf for GrowsAfterAnEmptyFill {
+        type Error = Infallible;
+
+        fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            if self.buf.is_empty() {
+                self.buf = match self.stage {
+                    0 => b"hi",
+                    1 => b"",
+                    2 => b"more",
+                    _ => b"",
+                };
+                self.stage += 1;
+            }
+            Ok(self.buf)
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.buf = &self.buf[amount..];
+        }
+    }
 
     #[test]
     fn chunk_returns_none_at_genuine_eof() {
