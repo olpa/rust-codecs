@@ -1,15 +1,32 @@
 use embedded_io::{BufRead, Error as _, ErrorKind, Read, Write};
 
+use crate::sources_and_sinks::shared_io::{
+    LendingSource, RetryingFillBuf, RetryingRead, RetryingWrite, ScratchSink, ScratchSource,
+};
 use crate::{Sink, Source};
+
+/// Wraps an `embedded_io::Read`, retrying `read` on `Interrupted` —
+/// the one piece of backend-specific knowledge [`ScratchSource`]
+/// needs.
+struct EmbeddedReader<R>(R);
+
+impl<R: Read> RetryingRead for EmbeddedReader<R> {
+    type Error = R::Error;
+
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        loop {
+            match self.0.read(buf) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
 
 /// A `Source` over `embedded_io::Read`, reading into an owned scratch
 /// buffer.
-pub struct EmbeddedSource<R, S> {
-    inner: R,
-    buffer: S,
-    pos: usize,
-    len: usize,
-}
+pub struct EmbeddedSource<R, S>(ScratchSource<EmbeddedReader<R>, S>);
 
 impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     /// Build an `EmbeddedSource`.
@@ -18,32 +35,23 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     ///
     /// Panics on an empty `buffer`: it could never hold a byte read
     /// from `inner`, so `chunk` could never return anything.
-    pub fn new(inner: R, mut buffer: S) -> Self {
-        assert!(
-            !buffer.as_mut().is_empty(),
-            "EmbeddedSource buffer must be non-empty"
-        );
-        Self {
-            inner,
-            buffer,
-            pos: 0,
-            len: 0,
-        }
+    pub fn new(inner: R, buffer: S) -> Self {
+        Self(ScratchSource::new(EmbeddedReader(inner), buffer))
     }
 
     pub fn get_ref(&self) -> &R {
-        &self.inner
+        &self.0.get_ref().0
     }
 
     pub fn get_mut(&mut self) -> &mut R {
-        &mut self.inner
+        &mut self.0.get_mut().0
     }
 
     /// Reclaim the reader, discarding the scratch buffer and any
     /// buffered, unconsumed bytes (already read from `inner` into the
     /// buffer via `chunk`, but not yet passed to `consume`).
     pub fn into_inner(self) -> R {
-        self.inner
+        self.0.into_inner().0
     }
 
     /// Reclaim both the reader and the scratch buffer, e.g. to reuse
@@ -52,7 +60,8 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     /// the buffer via `chunk`, but not yet passed to `consume`) are
     /// discarded along with them.
     pub fn into_parts(self) -> (R, S) {
-        (self.inner, self.buffer)
+        let (reader, buffer) = self.0.into_parts();
+        (reader.0, buffer)
     }
 }
 
@@ -60,27 +69,49 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
     type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        if self.pos == self.len {
-            self.len = loop {
-                match self.inner.read(self.buffer.as_mut()) {
-                    Ok(n) => break n,
-                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            };
-            self.pos = 0;
-        }
-        if self.pos < self.len {
-            let unconsumed = &self.buffer.as_mut()[self.pos..self.len];
-            Ok(Some(unconsumed))
-        } else {
-            Ok(None)
-        }
+        self.0.chunk()
     }
 
     fn consume(&mut self, amount: usize) {
-        assert!(amount <= self.len - self.pos);
-        self.pos += amount;
+        self.0.consume(amount);
+    }
+}
+
+/// Wraps an `embedded_io::BufRead`, retrying `fill_buf` on
+/// `Interrupted` — the one piece of backend-specific knowledge
+/// [`LendingSource`] needs.
+struct EmbeddedBufReader<R>(R);
+
+impl<R: BufRead> RetryingFillBuf for EmbeddedBufReader<R> {
+    type Error = R::Error;
+
+    fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+        // `Ok([])` must return immediately, in one physical call: a
+        // `BufRead` impl doesn't have to latch EOF, so calling it
+        // again right here (rather than leaving that to
+        // `LendingSource::chunk`'s own single call) would silently
+        // issue a second real read and could skip over a transient
+        // empty result (a growing file/pipe: "nothing right now"
+        // isn't necessarily EOF). `Ok(_)` (non-empty) is safe to
+        // re-fetch below: the buffer stays available, unconsumed,
+        // until `consume` is called, so the second call is a free
+        // re-borrow, not a new read — that's also the only way to
+        // return the buffer here at all, since a borrow-checker
+        // limitation doesn't allow returning it directly out of this
+        // loop.
+        loop {
+            match self.0.fill_buf() {
+                Ok([]) => return Ok(&[]),
+                Ok(_) => break,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        self.0.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.0.consume(amount);
     }
 }
 
@@ -92,28 +123,26 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
 /// — `BufRead` is already a lending API with the same shape as
 /// [`Source`], so a reader that already implements it can be adapted
 /// with no extra copy.
-pub struct BufReadSource<R> {
-    inner: R,
-}
+pub struct BufReadSource<R>(LendingSource<EmbeddedBufReader<R>>);
 
 impl<R: BufRead> BufReadSource<R> {
     pub fn new(inner: R) -> Self {
-        Self { inner }
+        Self(LendingSource::new(EmbeddedBufReader(inner)))
     }
 
     pub fn get_ref(&self) -> &R {
-        &self.inner
+        &self.0.get_ref().0
     }
 
     pub fn get_mut(&mut self) -> &mut R {
-        &mut self.inner
+        &mut self.0.get_mut().0
     }
 
     /// Return the wrapped reader. Unlike `EmbeddedSource::into_inner`,
     /// nothing is lost: `BufReadSource` owns no scratch buffer of its
     /// own, so any bytes `R` was still holding come back with it.
     pub fn into_inner(self) -> R {
-        self.inner
+        self.0.into_inner().0
     }
 }
 
@@ -121,36 +150,44 @@ impl<R: BufRead> Source for BufReadSource<R> {
     type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        // There is a borrow-checker limitation that doesn't allow
-        // returning the buffer from the loop. The solution is to
-        // call `fill_buf` a second time.
-        // That second call doesn't trigger a read: after a non-empty
-        // `fill_buf`, the buffer stays available until `consume` is
-        // called, so it just re-borrows the same still-unconsumed window.
-        loop {
-            match self.inner.fill_buf() {
-                Ok([]) => return Ok(None),
-                Ok(_) => break,
+        self.0.chunk()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.0.consume(amount);
+    }
+}
+
+/// Wraps an `embedded_io::Write`. Unlike `std::io::Write::write_all`,
+/// `embedded_io::Write::write_all` doesn't retry on `Interrupted`, so
+/// this tracks its own write position and retries the remainder
+/// itself — the one piece of backend-specific knowledge [`ScratchSink`]
+/// needs.
+struct EmbeddedWriter<W>(W);
+
+impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
+    type Error = W::Error;
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+        let mut pos = 0;
+        while pos < buf.len() {
+            match self.0.write(&buf[pos..]) {
+                Ok(n) => pos += n,
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
         }
-
-        self.inner.fill_buf().map(Some)
+        Ok(())
     }
 
-    fn consume(&mut self, amount: usize) {
-        self.inner.consume(amount);
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.0.flush()
     }
 }
 
 /// A `Sink` over `embedded_io::Write`, staging writes in an owned
 /// scratch buffer.
-pub struct EmbeddedSink<W, S> {
-    inner: W,
-    buffer: S,
-    offered: usize,
-}
+pub struct EmbeddedSink<W, S>(ScratchSink<EmbeddedWriter<W>, S>);
 
 impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
     /// Build an `EmbeddedSink`.
@@ -159,31 +196,23 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
     ///
     /// Panics on an empty `buffer`: it could never hold a byte for
     /// `commit` to write out.
-    pub fn new(inner: W, mut buffer: S) -> Self {
-        assert!(
-            !buffer.as_mut().is_empty(),
-            "EmbeddedSink buffer must be non-empty"
-        );
-        Self {
-            inner,
-            buffer,
-            offered: 0,
-        }
+    pub fn new(inner: W, buffer: S) -> Self {
+        Self(ScratchSink::new(EmbeddedWriter(inner), buffer))
     }
 
     pub fn get_ref(&self) -> &W {
-        &self.inner
+        &self.0.get_ref().0
     }
 
     pub fn get_mut(&mut self) -> &mut W {
-        &mut self.inner
+        &mut self.0.get_mut().0
     }
 
     /// Reclaim the writer, discarding the scratch buffer and any bytes
     /// staged in it via `spare` but not yet handed to `commit` — they
     /// are not written to `inner`.
     pub fn into_inner(self) -> W {
-        self.inner
+        self.0.into_inner().0
     }
 
     /// Reclaim both the writer and the scratch buffer, e.g. to reuse
@@ -191,7 +220,8 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
     /// staged in the buffer via `spare` but not yet handed to `commit`
     /// are discarded along with it, and are not written to `inner`.
     pub fn into_parts(self) -> (W, S) {
-        (self.inner, self.buffer)
+        let (writer, buffer) = self.0.into_parts();
+        (writer.0, buffer)
     }
 }
 
@@ -199,27 +229,15 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     type Error = W::Error;
 
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
-        let buf = self.buffer.as_mut();
-        self.offered = buf.len();
-        Ok(Some(buf))
+        self.0.spare()
     }
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
-        assert!(amount <= self.offered);
-        let mut pos = 0;
-        while pos < amount {
-            match self.inner.write(&self.buffer.as_mut()[pos..amount]) {
-                Ok(n) => pos += n,
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        self.offered = 0;
-        Ok(())
+        self.0.commit(amount)
     }
 
     fn finish(&mut self) -> Result<(), Self::Error> {
-        self.inner.flush()
+        self.0.finish()
     }
 }
 

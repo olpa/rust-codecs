@@ -20,6 +20,19 @@ pub use read::pump_read;
 mod write;
 pub use write::{pump_finish, pump_flush, pump_write};
 
+/// Generic `Source`/`Sink` engines a backend's adapter module builds
+/// on: the scratch-buffer/`BufRead`-forwarding/`spare`-`commit`
+/// bookkeeping that's identical across `std::io`/`embedded_io`-style
+/// backends, parameterized over the one thing that differs — how a
+/// backend makes and retries a single `read`/`fill_buf`/`write` call.
+/// See `std_io::adapter`/`embedded_io::adapter` for how a backend
+/// plugs into these.
+mod sink;
+pub use sink::{RetryingWrite, ScratchSink};
+
+mod source;
+pub use source::{LendingSource, RetryingFillBuf, RetryingRead, ScratchSource};
+
 /// Test doubles for exercising a `Source`/`Sink` backend built on top
 /// of this module — a codec that ends its stream in-band, one that
 /// buffers everything until `flush`/`finish`, and readers/writers that
