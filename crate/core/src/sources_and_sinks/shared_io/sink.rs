@@ -99,3 +99,75 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
         self.inner.flush()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ScratchSink;
+    use crate::sources_and_sinks::shared_io::test_support::{RecordingWriter, SliceWriter};
+    use crate::Sink;
+
+    #[test]
+    fn spare_offers_the_whole_buffer() {
+        let mut bytes = [0u8; 32];
+        let mut output = ScratchSink::new(
+            SliceWriter {
+                remaining: &mut bytes,
+            },
+            [0u8; 6],
+        );
+        assert_eq!(output.spare().unwrap().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn spare_without_commit_is_reissuable() {
+        let mut bytes = [0u8; 32];
+        let mut output = ScratchSink::new(
+            SliceWriter {
+                remaining: &mut bytes,
+            },
+            [0u8; 6],
+        );
+        let first_len = output.spare().unwrap().unwrap().len();
+        let second_len = output.spare().unwrap().unwrap().len();
+        assert_eq!(first_len, second_len);
+    }
+
+    #[test]
+    fn commit_writes_only_the_committed_prefix_through() {
+        let mut bytes = [0u8; 32];
+        let written = {
+            let mut output = ScratchSink::new(
+                SliceWriter {
+                    remaining: &mut bytes,
+                },
+                [0u8; 8],
+            );
+            let spare = output.spare().unwrap().unwrap();
+            spare[..5].copy_from_slice(b"abcde");
+            output.commit(3).unwrap();
+            32 - output.into_inner().remaining.len()
+        };
+        assert_eq!(&bytes[..written], b"abc");
+    }
+
+    #[test]
+    #[should_panic]
+    fn commit_more_than_offered_panics() {
+        let mut bytes = [0u8; 32];
+        let mut output = ScratchSink::new(
+            SliceWriter {
+                remaining: &mut bytes,
+            },
+            [0u8; 4],
+        );
+        output.spare().unwrap();
+        output.commit(5).unwrap();
+    }
+
+    #[test]
+    fn finish_flushes_the_inner_writer() {
+        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
+        output.finish().unwrap();
+        assert_eq!(output.get_ref().flushes, 1);
+    }
+}

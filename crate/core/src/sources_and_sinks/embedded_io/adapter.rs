@@ -214,82 +214,27 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     }
 }
 
+// The buffer/`spare`/`commit` bookkeeping, EOF handling, panics, and
+// interrupt-retry mechanics are all transport-independent and tested
+// once against `ScratchSource`/`LendingSource`/`ScratchSink` in
+// `shared_io::source`/`shared_io::sink`/`shared_io::retry`. What's
+// left to test here is genuinely backend-specific: does `is_interrupted`
+// recognize `embedded_io`'s own `Interrupted` kind, and does a real
+// `embedded_io::Read`/`BufRead`/`Write` actually get driven correctly
+// end to end through `EmbeddedSource`/`BufReadSource`/`EmbeddedSink`.
 #[cfg(test)]
 mod tests {
     use embedded_io::{BufRead, ErrorKind, ErrorType, Read, Write};
 
-    use super::{BufReadSource, EmbeddedSink, EmbeddedSource};
+    use super::{is_interrupted, BufReadSource, EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
-    use crate::sources_and_sinks::shared_io::test_support::{CountingReader, RecordingWriter};
     use crate::stream_to_stream;
     use crate::{Sink, Source};
 
-    impl<R: ErrorType> ErrorType for CountingReader<R> {
-        type Error = R::Error;
-    }
-
-    impl<R: Read> Read for CountingReader<R> {
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            self.reads += 1;
-            self.inner.read(buf)
-        }
-    }
-
     #[test]
-    fn chunk_returns_none_at_genuine_eof() {
-        let mut input = EmbeddedSource::new(&b""[..], [0u8; 4]);
-        assert_eq!(input.chunk().unwrap(), None);
-    }
-
-    #[test]
-    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
-        let reader = CountingReader {
-            inner: &b"abcdef"[..],
-            reads: 0,
-        };
-        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        input.consume(1);
-        // The unconsumed remainder reappears, overlapping the previous
-        // chunk — no new bytes were pulled in to produce it.
-        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
-    }
-
-    #[test]
-    fn full_consume_triggers_a_refill() {
-        let reader = CountingReader {
-            inner: &b"abcdef"[..],
-            reads: 0,
-        };
-        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        input.consume(4);
-        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
-        assert_eq!(input.get_ref().reads, 2);
-    }
-
-    #[test]
-    fn repeated_chunk_without_consume_is_idempotent() {
-        let reader = CountingReader {
-            inner: &b"abcd"[..],
-            reads: 0,
-        };
-        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn consume_more_than_available_panics() {
-        let mut input = EmbeddedSource::new(&b"ab"[..], [0u8; 4]);
-        input.chunk().unwrap();
-        input.consume(3);
+    fn is_interrupted_recognizes_the_embedded_io_kind() {
+        assert!(is_interrupted(&ErrorKind::Interrupted));
+        assert!(!is_interrupted(&ErrorKind::Other));
     }
 
     /// An error that's either a genuine `Interrupted` or a wrapped
@@ -379,66 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn spare_offers_the_whole_buffer() {
-        let mut bytes = [0u8; 32];
-        let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 6]);
-        assert_eq!(output.spare().unwrap().unwrap().len(), 6);
-    }
-
-    #[test]
-    fn spare_without_commit_is_reissuable() {
-        let mut bytes = [0u8; 32];
-        let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 6]);
-        let first_len = output.spare().unwrap().unwrap().len();
-        let second_len = output.spare().unwrap().unwrap().len();
-        assert_eq!(first_len, second_len);
-    }
-
-    #[test]
-    fn commit_writes_only_the_committed_prefix_through() {
-        let mut bytes = [0u8; 32];
-        let written = {
-            let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 8]);
-            let spare = output.spare().unwrap().unwrap();
-            spare[..5].copy_from_slice(b"abcde");
-            output.commit(3).unwrap();
-            32 - output.into_inner().len()
-        };
-        assert_eq!(&bytes[..written], b"abc");
-    }
-
-    #[test]
-    #[should_panic]
-    fn commit_more_than_offered_panics() {
-        let mut bytes = [0u8; 32];
-        let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 4]);
-        output.spare().unwrap();
-        output.commit(5).unwrap();
-    }
-
-    impl ErrorType for RecordingWriter {
-        type Error = core::convert::Infallible;
-    }
-
-    impl Write for RecordingWriter {
-        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.flushes += 1;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn finish_flushes_the_inner_writer() {
-        let mut output = EmbeddedSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
-        output.finish().unwrap();
-        assert_eq!(output.get_ref().flushes, 1);
-    }
-
-    #[test]
     fn embedded_source_feeds_embedded_sink_end_to_end() {
         let mut input = EmbeddedSource::new(&b"embedded to embedded"[..], [0u8; 3]);
         let mut bytes = [0u8; 32];
@@ -451,22 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn buf_read_source_forwards_to_fill_buf() {
-        let mut input = BufReadSource::new(&b"hello"[..]);
-        assert_eq!(input.chunk().unwrap(), Some(b"hello".as_slice()));
-        input.consume(5);
-        assert_eq!(input.chunk().unwrap(), None);
-    }
-
-    #[test]
-    fn buf_read_source_leaves_unconsumed_remainder_visible() {
-        let mut input = BufReadSource::new(&b"abcdef"[..]);
-        assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
-        input.consume(2);
-        assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
-    }
-
-    #[test]
     fn buf_read_source_retries_an_interrupted_fill() {
         let flaky = FlakyOnce {
             inner: &b"retry me too"[..],
@@ -474,58 +343,6 @@ mod tests {
         };
         let mut input = BufReadSource::new(flaky);
         assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
-    }
-
-    /// Yields `b"hi"`, then an empty fill, then `b"more"` — stands in
-    /// for a transport whose "nothing right now" isn't forever (a
-    /// growing file, a pipe), proving `chunk()` doesn't latch itself
-    /// shut after a single empty fill. Unlike `std::io`'s
-    /// `GrowsAfterAnEmptyRead`, which implements plain `Read` and
-    /// relies on `BufReader` to cache `fill_buf`'s result until
-    /// `consume`, this implements `BufRead` directly (`embedded_io`
-    /// has no generic `Read`-to-`BufRead` adapter), so it does its own
-    /// caching to honor that same contract.
-    struct GrowsAfterAnEmptyRead {
-        stage: usize,
-        buf: &'static [u8],
-    }
-
-    impl ErrorType for GrowsAfterAnEmptyRead {
-        type Error = core::convert::Infallible;
-    }
-
-    impl Read for GrowsAfterAnEmptyRead {
-        fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
-            unreachable!("BufReadSource never calls read(), only fill_buf()/consume()")
-        }
-    }
-
-    impl BufRead for GrowsAfterAnEmptyRead {
-        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
-            if self.buf.is_empty() {
-                self.buf = match self.stage {
-                    0 => b"hi",
-                    1 => b"",
-                    2 => b"more",
-                    _ => b"",
-                };
-                self.stage += 1;
-            }
-            Ok(self.buf)
-        }
-
-        fn consume(&mut self, amt: usize) {
-            self.buf = &self.buf[amt..];
-        }
-    }
-
-    #[test]
-    fn buf_read_source_revisits_the_wrapped_reader_after_an_empty_fill() {
-        let mut input = BufReadSource::new(GrowsAfterAnEmptyRead { stage: 0, buf: b"" });
-        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
-        input.consume(2);
-        assert_eq!(input.chunk().unwrap(), None);
-        assert_eq!(input.chunk().unwrap(), Some(b"more".as_slice()));
     }
 
     #[test]

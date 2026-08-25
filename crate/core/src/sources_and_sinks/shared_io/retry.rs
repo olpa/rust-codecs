@@ -106,3 +106,157 @@ pub fn retry_write_all<T, E>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{retry_fill_buf, retry_on_interrupted, retry_write_all};
+
+    fn is_interrupted(e: &&str) -> bool {
+        *e == "eintr"
+    }
+
+    #[test]
+    fn retry_on_interrupted_retries_until_success() {
+        let mut calls = 0;
+        let result = retry_on_interrupted(
+            || {
+                calls += 1;
+                if calls < 3 { Err("eintr") } else { Ok(calls) }
+            },
+            is_interrupted,
+        );
+        assert_eq!(result, Ok(3));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn retry_on_interrupted_propagates_a_real_error_without_retrying() {
+        let mut calls = 0;
+        let result: Result<(), &str> = retry_on_interrupted(
+            || {
+                calls += 1;
+                Err("boom")
+            },
+            is_interrupted,
+        );
+        assert_eq!(result, Err("boom"));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_fill_buf_retries_until_a_real_result() {
+        // Two `Interrupted`s, then a real (non-empty) result — which
+        // itself costs one extra re-fetch (see the refetch test below),
+        // so the real data comes back on the 4th call, not the 3rd.
+        let mut calls = 0usize;
+        let got = retry_fill_buf(
+            &mut calls,
+            |c| {
+                *c += 1;
+                match *c {
+                    1 | 2 => Err("eintr"),
+                    _ => Ok(b"data".as_slice()),
+                }
+            },
+            is_interrupted,
+        );
+        assert_eq!(got, Ok(b"data".as_slice()));
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn retry_fill_buf_returns_an_empty_result_after_exactly_one_call() {
+        let mut calls = 0;
+        let got: Result<&[u8], &str> = retry_fill_buf(
+            &mut calls,
+            |c| {
+                *c += 1;
+                Ok(&[][..])
+            },
+            is_interrupted,
+        );
+        assert_eq!(got, Ok(&[][..]));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_fill_buf_refetches_once_for_a_non_empty_result() {
+        // The second call is the only way to hand the buffer back out
+        // (a borrow-checker limitation, documented on the function
+        // itself) — this pins down that it's exactly one extra call,
+        // not zero or several.
+        let mut calls = 0;
+        let got = retry_fill_buf(
+            &mut calls,
+            |c| {
+                *c += 1;
+                Ok::<_, &str>(b"x".as_slice())
+            },
+            is_interrupted,
+        );
+        assert_eq!(got, Ok(b"x".as_slice()));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn retry_write_all_with_empty_buf_never_calls_write() {
+        let mut calls = 0;
+        let result = retry_write_all(
+            &mut calls,
+            |c, _buf| {
+                *c += 1;
+                Ok::<_, &str>(0)
+            },
+            b"",
+            is_interrupted,
+            || "unreachable",
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn retry_write_all_retries_interruptions_and_partial_writes() {
+        struct Flaky<'a> {
+            out: &'a mut [u8],
+            attempt: usize,
+        }
+        fn write(target: &mut Flaky<'_>, buf: &[u8]) -> Result<usize, &'static str> {
+            target.attempt += 1;
+            match target.attempt {
+                1 => Err("eintr"),
+                2 => {
+                    let n = 2.min(buf.len());
+                    target.out[..n].copy_from_slice(&buf[..n]);
+                    let out = core::mem::take(&mut target.out);
+                    target.out = &mut out[n..];
+                    Ok(n)
+                }
+                3 => Err("eintr"),
+                _ => {
+                    let n = buf.len();
+                    target.out[..n].copy_from_slice(buf);
+                    Ok(n)
+                }
+            }
+        }
+
+        let mut out = [0u8; 6];
+        let mut flaky = Flaky {
+            out: &mut out,
+            attempt: 0,
+        };
+        retry_write_all(&mut flaky, write, b"abcdef", is_interrupted, || "unreachable").unwrap();
+        assert_eq!(&out, b"abcdef");
+    }
+
+    #[test]
+    fn retry_write_all_escalates_a_zero_length_write_to_the_given_error() {
+        fn always_zero(_target: &mut (), buf: &[u8]) -> Result<usize, &'static str> {
+            assert!(!buf.is_empty());
+            Ok(0)
+        }
+        let result = retry_write_all(&mut (), always_zero, b"x", is_interrupted, || "zero-write");
+        assert_eq!(result, Err("zero-write"));
+    }
+}

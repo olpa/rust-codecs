@@ -162,3 +162,94 @@ impl<R: RetryingFillBuf> Source for LendingSource<R> {
         self.inner.consume(amount);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LendingSource, ScratchSource};
+    use crate::sources_and_sinks::shared_io::test_support::{
+        CountingReader, GrowsAfterAnEmptyFill, SliceReader,
+    };
+    use crate::Source;
+
+    #[test]
+    fn chunk_returns_none_at_genuine_eof() {
+        let mut input = ScratchSource::new(SliceReader { bytes: b"" }, [0u8; 4]);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
+        let reader = CountingReader {
+            inner: SliceReader { bytes: b"abcdef" },
+            reads: 0,
+        };
+        let mut input = ScratchSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(1);
+        // The unconsumed remainder reappears, overlapping the previous
+        // chunk — no new bytes were pulled in to produce it.
+        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    fn full_consume_triggers_a_refill() {
+        let reader = CountingReader {
+            inner: SliceReader { bytes: b"abcdef" },
+            reads: 0,
+        };
+        let mut input = ScratchSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(4);
+        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
+        assert_eq!(input.get_ref().reads, 2);
+    }
+
+    #[test]
+    fn repeated_chunk_without_consume_is_idempotent() {
+        let reader = CountingReader {
+            inner: SliceReader { bytes: b"abcd" },
+            reads: 0,
+        };
+        let mut input = ScratchSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn consume_more_than_available_panics() {
+        let mut input = ScratchSource::new(SliceReader { bytes: b"ab" }, [0u8; 4]);
+        input.chunk().unwrap();
+        input.consume(3);
+    }
+
+    #[test]
+    fn lending_source_forwards_to_fill_buf() {
+        let mut input = LendingSource::new(SliceReader { bytes: b"hello" });
+        assert_eq!(input.chunk().unwrap(), Some(b"hello".as_slice()));
+        input.consume(5);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn lending_source_leaves_unconsumed_remainder_visible() {
+        let mut input = LendingSource::new(SliceReader { bytes: b"abcdef" });
+        assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
+    }
+
+    #[test]
+    fn lending_source_revisits_the_wrapped_reader_after_an_empty_fill() {
+        let mut input = LendingSource::new(GrowsAfterAnEmptyFill::default());
+        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), None);
+        assert_eq!(input.chunk().unwrap(), Some(b"more".as_slice()));
+    }
+}

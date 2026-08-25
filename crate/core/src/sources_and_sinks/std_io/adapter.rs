@@ -219,81 +219,34 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
     }
 }
 
+// The buffer/`spare`/`commit` bookkeeping, EOF handling, panics, and
+// interrupt-retry mechanics are all transport-independent and tested
+// once against `ScratchSource`/`LendingSource`/`ScratchSink` in
+// `shared_io::source`/`shared_io::sink`/`shared_io::retry`. What's
+// left to test here is genuinely backend-specific: does `is_interrupted`
+// recognize `std::io`'s own `Interrupted` kind, and does a real
+// `std::io::Read`/`BufRead`/`Write` actually get driven correctly
+// end to end through `StdSource`/`BufReadSource`/`StdSink`.
 #[cfg(test)]
 mod tests {
     use std::io::{BufReader, Cursor, Read, Write};
 
-    use super::{BufReadSource, StdSink, StdSource};
+    use super::{is_interrupted, BufReadSource, StdSink, StdSource};
     use crate::identity::identity;
-    use crate::sources_and_sinks::shared_io::test_support::{CountingReader, RecordingWriter};
     use crate::stream_to_stream;
     use crate::{Sink, Source};
 
-    impl<R: Read> Read for CountingReader<R> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.reads += 1;
-            self.inner.read(buf)
-        }
-    }
-
     #[test]
-    fn chunk_returns_none_at_genuine_eof() {
-        let mut input = StdSource::new(Cursor::new(b"".as_slice()), [0u8; 4]);
-        assert_eq!(input.chunk().unwrap(), None);
+    fn is_interrupted_recognizes_the_std_io_kind() {
+        assert!(is_interrupted(&std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "eintr"
+        )));
+        assert!(!is_interrupted(&std::io::Error::other("boom")));
     }
 
-    #[test]
-    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
-        let reader = CountingReader {
-            inner: Cursor::new(b"abcdef".as_slice()),
-            reads: 0,
-        };
-        let mut input = StdSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        input.consume(1);
-        // The unconsumed remainder reappears, overlapping the previous
-        // chunk — no new bytes were pulled in to produce it.
-        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
-    }
-
-    #[test]
-    fn full_consume_triggers_a_refill() {
-        let reader = CountingReader {
-            inner: Cursor::new(b"abcdef".as_slice()),
-            reads: 0,
-        };
-        let mut input = StdSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        input.consume(4);
-        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
-        assert_eq!(input.get_ref().reads, 2);
-    }
-
-    #[test]
-    fn repeated_chunk_without_consume_is_idempotent() {
-        let reader = CountingReader {
-            inner: Cursor::new(b"abcd".as_slice()),
-            reads: 0,
-        };
-        let mut input = StdSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn consume_more_than_available_panics() {
-        let mut input = StdSource::new(Cursor::new(b"ab".as_slice()), [0u8; 4]);
-        input.chunk().unwrap();
-        input.consume(3);
-    }
-
-    /// Fails its first `read` with `Interrupted`, then delegates.
+    /// Fails its first `read`/`write` with `Interrupted`, then
+    /// delegates.
     struct FlakyOnce<R> {
         inner: R,
         failed: bool,
@@ -312,6 +265,23 @@ mod tests {
         }
     }
 
+    impl<W: Write> Write for FlakyOnce<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.failed {
+                self.failed = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "eintr",
+                ));
+            }
+            self.inner.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
     #[test]
     fn chunk_retries_an_interrupted_read() {
         let flaky = FlakyOnce {
@@ -320,22 +290,6 @@ mod tests {
         };
         let mut input = StdSource::new(flaky, [0u8; 8]);
         assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
-    }
-
-    #[test]
-    fn buf_read_source_forwards_to_fill_buf() {
-        let mut input = BufReadSource::new(Cursor::new(b"hello".as_slice()));
-        assert_eq!(input.chunk().unwrap(), Some(b"hello".as_slice()));
-        input.consume(5);
-        assert_eq!(input.chunk().unwrap(), None);
-    }
-
-    #[test]
-    fn buf_read_source_leaves_unconsumed_remainder_visible() {
-        let mut input = BufReadSource::new(Cursor::new(b"abcdef".as_slice()));
-        assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
-        input.consume(2);
-        assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
     }
 
     #[test]
@@ -351,88 +305,17 @@ mod tests {
         assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
     }
 
-    /// Yields `b"hi"`, then an empty read, then `b"more"` — stands in
-    /// for a transport whose "nothing right now" isn't forever (a
-    /// growing file, a pipe), proving `chunk()` doesn't latch itself
-    /// shut after a single empty fill.
-    struct GrowsAfterAnEmptyRead {
-        calls: usize,
-    }
-
-    impl Read for GrowsAfterAnEmptyRead {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.calls += 1;
-            match self.calls {
-                1 => {
-                    buf[..2].copy_from_slice(b"hi");
-                    Ok(2)
-                }
-                2 => Ok(0),
-                3 => {
-                    buf[..4].copy_from_slice(b"more");
-                    Ok(4)
-                }
-                _ => Ok(0),
-            }
-        }
-    }
-
     #[test]
-    fn buf_read_source_revisits_the_wrapped_reader_after_an_empty_fill() {
-        let mut input = BufReadSource::new(BufReader::new(GrowsAfterAnEmptyRead { calls: 0 }));
-        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
-        input.consume(2);
-        assert_eq!(input.chunk().unwrap(), None);
-        assert_eq!(input.chunk().unwrap(), Some(b"more".as_slice()));
-    }
-
-    #[test]
-    fn spare_offers_the_whole_buffer() {
-        let mut output = StdSink::new(Vec::new(), [0u8; 6]);
-        assert_eq!(output.spare().unwrap().unwrap().len(), 6);
-    }
-
-    #[test]
-    fn spare_without_commit_is_reissuable() {
-        let mut output = StdSink::new(Vec::new(), [0u8; 6]);
-        let first_len = output.spare().unwrap().unwrap().len();
-        let second_len = output.spare().unwrap().unwrap().len();
-        assert_eq!(first_len, second_len);
-    }
-
-    #[test]
-    fn commit_writes_only_the_committed_prefix_through() {
-        let mut output = StdSink::new(Vec::new(), [0u8; 8]);
+    fn commit_retries_an_interrupted_write() {
+        let flaky = FlakyOnce {
+            inner: Vec::new(),
+            failed: false,
+        };
+        let mut output = StdSink::new(flaky, [0u8; 8]);
         let spare = output.spare().unwrap().unwrap();
         spare[..5].copy_from_slice(b"abcde");
-        output.commit(3).unwrap();
-        assert_eq!(output.get_ref().as_slice(), b"abc");
-    }
-
-    #[test]
-    #[should_panic]
-    fn commit_more_than_offered_panics() {
-        let mut output = StdSink::new(Vec::new(), [0u8; 4]);
-        output.spare().unwrap();
         output.commit(5).unwrap();
-    }
-
-    impl Write for RecordingWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.flushes += 1;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn finish_flushes_the_inner_writer() {
-        let mut output = StdSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
-        output.finish().unwrap();
-        assert_eq!(output.get_ref().flushes, 1);
+        assert_eq!(output.into_inner().inner, b"abcde");
     }
 
     #[test]
