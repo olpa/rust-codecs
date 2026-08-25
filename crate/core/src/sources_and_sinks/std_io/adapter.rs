@@ -331,6 +331,14 @@ mod tests {
     }
 
     #[test]
+    fn buf_read_source_leaves_unconsumed_remainder_visible() {
+        let mut input = BufReadSource::new(Cursor::new(b"abcdef".as_slice()));
+        assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
+    }
+
+    #[test]
     fn buf_read_source_retries_an_interrupted_fill() {
         // `BufReader::fill_buf` calls the wrapped `Read::read` directly
         // when its own buffer is empty, so `FlakyOnce`'s interruption

@@ -244,6 +244,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn chunk_returns_none_at_genuine_eof() {
+        let mut input = EmbeddedSource::new(&b""[..], [0u8; 4]);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
+        let reader = CountingReader {
+            inner: &b"abcdef"[..],
+            reads: 0,
+        };
+        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(1);
+        // The unconsumed remainder reappears, overlapping the previous
+        // chunk — no new bytes were pulled in to produce it.
+        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    fn full_consume_triggers_a_refill() {
+        let reader = CountingReader {
+            inner: &b"abcdef"[..],
+            reads: 0,
+        };
+        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(4);
+        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
+        assert_eq!(input.get_ref().reads, 2);
+    }
+
+    #[test]
+    fn repeated_chunk_without_consume_is_idempotent() {
+        let reader = CountingReader {
+            inner: &b"abcd"[..],
+            reads: 0,
+        };
+        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.get_ref().reads, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn consume_more_than_available_panics() {
+        let mut input = EmbeddedSource::new(&b"ab"[..], [0u8; 4]);
+        input.chunk().unwrap();
+        input.consume(3);
+    }
+
     /// An error that's either a genuine `Interrupted` or a wrapped
     /// inner error, so a test double can report `Interrupted` even
     /// when its wrapped reader's own `Error` (e.g. `Infallible` for
@@ -328,90 +385,6 @@ mod tests {
         };
         let mut input = EmbeddedSource::new(flaky, [0u8; 8]);
         assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
-    }
-
-    #[test]
-    fn buf_read_source_retries_an_interrupted_fill() {
-        let flaky = FlakyOnce {
-            inner: &b"retry me too"[..],
-            failed: false,
-        };
-        let mut input = BufReadSource::new(flaky);
-        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
-    }
-
-    #[test]
-    fn commit_retries_an_interrupted_write() {
-        let mut bytes = [0u8; 32];
-        let flaky = FlakyOnce {
-            inner: &mut bytes[..],
-            failed: false,
-        };
-        let written = {
-            let mut output = EmbeddedSink::new(flaky, [0u8; 8]);
-            let spare = output.spare().unwrap().unwrap();
-            spare[..5].copy_from_slice(b"abcde");
-            output.commit(5).unwrap();
-            32 - output.into_inner().inner.len()
-        };
-        assert_eq!(&bytes[..written], b"abcde");
-    }
-
-    #[test]
-    fn chunk_returns_none_at_genuine_eof() {
-        let mut input = EmbeddedSource::new(&b""[..], [0u8; 4]);
-        assert_eq!(input.chunk().unwrap(), None);
-    }
-
-    #[test]
-    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
-        let reader = CountingReader {
-            inner: &b"abcdef"[..],
-            reads: 0,
-        };
-        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        input.consume(1);
-        // The unconsumed remainder reappears, overlapping the previous
-        // chunk — no new bytes were pulled in to produce it.
-        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
-    }
-
-    #[test]
-    fn full_consume_triggers_a_refill() {
-        let reader = CountingReader {
-            inner: &b"abcdef"[..],
-            reads: 0,
-        };
-        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        input.consume(4);
-        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
-        assert_eq!(input.get_ref().reads, 2);
-    }
-
-    #[test]
-    fn repeated_chunk_without_consume_is_idempotent() {
-        let reader = CountingReader {
-            inner: &b"abcd"[..],
-            reads: 0,
-        };
-        let mut input = EmbeddedSource::new(reader, [0u8; 4]);
-
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn consume_more_than_available_panics() {
-        let mut input = EmbeddedSource::new(&b"ab"[..], [0u8; 4]);
-        input.chunk().unwrap();
-        input.consume(3);
     }
 
     #[test]
@@ -500,5 +473,84 @@ mod tests {
         assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
         input.consume(2);
         assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
+    }
+
+    #[test]
+    fn buf_read_source_retries_an_interrupted_fill() {
+        let flaky = FlakyOnce {
+            inner: &b"retry me too"[..],
+            failed: false,
+        };
+        let mut input = BufReadSource::new(flaky);
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
+    }
+
+    /// Yields `b"hi"`, then an empty fill, then `b"more"` — stands in
+    /// for a transport whose "nothing right now" isn't forever (a
+    /// growing file, a pipe), proving `chunk()` doesn't latch itself
+    /// shut after a single empty fill. Unlike `std::io`'s
+    /// `GrowsAfterAnEmptyRead`, which implements plain `Read` and
+    /// relies on `BufReader` to cache `fill_buf`'s result until
+    /// `consume`, this implements `BufRead` directly (`embedded_io`
+    /// has no generic `Read`-to-`BufRead` adapter), so it does its own
+    /// caching to honor that same contract.
+    struct GrowsAfterAnEmptyRead {
+        stage: usize,
+        buf: &'static [u8],
+    }
+
+    impl ErrorType for GrowsAfterAnEmptyRead {
+        type Error = core::convert::Infallible;
+    }
+
+    impl Read for GrowsAfterAnEmptyRead {
+        fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
+            unreachable!("BufReadSource never calls read(), only fill_buf()/consume()")
+        }
+    }
+
+    impl BufRead for GrowsAfterAnEmptyRead {
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            if self.buf.is_empty() {
+                self.buf = match self.stage {
+                    0 => b"hi",
+                    1 => b"",
+                    2 => b"more",
+                    _ => b"",
+                };
+                self.stage += 1;
+            }
+            Ok(self.buf)
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.buf = &self.buf[amt..];
+        }
+    }
+
+    #[test]
+    fn buf_read_source_revisits_the_wrapped_reader_after_an_empty_fill() {
+        let mut input = BufReadSource::new(GrowsAfterAnEmptyRead { stage: 0, buf: b"" });
+        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), None);
+        assert_eq!(input.chunk().unwrap(), Some(b"more".as_slice()));
+    }
+
+    #[test]
+    fn commit_retries_an_interrupted_write() {
+        let mut bytes = [0u8; 32];
+        let flaky = FlakyOnce {
+            inner: &mut bytes[..],
+            failed: false,
+        };
+        let written = {
+            let mut output = EmbeddedSink::new(flaky, [0u8; 8]);
+            let spare = output.spare().unwrap().unwrap();
+            spare[..5].copy_from_slice(b"abcde");
+            output.commit(5).unwrap();
+            32 - output.into_inner().inner.len()
+        };
+        assert_eq!(&bytes[..written], b"abcde");
     }
 }
