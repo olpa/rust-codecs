@@ -5,8 +5,7 @@ use crate::stream::{Pump, PumpDrainEnd, PumpStepEnd};
 use crate::{DriveError, EndCapableCodec, Source};
 
 /// Drive `pump` against `input`, filling `buf` with transformed bytes —
-/// the transport-independent core of a `Read::read` impl, matching
-/// what `std_io`/`embedded_io`'s own `CodecReader` calls internally.
+/// the transport-independent core of a `Read::read` impl.
 ///
 /// - Returns as soon as one pull from `input` yields output, instead of
 ///   chasing a full `buf` — so `read()` never blocks past what a
