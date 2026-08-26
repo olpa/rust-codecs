@@ -117,15 +117,18 @@ mod tests {
     }
 
     /// Buffers one byte silently, then emits both held bytes together
-    /// on the next `process` call — stands in for a codec like
-    /// `base64_dec` that must consume several input bytes before it
-    /// can produce any output.
+    /// on the next `process` call. It helps to test the interaction
+    /// when the codec must consume several input bytes before it can
+    /// produce any output.
+    ///
+    /// To simplify the codec logic, the input buffer must be always
+    /// exactly one byte.
     #[derive(Default)]
-    struct BuffersOneByte {
+    struct CanProgressWithoutOutput {
         held: Option<u8>,
     }
 
-    impl DrainCodec for BuffersOneByte {
+    impl DrainCodec for CanProgressWithoutOutput {
         fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
             match self.held.take() {
                 None => Ok(Drain::Done { written: 0 }),
@@ -137,8 +140,9 @@ mod tests {
         }
     }
 
-    impl Codec for BuffersOneByte {
+    impl Codec for CanProgressWithoutOutput {
         fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+            debug_assert_eq!(input.len(), 1);
             match self.held.take() {
                 None => {
                     self.held = Some(input[0]);
@@ -160,7 +164,7 @@ mod tests {
             pos: 0,
             chunk_size: 1,
         };
-        let mut pump = Pump::new(BuffersOneByte::default());
+        let mut pump = Pump::new(CanProgressWithoutOutput::default());
         let mut buf = [0u8; 8];
 
         let mut read = || {
@@ -177,13 +181,13 @@ mod tests {
     }
 
     #[test]
-    fn finish_flushes_a_byte_still_held_when_input_ends_on_an_odd_count() {
+    fn drains_pending_codec_state_before_reporting_done() {
         let mut source = ChunkedSource {
             bytes: b"odd",
             pos: 0,
             chunk_size: 1,
         };
-        let mut pump = Pump::new(BuffersOneByte::default());
+        let mut pump = Pump::new(CanProgressWithoutOutput::default());
         let mut buf = [0u8; 8];
 
         let mut read = || {
@@ -227,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn resumes_finishing_across_reads_when_the_trailer_overflows_the_buffer() {
+    fn resumes_a_partial_finish_on_the_next_read() {
         use crate::sources_and_sinks::slice::SliceSource;
 
         let mut source = SliceSource::new(b"");
