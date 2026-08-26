@@ -126,8 +126,14 @@ mod tests {
     }
 
     impl DrainCodec for BuffersOneByte {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+            match self.held.take() {
+                None => Ok(Drain::Done { written: 0 }),
+                Some(held) => {
+                    output[0] = held;
+                    Ok(Drain::Done { written: 1 })
+                }
+            }
         }
     }
 
@@ -167,6 +173,29 @@ mod tests {
         // return `b""` here instead of looping to the next pull.
         assert_eq!(read(), b"ok");
         assert_eq!(read(), b"");
+        assert_eq!(read(), b"");
+    }
+
+    #[test]
+    fn finish_flushes_a_byte_still_held_when_input_ends_on_an_odd_count() {
+        let mut source = ChunkedSource {
+            bytes: b"odd",
+            pos: 0,
+            chunk_size: 1,
+        };
+        let mut pump = Pump::new(BuffersOneByte::default());
+        let mut buf = [0u8; 8];
+
+        let mut read = || {
+            let n = end_capable_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            buf[..n].to_vec()
+        };
+
+        // 'o' and 'd' pair up and come out together; the trailing 'd'
+        // is left held when the source is exhausted, so `finish` must
+        // flush it instead of silently dropping it.
+        assert_eq!(read(), b"od");
+        assert_eq!(read(), b"d");
         assert_eq!(read(), b"");
     }
 
