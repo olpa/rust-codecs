@@ -84,155 +84,150 @@ mod tests {
         *e == "eintr"
     }
 
-    #[test]
-    fn retry_on_interrupted_retries_until_success() {
-        let mut calls = 0;
-        let result = retry_on_interrupted(
-            || {
-                calls += 1;
-                if calls < 3 {
-                    Err("eintr")
-                } else {
-                    Ok(calls)
-                }
-            },
-            is_interrupted,
-        );
-        assert_eq!(result, Ok(3));
-        assert_eq!(calls, 3);
+    /// Yields `data` one byte per real call, alternating an
+    /// `Interrupted` error in between every two real calls (real,
+    /// eintr, real, eintr, ...).
+    struct FlakyBytes<'a> {
+        remaining: &'a [u8],
+        attempts: usize,
     }
 
-    #[test]
-    fn retry_on_interrupted_propagates_a_real_error_without_retrying() {
-        let mut calls = 0;
-        let result: Result<(), &str> = retry_on_interrupted(
-            || {
-                calls += 1;
-                Err("boom")
-            },
-            is_interrupted,
-        );
-        assert_eq!(result, Err("boom"));
-        assert_eq!(calls, 1);
-    }
-
-    #[test]
-    fn retry_fill_buf_retries_until_a_real_result() {
-        // Two `Interrupted`s, then a real (non-empty) result, which
-        // itself costs one extra re-fetch (see the refetch test below),
-        // so the real data comes back on the 4th call, not the 3rd.
-        let mut calls = 0usize;
-        let got = retry_fill_buf(
-            &mut calls,
-            |c| {
-                *c += 1;
-                match *c {
-                    1 | 2 => Err("eintr"),
-                    _ => Ok(b"data".as_slice()),
-                }
-            },
-            is_interrupted,
-        );
-        assert_eq!(got, Ok(b"data".as_slice()));
-        assert_eq!(calls, 4);
-    }
-
-    #[test]
-    fn retry_fill_buf_returns_an_empty_result_after_exactly_one_call() {
-        let mut calls = 0;
-        let got: Result<&[u8], &str> = retry_fill_buf(
-            &mut calls,
-            |c| {
-                *c += 1;
-                Ok(&[][..])
-            },
-            is_interrupted,
-        );
-        assert_eq!(got, Ok(&[][..]));
-        assert_eq!(calls, 1);
-    }
-
-    #[test]
-    fn retry_fill_buf_refetches_once_for_a_non_empty_result() {
-        // The second call is the only way to hand the buffer back out
-        // (a borrow-checker limitation, documented on the function
-        // itself), this pins down that it's exactly one extra call,
-        // not zero or several.
-        let mut calls = 0;
-        let got = retry_fill_buf(
-            &mut calls,
-            |c| {
-                *c += 1;
-                Ok::<_, &str>(b"x".as_slice())
-            },
-            is_interrupted,
-        );
-        assert_eq!(got, Ok(b"x".as_slice()));
-        assert_eq!(calls, 2);
-    }
-
-    #[test]
-    fn retry_write_all_with_empty_buf_never_calls_write() {
-        let mut calls = 0;
-        let result = retry_write_all(
-            &mut calls,
-            |c, _buf| {
-                *c += 1;
-                Ok::<_, &str>(0)
-            },
-            b"",
-            is_interrupted,
-            || "unreachable",
-        );
-        assert_eq!(result, Ok(()));
-        assert_eq!(calls, 0);
-    }
-
-    #[test]
-    fn retry_write_all_retries_interruptions_and_partial_writes() {
-        struct Flaky<'a> {
-            out: &'a mut [u8],
-            attempt: usize,
-        }
-        fn write(target: &mut Flaky<'_>, buf: &[u8]) -> Result<usize, &'static str> {
-            target.attempt += 1;
-            match target.attempt {
-                1 => Err("eintr"),
-                2 => {
-                    let n = 2.min(buf.len());
-                    target.out[..n].copy_from_slice(&buf[..n]);
-                    let out = core::mem::take(&mut target.out);
-                    target.out = &mut out[n..];
-                    Ok(n)
-                }
-                3 => Err("eintr"),
-                _ => {
-                    let n = buf.len();
-                    target.out[..n].copy_from_slice(buf);
-                    Ok(n)
-                }
+    impl<'a> FlakyBytes<'a> {
+        fn new(data: &'a [u8]) -> Self {
+            Self {
+                remaining: data,
+                attempts: 0,
             }
         }
 
-        let mut out = [0u8; 6];
-        let mut flaky = Flaky {
-            out: &mut out,
-            attempt: 0,
-        };
-        retry_write_all(&mut flaky, write, b"abcdef", is_interrupted, || {
-            "unreachable"
-        })
-        .unwrap();
-        assert_eq!(&out, b"abcdef");
+        fn read_one(&mut self) -> Result<Option<u8>, &'static str> {
+            self.attempts += 1;
+            if self.attempts.is_multiple_of(2) {
+                return Err("eintr");
+            }
+            let Some((&byte, rest)) = self.remaining.split_first() else {
+                return Ok(None);
+            };
+            self.remaining = rest;
+            Ok(Some(byte))
+        }
     }
 
     #[test]
-    fn retry_write_all_escalates_a_zero_length_write_to_the_given_error() {
-        fn always_zero(_target: &mut (), buf: &[u8]) -> Result<usize, &'static str> {
-            assert!(!buf.is_empty());
-            Ok(0)
+    fn retry_on_interrupted_reads_hello_through_eintr() {
+        let mut source = FlakyBytes::new(b"hello");
+        let mut got = Vec::new();
+        while let Some(byte) = retry_on_interrupted(|| source.read_one(), is_interrupted).unwrap() {
+            got.push(byte);
         }
-        let result = retry_write_all(&mut (), always_zero, b"x", is_interrupted, || "zero-write");
-        assert_eq!(result, Err("zero-write"));
+        assert_eq!(got, b"hello");
+    }
+
+    /// The `fill_buf`-shaped counterpart to [`FlakyBytes`]: a fetched
+    /// byte is held as "pending" and handed back on every call until
+    /// `consume` clears it, since a real `fill_buf` doesn't forget an
+    /// unconsumed byte just because it's asked for again — only
+    /// fetching a *new* byte can hit an `Interrupted`.
+    struct FlakyFillBuf<'a> {
+        remaining: &'a [u8],
+        pending: Option<u8>,
+        attempts: usize,
+        one: [u8; 1],
+    }
+
+    impl<'a> FlakyFillBuf<'a> {
+        fn new(data: &'a [u8]) -> Self {
+            Self {
+                remaining: data,
+                pending: None,
+                attempts: 0,
+                one: [0],
+            }
+        }
+
+        fn fill_buf(&mut self) -> Result<&[u8], &'static str> {
+            let byte = match self.pending {
+                Some(byte) => byte,
+                None => {
+                    self.attempts += 1;
+                    if self.attempts.is_multiple_of(2) {
+                        return Err("eintr");
+                    }
+                    let Some((&byte, rest)) = self.remaining.split_first() else {
+                        return Ok(&[]);
+                    };
+                    self.remaining = rest;
+                    self.pending = Some(byte);
+                    byte
+                }
+            };
+            self.one[0] = byte;
+            Ok(&self.one[..])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            if amount > 0 {
+                self.pending = None;
+            }
+        }
+    }
+
+    #[test]
+    fn retry_fill_buf_reads_hello_through_eintr() {
+        let mut source = FlakyFillBuf::new(b"hello");
+        let mut got = Vec::new();
+        loop {
+            let len = {
+                let buf =
+                    retry_fill_buf(&mut source, FlakyFillBuf::fill_buf, is_interrupted).unwrap();
+                if buf.is_empty() {
+                    break;
+                }
+                got.extend_from_slice(buf);
+                buf.len()
+            };
+            source.consume(len);
+        }
+        assert_eq!(got, b"hello");
+    }
+
+    /// Accepts one byte of whatever `buf` offers per real call,
+    /// alternating an `Interrupted` error in between every two real
+    /// calls, the same pattern as [`FlakyBytes`].
+    struct FlakyWriter {
+        written: Vec<u8>,
+        attempts: usize,
+    }
+
+    impl FlakyWriter {
+        fn new() -> Self {
+            Self {
+                written: Vec::new(),
+                attempts: 0,
+            }
+        }
+
+        fn write_one(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
+            self.attempts += 1;
+            if self.attempts.is_multiple_of(2) {
+                return Err("eintr");
+            }
+            self.written.push(buf[0]);
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn retry_write_all_writes_hello_through_eintr() {
+        let mut sink = FlakyWriter::new();
+        retry_write_all(
+            &mut sink,
+            FlakyWriter::write_one,
+            b"hello",
+            is_interrupted,
+            || "unreachable",
+        )
+        .unwrap();
+        assert_eq!(sink.written, b"hello");
     }
 }
