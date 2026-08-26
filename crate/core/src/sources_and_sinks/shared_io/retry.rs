@@ -241,4 +241,14 @@ mod tests {
         .unwrap();
         assert_eq!(sink.written, b"hello");
     }
+
+    #[test]
+    fn retry_write_all_escalates_a_zero_length_write_to_the_given_error() {
+        fn always_zero(_target: &mut (), buf: &[u8]) -> Result<usize, &'static str> {
+            assert!(!buf.is_empty());
+            Ok(0)
+        }
+        let result = retry_write_all(&mut (), always_zero, b"x", is_interrupted, || "zero-write");
+        assert_eq!(result, Err("zero-write"));
+    }
 }
