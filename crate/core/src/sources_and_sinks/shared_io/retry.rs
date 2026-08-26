@@ -191,6 +191,17 @@ mod tests {
         assert_eq!(got, b"hello");
     }
 
+    #[test]
+    fn retry_fill_buf_returns_empty_immediately_at_eof() {
+        // An empty `Ok` is EOF, not "try again": returned straight
+        // from the loop, without the extra re-fetch call a non-empty
+        // result needs.
+        let mut source = FlakyFillBuf::new(b"");
+        let buf = retry_fill_buf(&mut source, FlakyFillBuf::fill_buf, is_interrupted).unwrap();
+        assert!(buf.is_empty());
+        assert_eq!(source.attempts, 1);
+    }
+
     /// Accepts one byte of whatever `buf` offers per real call,
     /// alternating an `Interrupted` error in between every two real
     /// calls, the same pattern as [`FlakyBytes`].
