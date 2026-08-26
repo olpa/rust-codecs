@@ -1,3 +1,11 @@
+// The functions here are trivial.
+// - Technical goal: a caller forwards execution to one of them, so
+//   that the body of a caller (a `Write::write`/`finish`/`flush`
+//   method) is only one line.
+// - Reason: implementors of an io backend don't need to learn the
+//   gory details of what to call in which order, and don't need to
+//   copy-paste the drain/finalize/sync sequencing across backends.
+
 use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSource;
