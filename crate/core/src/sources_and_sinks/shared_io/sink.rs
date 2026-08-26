@@ -13,12 +13,11 @@ use crate::Sink;
 /// [`ScratchSink`] needs.
 ///
 /// `std::io::Write::write_all` already retries on `Interrupted`
-/// internally, so a `std::io` backend could delegate `write_all`
-/// straight through; `embedded_io::Write::write_all` doesn't, so an
+/// internally, so the `std::io` backend delegates `write_all`
+/// straight through. `embedded_io::Write::write_all` doesn't, so the
 /// `embedded_io` backend's `retrying_write_all` must track its own
-/// write position and retry the remainder itself. Both backends drive
-/// the same shared `retry_write_all` helper regardless, so `commit`
-/// below can trust this call already retries — hence the name.
+/// write position and retry the remainder itself. In either case,
+/// `commit` below can trust this call already retries — hence the name.
 pub trait RetryingWrite {
     type Error;
 

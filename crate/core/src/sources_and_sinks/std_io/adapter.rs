@@ -1,8 +1,8 @@
 use std::io::{BufRead, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    retry_fill_buf, retry_on_interrupted, retry_write_all, LendingSource, RetryingFillBuf,
-    RetryingRead, RetryingWrite, ScratchSink, ScratchSource,
+    retry_fill_buf, retry_on_interrupted, LendingSource, RetryingFillBuf, RetryingRead,
+    RetryingWrite, ScratchSink, ScratchSource,
 };
 use crate::{Sink, Source};
 
@@ -137,25 +137,15 @@ impl<R: BufRead> Source for BufReadSource<R> {
     }
 }
 
-/// Wraps a `std::io::Write`, retrying `write` on `Interrupted` and on
-/// a partial write — the one piece of backend-specific knowledge
-/// [`ScratchSink`] needs.
-///
-/// `std::io::Write::write_all` already does this internally, so this
-/// could just delegate straight to it — but driving `retry_write_all`
-/// here too, the same as `embedded_io`'s writer does (whose
-/// `write_all` doesn't retry), keeps one shared retry loop doing the
-/// work for both backends instead of one backend trusting its native
-/// `write_all` and the other hand-rolling it.
+/// Wraps a `std::io::Write`, delegating to its `write_all` so any
+/// specialized implementation is preserved.
 struct StdWriter<W>(W);
 
 impl<W: Write> RetryingWrite for StdWriter<W> {
     type Error = std::io::Error;
 
     fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-        retry_write_all(&mut self.0, W::write, buf, is_interrupted, || {
-            std::io::ErrorKind::WriteZero.into()
-        })
+        self.0.write_all(buf)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {

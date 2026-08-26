@@ -59,40 +59,18 @@ pub fn retry_fill_buf<T, E>(
     fill_buf(target)
 }
 
-/// Writes the whole of `buf`, retrying both on an interrupted call
-/// and on a partial write.
-///
-/// `std::io::Write::write_all` already does this internally, so a
-/// `std::io` backend *could* just delegate straight to it, but doing
-/// that here too, rather than only where a backend's own `write_all`
-/// doesn't retry (`embedded_io`'s doesn't), keeps both backends
-/// exercising the same, one, position-tracking retry loop instead of
-/// splitting into "trust the backend's write_all" and "hand-roll it"
-/// cases.
-///
-/// `zero_write_error` builds the error to fail with if `write` returns
-/// `Ok(0)` for a still-nonempty remainder: unlike a `read`/`fill_buf`
-/// returning empty (a legitimate EOF signal), `std::io::Write::write`
-/// returning `Ok(0)` for non-empty input means the writer can't accept
-/// more right now but isn't reporting an error either (e.g. a
-/// `&mut [u8]` at capacity); looping on that would spin forever, so
-/// `std::io::Write::write_all` itself escalates it to `WriteZero`, and
-/// this does the same rather than trusting every `write` impl not to
-/// do that. (`embedded_io::Write::write` is documented to never return
-/// `Ok(0)` for non-empty input, so an `embedded_io` backend can supply
-/// an unreachable `zero_write_error`.)
+/// `write_all` reimplementation, calling `write` retryable.
 pub fn retry_write_all<T, E>(
     target: &mut T,
     mut write: impl FnMut(&mut T, &[u8]) -> Result<usize, E>,
-    buf: &[u8],
+    mut buf: &[u8],
     is_interrupted: impl Fn(&E) -> bool,
     zero_write_error: impl FnOnce() -> E,
 ) -> Result<(), E> {
-    let mut pos = 0;
-    while pos < buf.len() {
-        match retry_on_interrupted(|| write(target, &buf[pos..]), &is_interrupted)? {
+    while !buf.is_empty() {
+        match retry_on_interrupted(|| write(target, buf), &is_interrupted)? {
             0 => return Err(zero_write_error()),
-            n => pos += n,
+            n => buf = &buf[n..],
         }
     }
     Ok(())

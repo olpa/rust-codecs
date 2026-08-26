@@ -140,8 +140,7 @@ impl<R: BufRead> Source for BufReadSource<R> {
 /// and on a partial write — the one piece of backend-specific
 /// knowledge [`ScratchSink`] needs. Unlike `std::io::Write::write_all`,
 /// `embedded_io::Write::write_all` doesn't do this itself, which is
-/// exactly why `retry_write_all` exists as a shared helper rather than
-/// each backend either trusting or hand-rolling it.
+/// why this backend uses the shared `retry_write_all` helper.
 struct EmbeddedWriter<W>(W);
 
 impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
