@@ -98,6 +98,10 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
     fn finish(&mut self) -> Result<(), Self::Error> {
         self.inner.flush()
     }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.inner.flush()
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +218,13 @@ mod tests {
     fn finish_flushes_the_inner_writer() {
         let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
         output.finish().unwrap();
+        assert_eq!(output.get_ref().flushes, 1);
+    }
+
+    #[test]
+    fn flush_flushes_the_inner_writer() {
+        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
+        output.flush().unwrap();
         assert_eq!(output.get_ref().flushes, 1);
     }
 }

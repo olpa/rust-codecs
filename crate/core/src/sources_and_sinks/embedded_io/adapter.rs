@@ -212,6 +212,10 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     fn finish(&mut self) -> Result<(), Self::Error> {
         self.0.finish()
     }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.0.flush()
+    }
 }
 
 // The buffer/`spare`/`commit` bookkeeping, EOF handling, panics, and

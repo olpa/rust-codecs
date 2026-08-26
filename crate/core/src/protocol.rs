@@ -42,6 +42,13 @@ pub trait Sink {
     fn finish(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Sync the destination at a sync point, without ending it — e.g.
+    /// forward to the underlying transport's own `flush`. Unlike
+    /// `finish`, more writes may follow.
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 // ----
