@@ -1,29 +1,19 @@
-//! Generic `Source` engines shared by every `std::io`/`embedded_io`-style
-//! backend. The scratch-buffer bookkeeping ([`ScratchSource`]) and the
-//! zero-copy `BufRead`-style forwarding ([`LendingSource`]) are
-//! identical across backends — only how a single `read`/`fill_buf`
-//! call is made, and what that backend's own retry-on-interruption
-//! looks like, differs. That's the one thing a backend supplies, via
-//! [`RetryingRead`]/[`RetryingFillBuf`].
-
+use super::retry::{retry_fill_buf, retry_on_interrupted};
 use crate::Source;
 
-/// A backend's `read`, already retrying internally on whatever that
-/// backend calls "interrupted" (`std::io::ErrorKind::Interrupted`,
-/// `embedded_io::ErrorKind::Interrupted`, ...). The one piece of
-/// backend-specific knowledge [`ScratchSource`] needs — everything
-/// else (the scratch buffer, the `pos`/`len` bookkeeping) is
-/// transport-independent.
-pub trait RetryingRead {
+/// A backend's raw, unretried `read`, plus how that backend's error
+/// says "interrupted" (`std::io::ErrorKind::Interrupted`,
+/// `embedded_io::ErrorKind::Interrupted`, ...).
+pub trait EintrRead {
     type Error;
 
-    /// Read some bytes into `buf`, retrying on an interrupted call.
-    /// `Ok(0)` means EOF, same as `std::io::Read::read`/
-    /// `embedded_io::Read::read`.
-    fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+
+    /// Whether `err` means "the call was interrupted, try again".
+    fn is_interrupted(err: &Self::Error) -> bool;
 }
 
-/// A `Source` over any [`RetryingRead`], reading into an owned scratch
+/// A `Source` over any [`EintrRead`], reading into an owned scratch
 /// buffer. The transport-independent core of `std_io::StdSource` /
 /// `embedded_io::EmbeddedSource`.
 pub struct ScratchSource<R, S> {
@@ -33,7 +23,7 @@ pub struct ScratchSource<R, S> {
     len: usize,
 }
 
-impl<R: RetryingRead, S: AsMut<[u8]>> ScratchSource<R, S> {
+impl<R: EintrRead, S: AsMut<[u8]>> ScratchSource<R, S> {
     /// Build a `ScratchSource`.
     ///
     /// # Panics
@@ -78,12 +68,13 @@ impl<R: RetryingRead, S: AsMut<[u8]>> ScratchSource<R, S> {
     }
 }
 
-impl<R: RetryingRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
+impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
     type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         if self.pos == self.len {
-            self.len = self.inner.retrying_read(self.buffer.as_mut())?;
+            self.len =
+                retry_on_interrupted(|| self.inner.read(self.buffer.as_mut()), R::is_interrupted)?;
             self.pos = 0;
         }
         if self.pos < self.len {
@@ -100,28 +91,32 @@ impl<R: RetryingRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
     }
 }
 
-/// A backend's `BufRead`, with `fill_buf` already retrying internally
-/// on that backend's notion of "interrupted". The one piece of
-/// backend-specific knowledge [`LendingSource`] needs.
-pub trait RetryingFillBuf {
+/// A backend's raw, unretried `BufRead::fill_buf`, plus how that
+/// backend's error says "interrupted" — the two pieces of
+/// backend-specific knowledge [`LendingSource`] needs to retry a call
+/// itself via [`retry_fill_buf`].
+pub trait EintrFillBuf {
     type Error;
 
     /// Return the contents of the internal buffer, filling it with
-    /// more data from the inner reader if it is empty, and retrying
-    /// on an interrupted call. An empty slice means EOF, same as
+    /// more data from the inner reader if it is empty, without
+    /// retrying. An empty slice means EOF, same as
     /// `std::io::BufRead::fill_buf`/`embedded_io::BufRead::fill_buf`.
-    fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error>;
+    fn fill_buf(&mut self) -> Result<&[u8], Self::Error>;
+
+    /// Whether `err` means "the call was interrupted, try again".
+    fn is_interrupted(err: &Self::Error) -> bool;
 
     /// Tell this buffer that `amount` bytes have been consumed.
     fn consume(&mut self, amount: usize);
 }
 
-/// A `Source` over any [`RetryingFillBuf`], with no scratch buffer of
+/// A `Source` over any [`EintrFillBuf`], with no scratch buffer of
 /// its own — the transport-independent core of `std_io::BufReadSource`
 /// / `embedded_io::BufReadSource`.
 ///
 /// Unlike [`ScratchSource`], which owns a buffer and calls
-/// `RetryingRead::retrying_read` into it, this forwards straight to
+/// `EintrRead::read` into it, this forwards straight to
 /// `fill_buf`/`consume` — `BufRead` is already a lending API with the
 /// same shape as [`Source`], so a reader that already implements it
 /// can be adapted with no extra copy.
@@ -129,7 +124,7 @@ pub struct LendingSource<R> {
     inner: R,
 }
 
-impl<R: RetryingFillBuf> LendingSource<R> {
+impl<R: EintrFillBuf> LendingSource<R> {
     pub fn new(inner: R) -> Self {
         Self { inner }
     }
@@ -150,11 +145,11 @@ impl<R: RetryingFillBuf> LendingSource<R> {
     }
 }
 
-impl<R: RetryingFillBuf> Source for LendingSource<R> {
+impl<R: EintrFillBuf> Source for LendingSource<R> {
     type Error = R::Error;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        let buf = self.inner.retrying_fill_buf()?;
+        let buf = retry_fill_buf(&mut self.inner, R::fill_buf, R::is_interrupted)?;
         Ok((!buf.is_empty()).then_some(buf))
     }
 
@@ -165,7 +160,7 @@ impl<R: RetryingFillBuf> Source for LendingSource<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LendingSource, RetryingFillBuf, RetryingRead, ScratchSource};
+    use super::{EintrFillBuf, EintrRead, LendingSource, ScratchSource};
     use crate::Source;
     use core::convert::Infallible;
 
@@ -179,16 +174,20 @@ mod tests {
         reads: usize,
     }
 
-    impl<R: RetryingRead> RetryingRead for CountingReader<R> {
+    impl<R: EintrRead> EintrRead for CountingReader<R> {
         type Error = R::Error;
 
-        fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             self.reads += 1;
-            self.inner.retrying_read(buf)
+            self.inner.read(buf)
+        }
+
+        fn is_interrupted(err: &Self::Error) -> bool {
+            R::is_interrupted(err)
         }
     }
 
-    /// A minimal [`RetryingRead`]/[`RetryingFillBuf`] over a borrowed
+    /// A minimal [`EintrRead`]/[`EintrFillBuf`] over a borrowed
     /// byte slice — stands in for a real `std::io`/`embedded_io` reader
     /// when testing `ScratchSource`/`LendingSource`, which don't care
     /// which backend supplies bytes.
@@ -196,22 +195,30 @@ mod tests {
         bytes: &'a [u8],
     }
 
-    impl<'a> RetryingRead for SliceReader<'a> {
+    impl<'a> EintrRead for SliceReader<'a> {
         type Error = Infallible;
 
-        fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             let n = buf.len().min(self.bytes.len());
             buf[..n].copy_from_slice(&self.bytes[..n]);
             self.bytes = &self.bytes[n..];
             Ok(n)
         }
+
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            false
+        }
     }
 
-    impl<'a> RetryingFillBuf for SliceReader<'a> {
+    impl<'a> EintrFillBuf for SliceReader<'a> {
         type Error = Infallible;
 
-        fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
             Ok(self.bytes)
+        }
+
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            false
         }
 
         fn consume(&mut self, amount: usize) {
@@ -219,7 +226,7 @@ mod tests {
         }
     }
 
-    /// A [`RetryingFillBuf`] that yields `b"hi"`, then an empty fill,
+    /// A [`EintrFillBuf`] that yields `b"hi"`, then an empty fill,
     /// then `b"more"` — stands in for a transport whose "nothing right
     /// now" isn't forever (a growing file, a pipe), proving a
     /// `LendingSource` doesn't latch itself shut after a single empty
@@ -230,10 +237,10 @@ mod tests {
         buf: &'static [u8],
     }
 
-    impl RetryingFillBuf for GrowsAfterAnEmptyFill {
+    impl EintrFillBuf for GrowsAfterAnEmptyFill {
         type Error = Infallible;
 
-        fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
             if self.buf.is_empty() {
                 self.buf = match self.stage {
                     0 => b"hi",
@@ -244,6 +251,10 @@ mod tests {
                 self.stage += 1;
             }
             Ok(self.buf)
+        }
+
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            false
         }
 
         fn consume(&mut self, amount: usize) {

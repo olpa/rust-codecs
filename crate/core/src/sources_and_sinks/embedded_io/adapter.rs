@@ -1,8 +1,8 @@
 use embedded_io::{BufRead, ErrorKind, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    retry_fill_buf, retry_on_interrupted, retry_write_all, LendingSource, RetryingFillBuf,
-    RetryingRead, RetryingWrite, ScratchSink, ScratchSource,
+    retry_write_all, EintrFillBuf, EintrRead, LendingSource, RetryingWrite, ScratchSink,
+    ScratchSource,
 };
 use crate::{Sink, Source};
 
@@ -10,16 +10,20 @@ fn is_interrupted<E: embedded_io::Error>(e: &E) -> bool {
     e.kind() == ErrorKind::Interrupted
 }
 
-/// Wraps an `embedded_io::Read`, retrying `read` on `Interrupted` —
-/// the one piece of backend-specific knowledge [`ScratchSource`]
-/// needs.
+/// Wraps an `embedded_io::Read`, recognizing `Interrupted` — the one
+/// piece of backend-specific knowledge [`ScratchSource`] needs to
+/// retry `read` itself.
 struct EmbeddedReader<R>(R);
 
-impl<R: Read> RetryingRead for EmbeddedReader<R> {
+impl<R: Read> EintrRead for EmbeddedReader<R> {
     type Error = R::Error;
 
-    fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        retry_on_interrupted(|| self.0.read(buf), is_interrupted)
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.0.read(buf)
+    }
+
+    fn is_interrupted(err: &Self::Error) -> bool {
+        is_interrupted(err)
     }
 }
 
@@ -76,16 +80,20 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
     }
 }
 
-/// Wraps an `embedded_io::BufRead`, retrying `fill_buf` on
-/// `Interrupted` — the one piece of backend-specific knowledge
-/// [`LendingSource`] needs.
+/// Wraps an `embedded_io::BufRead`, recognizing `Interrupted` — the
+/// one piece of backend-specific knowledge [`LendingSource`] needs to
+/// retry `fill_buf` itself.
 struct EmbeddedBufReader<R>(R);
 
-impl<R: BufRead> RetryingFillBuf for EmbeddedBufReader<R> {
+impl<R: BufRead> EintrFillBuf for EmbeddedBufReader<R> {
     type Error = R::Error;
 
-    fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error> {
-        retry_fill_buf(&mut self.0, R::fill_buf, is_interrupted)
+    fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+        self.0.fill_buf()
+    }
+
+    fn is_interrupted(err: &Self::Error) -> bool {
+        is_interrupted(err)
     }
 
     fn consume(&mut self, amount: usize) {

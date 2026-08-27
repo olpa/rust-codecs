@@ -24,19 +24,22 @@ pub use write::{pump_finish, pump_flush, pump_write};
 /// on: the scratch-buffer/`BufRead`-forwarding/`spare`-`commit`
 /// bookkeeping that's identical across `std::io`/`embedded_io`-style
 /// backends, parameterized over the one thing that differs — how a
-/// backend makes and retries a single `read`/`fill_buf`/`write` call.
-/// See `std_io::adapter`/`embedded_io::adapter` for how a backend
-/// plugs into these.
+/// backend makes a single `read`/`fill_buf`/`write` call and
+/// recognizes its own "interrupted" error. `ScratchSource`/
+/// `LendingSource` do the retrying themselves, via `retry_on_interrupted`/
+/// `retry_fill_buf` below; `ScratchSink` instead leaves retrying to
+/// `RetryingWrite`, since backends retry writes differently (`std::io`'s
+/// `write_all` already retries internally; `embedded_io` needs the
+/// explicit `retry_write_all` loop). See `std_io::adapter`/
+/// `embedded_io::adapter` for how a backend plugs into these.
 mod sink;
 pub use sink::{RetryingWrite, ScratchSink};
 
 mod source;
-pub use source::{LendingSource, RetryingFillBuf, RetryingRead, ScratchSource};
+pub use source::{EintrFillBuf, EintrRead, LendingSource, ScratchSource};
 
-/// The retry-on-interrupted loop a `RetryingRead`/`RetryingWrite` impl
-/// needs for a single `read`/`write` call — shared because that loop
-/// is identical across backends once each supplies its own
-/// "is this error interrupted" predicate.
+/// The retry-on-interrupted loop shared across backends, once each
+/// supplies its own "is this error interrupted" predicate.
 mod retry;
 pub use retry::{retry_fill_buf, retry_on_interrupted, retry_write_all};
 

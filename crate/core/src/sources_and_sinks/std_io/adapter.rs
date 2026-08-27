@@ -1,8 +1,7 @@
 use std::io::{BufRead, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    retry_fill_buf, retry_on_interrupted, LendingSource, RetryingFillBuf, RetryingRead,
-    RetryingWrite, ScratchSink, ScratchSource,
+    EintrFillBuf, EintrRead, LendingSource, RetryingWrite, ScratchSink, ScratchSource,
 };
 use crate::{Sink, Source};
 
@@ -10,15 +9,20 @@ fn is_interrupted(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::Interrupted
 }
 
-/// Wraps a `std::io::Read`, retrying `read` on `Interrupted` — the one
-/// piece of backend-specific knowledge [`ScratchSource`] needs.
+/// Wraps a `std::io::Read`, recognizing `Interrupted` — the one piece
+/// of backend-specific knowledge [`ScratchSource`] needs to retry
+/// `read` itself.
 struct StdReader<R>(R);
 
-impl<R: Read> RetryingRead for StdReader<R> {
+impl<R: Read> EintrRead for StdReader<R> {
     type Error = std::io::Error;
 
-    fn retrying_read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        retry_on_interrupted(|| self.0.read(buf), is_interrupted)
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.0.read(buf)
+    }
+
+    fn is_interrupted(err: &Self::Error) -> bool {
+        is_interrupted(err)
     }
 }
 
@@ -75,15 +79,20 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
     }
 }
 
-/// Wraps a `std::io::BufRead`, retrying `fill_buf` on `Interrupted` —
-/// the one piece of backend-specific knowledge [`LendingSource`] needs.
+/// Wraps a `std::io::BufRead`, recognizing `Interrupted` — the one
+/// piece of backend-specific knowledge [`LendingSource`] needs to
+/// retry `fill_buf` itself.
 struct StdBufReader<R>(R);
 
-impl<R: BufRead> RetryingFillBuf for StdBufReader<R> {
+impl<R: BufRead> EintrFillBuf for StdBufReader<R> {
     type Error = std::io::Error;
 
-    fn retrying_fill_buf(&mut self) -> Result<&[u8], Self::Error> {
-        retry_fill_buf(&mut self.0, R::fill_buf, is_interrupted)
+    fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+        self.0.fill_buf()
+    }
+
+    fn is_interrupted(err: &Self::Error) -> bool {
+        is_interrupted(err)
     }
 
     fn consume(&mut self, amount: usize) {

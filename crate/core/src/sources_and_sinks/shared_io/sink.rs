@@ -89,7 +89,8 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         assert!(amount <= self.offered);
-        self.inner.retrying_write_all(&self.buffer.as_mut()[..amount])?;
+        self.inner
+            .retrying_write_all(&self.buffer.as_mut()[..amount])?;
         self.offered = 0;
         Ok(())
     }
