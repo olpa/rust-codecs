@@ -228,19 +228,23 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
 // The buffer/`spare`/`commit` bookkeeping, EOF handling, panics, and
 // interrupt-retry mechanics are all transport-independent and tested
 // once against `ScratchSource`/`LendingSource`/`ScratchSink` in
-// `shared_io::source`/`shared_io::sink`/`shared_io::retry`. What's
-// left to test here is genuinely backend-specific: does `is_interrupted`
-// recognize `embedded_io`'s own `Interrupted` kind, and does a real
-// `embedded_io::Read`/`BufRead`/`Write` actually get driven correctly
-// end to end through `EmbeddedSource`/`BufReadSource`/`EmbeddedSink`.
+// `shared_io::source`/`shared_io::sink`/`shared_io::retry`, including
+// the read-side retry-on-interrupted wiring itself (proven there
+// against a synthetic flaky reader). What's left to test here is
+// genuinely backend-specific: does `is_interrupted` recognize
+// `embedded_io`'s own `Interrupted` kind, does a real `embedded_io::Write`
+// actually get driven through our own `retry_write_all` end to end
+// (unlike `std::io::Write::write_all`, `embedded_io`'s doesn't retry on
+// its own), and does everything else wire up correctly end to end
+// through `EmbeddedSource`/`EmbeddedSink`.
 #[cfg(test)]
 mod tests {
-    use embedded_io::{BufRead, ErrorKind, ErrorType, Read, Write};
+    use embedded_io::{ErrorKind, ErrorType, Write};
 
-    use super::{is_interrupted, BufReadSource, EmbeddedSink, EmbeddedSource};
+    use super::{is_interrupted, EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
     use crate::stream_to_stream;
-    use crate::{Sink, Source};
+    use crate::Sink;
 
     #[test]
     fn is_interrupted_recognizes_the_embedded_io_kind() {
@@ -275,8 +279,7 @@ mod tests {
         }
     }
 
-    /// Fails its first `read`/`fill_buf`/`write` with `Interrupted`,
-    /// then delegates.
+    /// Fails its first `write` with `Interrupted`, then delegates.
     struct FlakyOnce<R> {
         inner: R,
         failed: bool,
@@ -284,30 +287,6 @@ mod tests {
 
     impl<R: ErrorType> ErrorType for FlakyOnce<R> {
         type Error = FlakyError<R::Error>;
-    }
-
-    impl<R: Read> Read for FlakyOnce<R> {
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            if !self.failed {
-                self.failed = true;
-                return Err(FlakyError::Interrupted);
-            }
-            self.inner.read(buf).map_err(FlakyError::Inner)
-        }
-    }
-
-    impl<R: BufRead> BufRead for FlakyOnce<R> {
-        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
-            if !self.failed {
-                self.failed = true;
-                return Err(FlakyError::Interrupted);
-            }
-            self.inner.fill_buf().map_err(FlakyError::Inner)
-        }
-
-        fn consume(&mut self, amt: usize) {
-            self.inner.consume(amt);
-        }
     }
 
     impl<W: Write> Write for FlakyOnce<W> {
@@ -325,16 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn chunk_retries_an_interrupted_read() {
-        let flaky = FlakyOnce {
-            inner: &b"retry me"[..],
-            failed: false,
-        };
-        let mut input = EmbeddedSource::new(flaky, [0u8; 8]);
-        assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
-    }
-
-    #[test]
     fn embedded_source_feeds_embedded_sink_end_to_end() {
         let mut input = EmbeddedSource::new(&b"embedded to embedded"[..], [0u8; 3]);
         let mut bytes = [0u8; 32];
@@ -344,16 +313,6 @@ mod tests {
             32 - output.into_inner().len()
         };
         assert_eq!(&bytes[..written], b"embedded to embedded");
-    }
-
-    #[test]
-    fn buf_read_source_retries_an_interrupted_fill() {
-        let flaky = FlakyOnce {
-            inner: &b"retry me too"[..],
-            failed: false,
-        };
-        let mut input = BufReadSource::new(flaky);
-        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
     }
 
     #[test]

@@ -225,19 +225,22 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
 // The buffer/`spare`/`commit` bookkeeping, EOF handling, panics, and
 // interrupt-retry mechanics are all transport-independent and tested
 // once against `ScratchSource`/`LendingSource`/`ScratchSink` in
-// `shared_io::source`/`shared_io::sink`/`shared_io::retry`. What's
+// `shared_io::source`/`shared_io::sink`/`shared_io::retry`, including
+// the retry-on-interrupted wiring itself (proven there against a
+// synthetic flaky reader). `StdWriter::retrying_write_all` also has no
+// retry code of its own to test — it delegates straight to
+// `std::io::Write::write_all`, which already retries internally. What's
 // left to test here is genuinely backend-specific: does `is_interrupted`
 // recognize `std::io`'s own `Interrupted` kind, and does a real
-// `std::io::Read`/`BufRead`/`Write` actually get driven correctly
-// end to end through `StdSource`/`BufReadSource`/`StdSink`.
+// `std::io::Read`/`Write` actually get driven correctly end to end
+// through `StdSource`/`StdSink`.
 #[cfg(test)]
 mod tests {
-    use std::io::{BufReader, Cursor, Read, Write};
+    use std::io::Cursor;
 
-    use super::{is_interrupted, BufReadSource, StdSink, StdSource};
+    use super::{is_interrupted, StdSink, StdSource};
     use crate::identity::identity;
     use crate::stream_to_stream;
-    use crate::{Sink, Source};
 
     #[test]
     fn is_interrupted_recognizes_the_std_io_kind() {
@@ -246,79 +249,6 @@ mod tests {
             "eintr"
         )));
         assert!(!is_interrupted(&std::io::Error::other("boom")));
-    }
-
-    /// Fails its first `read`/`write` with `Interrupted`, then
-    /// delegates.
-    struct FlakyOnce<R> {
-        inner: R,
-        failed: bool,
-    }
-
-    impl<R: Read> Read for FlakyOnce<R> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if !self.failed {
-                self.failed = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "eintr",
-                ));
-            }
-            self.inner.read(buf)
-        }
-    }
-
-    impl<W: Write> Write for FlakyOnce<W> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if !self.failed {
-                self.failed = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "eintr",
-                ));
-            }
-            self.inner.write(buf)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
-        }
-    }
-
-    #[test]
-    fn chunk_retries_an_interrupted_read() {
-        let flaky = FlakyOnce {
-            inner: Cursor::new(b"retry me".as_slice()),
-            failed: false,
-        };
-        let mut input = StdSource::new(flaky, [0u8; 8]);
-        assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
-    }
-
-    #[test]
-    fn buf_read_source_retries_an_interrupted_fill() {
-        // `BufReader::fill_buf` calls the wrapped `Read::read` directly
-        // when its own buffer is empty, so `FlakyOnce`'s interruption
-        // surfaces through `fill_buf` too.
-        let flaky = FlakyOnce {
-            inner: Cursor::new(b"retry me too".as_slice()),
-            failed: false,
-        };
-        let mut input = BufReadSource::new(BufReader::new(flaky));
-        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
-    }
-
-    #[test]
-    fn commit_retries_an_interrupted_write() {
-        let flaky = FlakyOnce {
-            inner: Vec::new(),
-            failed: false,
-        };
-        let mut output = StdSink::new(flaky, [0u8; 8]);
-        let spare = output.spare().unwrap().unwrap();
-        spare[..5].copy_from_slice(b"abcde");
-        output.commit(5).unwrap();
-        assert_eq!(output.into_inner().inner, b"abcde");
     }
 
     #[test]

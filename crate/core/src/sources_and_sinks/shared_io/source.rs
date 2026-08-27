@@ -180,6 +180,57 @@ mod tests {
         }
     }
 
+    /// Fails its first `read`/`fill_buf` with `Interrupted`, then
+    /// delegates — proves `ScratchSource`/`LendingSource` route a
+    /// reader's error through `retry_on_interrupted`/`retry_fill_buf`
+    /// rather than a bare, unretried call.
+    struct FlakyOnce<R> {
+        inner: R,
+        failed: bool,
+    }
+
+    impl<R: EintrRead<Error = std::io::Error>> EintrRead for FlakyOnce<R> {
+        type Error = std::io::Error;
+
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "eintr",
+                ));
+            }
+            self.inner.read(buf)
+        }
+
+        fn is_interrupted(err: &Self::Error) -> bool {
+            R::is_interrupted(err)
+        }
+    }
+
+    impl<R: EintrFillBuf<Error = std::io::Error>> EintrFillBuf for FlakyOnce<R> {
+        type Error = std::io::Error;
+
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "eintr",
+                ));
+            }
+            self.inner.fill_buf()
+        }
+
+        fn is_interrupted(err: &Self::Error) -> bool {
+            R::is_interrupted(err)
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.inner.consume(amount);
+        }
+    }
+
     /// A [`EintrFillBuf`] that yields `b"hi"`, then an empty fill,
     /// then `b"more"` — stands in for a transport whose "nothing right
     /// now" isn't forever (a growing file, a pipe), proving a
@@ -256,6 +307,26 @@ mod tests {
         let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]);
         input.chunk().unwrap();
         input.consume(3);
+    }
+
+    #[test]
+    fn chunk_retries_an_interrupted_read() {
+        let flaky = FlakyOnce {
+            inner: SliceReader(b"retry me"),
+            failed: false,
+        };
+        let mut input = ScratchSource::new(flaky, [0u8; 8]);
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
+    }
+
+    #[test]
+    fn lending_source_retries_an_interrupted_fill() {
+        let flaky = FlakyOnce {
+            inner: SliceReader(b"retry me too"),
+            failed: false,
+        };
+        let mut input = LendingSource::new(flaky);
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
     }
 
     #[test]
