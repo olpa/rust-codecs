@@ -1,23 +1,8 @@
-//! Generic `Sink` engine shared by every `std::io`/`embedded_io`-style
-//! backend: the scratch-buffer/`spare`/`commit` bookkeeping
-//! ([`ScratchSink`]) is identical across backends — only how a full
-//! buffer actually gets written out, and what that backend's own
-//! retry-on-interruption/partial-write looks like, differs. That's
-//! the one thing a backend supplies, via [`RetryingWrite`].
-
 use crate::Sink;
 
 /// A backend's "write this whole buffer out", already retrying
 /// internally on partial writes and on whatever that backend calls
-/// "interrupted". The one piece of backend-specific knowledge
-/// [`ScratchSink`] needs.
-///
-/// `std::io::Write::write_all` already retries on `Interrupted`
-/// internally, so the `std::io` backend delegates `write_all`
-/// straight through. `embedded_io::Write::write_all` doesn't, so the
-/// `embedded_io` backend's `retrying_write_all` must track its own
-/// write position and retry the remainder itself. In either case,
-/// `commit` below can trust this call already retries — hence the name.
+/// "interrupted".
 pub trait RetryingWrite {
     type Error;
 
@@ -27,8 +12,7 @@ pub trait RetryingWrite {
 }
 
 /// A `Sink` over any [`RetryingWrite`], staging writes in an owned
-/// scratch buffer. The transport-independent core of
-/// `std_io::StdSink` / `embedded_io::EmbeddedSink`.
+/// scratch buffer.
 pub struct ScratchSink<W, S> {
     inner: W,
     buffer: S,
@@ -40,8 +24,7 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> ScratchSink<W, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `buffer`: it could never hold a byte for
-    /// `commit` to write out.
+    /// Panics on an empty `buffer`.
     pub fn new(inner: W, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),
