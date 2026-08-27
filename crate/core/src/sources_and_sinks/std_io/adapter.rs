@@ -9,9 +9,7 @@ fn is_interrupted(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::Interrupted
 }
 
-/// Wraps a `std::io::Read`, recognizing `Interrupted` — the one piece
-/// of backend-specific knowledge [`ScratchSource`] needs to retry
-/// `read` itself.
+/// Wraps a `std::io::Read`, recognizing `Interrupted`.
 struct StdReader<R>(R);
 
 impl<R: Read> EintrRead for StdReader<R> {
@@ -35,8 +33,7 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `buffer`: it could never hold a byte read
-    /// from `inner`, so `chunk` could never return anything.
+    /// Panics on an empty `buffer`.
     pub fn new(inner: R, buffer: S) -> Self {
         Self(ScratchSource::new(StdReader(inner), buffer))
     }
@@ -50,17 +47,13 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
     }
 
     /// Reclaim the reader, discarding the scratch buffer and any
-    /// buffered, unconsumed bytes (already read from `inner` into the
-    /// buffer via `chunk`, but not yet passed to `consume`).
+    /// unconsumed bytes still in it.
     pub fn into_inner(self) -> R {
         self.0.into_inner().0
     }
 
-    /// Reclaim both the reader and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `StdSource`. Any buffered,
-    /// unconsumed bytes (already read from `inner` into the buffer via
-    /// `chunk`, but not yet passed to `consume`) are discarded along
-    /// with it.
+    /// Reclaim both the reader and the scratch buffer; any unconsumed
+    /// bytes still in it are lost.
     pub fn into_parts(self) -> (R, S) {
         let (reader, buffer) = self.0.into_parts();
         (reader.0, buffer)
@@ -79,9 +72,7 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
     }
 }
 
-/// Wraps a `std::io::BufRead`, recognizing `Interrupted` — the one
-/// piece of backend-specific knowledge [`LendingSource`] needs to
-/// retry `fill_buf` itself.
+/// Wraps a `std::io::BufRead`, recognizing `Interrupted`.
 struct StdBufReader<R>(R);
 
 impl<R: BufRead> EintrFillBuf for StdBufReader<R> {
@@ -100,17 +91,8 @@ impl<R: BufRead> EintrFillBuf for StdBufReader<R> {
     }
 }
 
-/// A `std::io::BufRead` used directly as an input stream, with no
-/// scratch buffer of its own.
-///
-/// Unlike [`StdSource`], which owns a buffer and calls `Read::read`
-/// into it, this forwards straight to `fill_buf`/`consume` — `BufRead`
-/// is already a lending API with the same shape as [`Source`], so a
-/// reader that already implements it (`BufReader`, `&[u8]`,
-/// `Cursor<Vec<u8>>`, `VecDeque<u8>`, ...) can be adapted with no extra
-/// copy. Wrapping an `R` that doesn't already buffer (a raw `File` or
-/// `TcpStream`) in a `BufReader` first, then in this, is the equivalent
-/// of `StdSource` minus the double allocation.
+/// A `Source` over `std::io::BufRead`, using the `BufRead`'s buffer
+/// directly to expose input as `u8` slices.
 pub struct BufReadSource<R>(LendingSource<StdBufReader<R>>);
 
 impl<R: BufRead> BufReadSource<R> {
@@ -127,8 +109,7 @@ impl<R: BufRead> BufReadSource<R> {
     }
 
     /// Return the wrapped reader. Unlike `StdSource::into_inner`,
-    /// nothing is lost: `BufReadSource` owns no scratch buffer of its
-    /// own, so any bytes `R` was still holding come back with it.
+    /// nothing is lost — there's no scratch buffer to discard.
     pub fn into_inner(self) -> R {
         self.0.into_inner().0
     }
@@ -146,8 +127,7 @@ impl<R: BufRead> Source for BufReadSource<R> {
     }
 }
 
-/// Wraps a `std::io::Write`, delegating to its `write_all` so any
-/// specialized implementation is preserved.
+/// Wraps a `std::io::Write`, delegating to its own `write_all`.
 struct StdWriter<W>(W);
 
 impl<W: Write> RetryingWrite for StdWriter<W> {
@@ -171,8 +151,7 @@ impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `buffer`: it could never hold a byte for
-    /// `commit` to write out.
+    /// Panics on an empty `buffer`.
     pub fn new(inner: W, buffer: S) -> Self {
         Self(ScratchSink::new(StdWriter(inner), buffer))
     }
@@ -185,17 +164,14 @@ impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
         &mut self.0.get_mut().0
     }
 
-    /// Reclaim the writer, discarding the scratch buffer and any bytes
-    /// staged in it via `spare` but not yet handed to `commit` — they
-    /// are not written to `inner`.
+    /// Reclaim the writer, discarding the scratch buffer and any
+    /// uncommitted staged bytes.
     pub fn into_inner(self) -> W {
         self.0.into_inner().0
     }
 
-    /// Reclaim both the writer and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `StdSink`. Any bytes
-    /// staged in the buffer via `spare` but not yet handed to `commit`
-    /// are discarded along with it, and are not written to `inner`.
+    /// Reclaim both the writer and the scratch buffer; any uncommitted
+    /// staged bytes are lost.
     pub fn into_parts(self) -> (W, S) {
         let (writer, buffer) = self.0.into_parts();
         (writer.0, buffer)
@@ -222,18 +198,6 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
     }
 }
 
-// The buffer/`spare`/`commit` bookkeeping, EOF handling, panics, and
-// interrupt-retry mechanics are all transport-independent and tested
-// once against `ScratchSource`/`LendingSource`/`ScratchSink` in
-// `shared_io::source`/`shared_io::sink`/`shared_io::retry`, including
-// the retry-on-interrupted wiring itself (proven there against a
-// synthetic flaky reader). `StdWriter::retrying_write_all` also has no
-// retry code of its own to test — it delegates straight to
-// `std::io::Write::write_all`, which already retries internally. What's
-// left to test here is genuinely backend-specific: does `is_interrupted`
-// recognize `std::io`'s own `Interrupted` kind, and does a real
-// `std::io::Read`/`Write` actually get driven correctly end to end
-// through `StdSource`/`StdSink`.
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;

@@ -10,9 +10,7 @@ fn is_interrupted<E: embedded_io::Error>(e: &E) -> bool {
     e.kind() == ErrorKind::Interrupted
 }
 
-/// Wraps an `embedded_io::Read`, recognizing `Interrupted` — the one
-/// piece of backend-specific knowledge [`ScratchSource`] needs to
-/// retry `read` itself.
+/// Wraps an `embedded_io::Read`, recognizing `Interrupted`.
 struct EmbeddedReader<R>(R);
 
 impl<R: Read> EintrRead for EmbeddedReader<R> {
@@ -36,8 +34,7 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `buffer`: it could never hold a byte read
-    /// from `inner`, so `chunk` could never return anything.
+    /// Panics on an empty `buffer`.
     pub fn new(inner: R, buffer: S) -> Self {
         Self(ScratchSource::new(EmbeddedReader(inner), buffer))
     }
@@ -51,17 +48,13 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     }
 
     /// Reclaim the reader, discarding the scratch buffer and any
-    /// buffered, unconsumed bytes (already read from `inner` into the
-    /// buffer via `chunk`, but not yet passed to `consume`).
+    /// unconsumed bytes still in it.
     pub fn into_inner(self) -> R {
         self.0.into_inner().0
     }
 
-    /// Reclaim both the reader and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `EmbeddedSource`. Any
-    /// buffered, unconsumed bytes (already read from `inner` into
-    /// the buffer via `chunk`, but not yet passed to `consume`) are
-    /// discarded along with them.
+    /// Reclaim both the reader and the scratch buffer; any unconsumed
+    /// bytes still in it are lost.
     pub fn into_parts(self) -> (R, S) {
         let (reader, buffer) = self.0.into_parts();
         (reader.0, buffer)
@@ -80,9 +73,7 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
     }
 }
 
-/// Wraps an `embedded_io::BufRead`, recognizing `Interrupted` — the
-/// one piece of backend-specific knowledge [`LendingSource`] needs to
-/// retry `fill_buf` itself.
+/// Wraps an `embedded_io::BufRead`, recognizing `Interrupted`.
 struct EmbeddedBufReader<R>(R);
 
 impl<R: BufRead> EintrFillBuf for EmbeddedBufReader<R> {
@@ -101,14 +92,8 @@ impl<R: BufRead> EintrFillBuf for EmbeddedBufReader<R> {
     }
 }
 
-/// An `embedded_io::BufRead` used directly as an input stream, with no
-/// scratch buffer of its own.
-///
-/// Unlike [`EmbeddedSource`], which owns a buffer and calls
-/// `Read::read` into it, this forwards straight to `fill_buf`/`consume`
-/// — `BufRead` is already a lending API with the same shape as
-/// [`Source`], so a reader that already implements it can be adapted
-/// with no extra copy.
+/// A `Source` over `embedded_io::BufRead`, using the `BufRead`'s
+/// buffer directly to expose input as `u8` slices.
 pub struct BufReadSource<R>(LendingSource<EmbeddedBufReader<R>>);
 
 impl<R: BufRead> BufReadSource<R> {
@@ -125,8 +110,7 @@ impl<R: BufRead> BufReadSource<R> {
     }
 
     /// Return the wrapped reader. Unlike `EmbeddedSource::into_inner`,
-    /// nothing is lost: `BufReadSource` owns no scratch buffer of its
-    /// own, so any bytes `R` was still holding come back with it.
+    /// nothing is lost — there's no scratch buffer to discard.
     pub fn into_inner(self) -> R {
         self.0.into_inner().0
     }
@@ -144,11 +128,9 @@ impl<R: BufRead> Source for BufReadSource<R> {
     }
 }
 
-/// Wraps an `embedded_io::Write`, retrying `write` on `Interrupted`
-/// and on a partial write — the one piece of backend-specific
-/// knowledge [`ScratchSink`] needs. Unlike `std::io::Write::write_all`,
-/// `embedded_io::Write::write_all` doesn't do this itself, which is
-/// why this backend uses the shared `retry_write_all` helper.
+/// Wraps an `embedded_io::Write`, retrying via `retry_write_all` —
+/// unlike `std::io::Write::write_all`, `embedded_io`'s doesn't retry
+/// on its own.
 struct EmbeddedWriter<W>(W);
 
 impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
@@ -174,8 +156,7 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `buffer`: it could never hold a byte for
-    /// `commit` to write out.
+    /// Panics on an empty `buffer`.
     pub fn new(inner: W, buffer: S) -> Self {
         Self(ScratchSink::new(EmbeddedWriter(inner), buffer))
     }
@@ -188,17 +169,14 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
         &mut self.0.get_mut().0
     }
 
-    /// Reclaim the writer, discarding the scratch buffer and any bytes
-    /// staged in it via `spare` but not yet handed to `commit` — they
-    /// are not written to `inner`.
+    /// Reclaim the writer, discarding the scratch buffer and any
+    /// uncommitted staged bytes.
     pub fn into_inner(self) -> W {
         self.0.into_inner().0
     }
 
-    /// Reclaim both the writer and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `EmbeddedSink`. Any bytes
-    /// staged in the buffer via `spare` but not yet handed to `commit`
-    /// are discarded along with it, and are not written to `inner`.
+    /// Reclaim both the writer and the scratch buffer; any uncommitted
+    /// staged bytes are lost.
     pub fn into_parts(self) -> (W, S) {
         let (writer, buffer) = self.0.into_parts();
         (writer.0, buffer)
@@ -225,18 +203,6 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     }
 }
 
-// The buffer/`spare`/`commit` bookkeeping, EOF handling, panics, and
-// interrupt-retry mechanics are all transport-independent and tested
-// once against `ScratchSource`/`LendingSource`/`ScratchSink` in
-// `shared_io::source`/`shared_io::sink`/`shared_io::retry`, including
-// the read-side retry-on-interrupted wiring itself (proven there
-// against a synthetic flaky reader). What's left to test here is
-// genuinely backend-specific: does `is_interrupted` recognize
-// `embedded_io`'s own `Interrupted` kind, does a real `embedded_io::Write`
-// actually get driven through our own `retry_write_all` end to end
-// (unlike `std::io::Write::write_all`, `embedded_io`'s doesn't retry on
-// its own), and does everything else wire up correctly end to end
-// through `EmbeddedSource`/`EmbeddedSink`.
 #[cfg(test)]
 mod tests {
     use embedded_io::{ErrorKind, ErrorType, Write};
