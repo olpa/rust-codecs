@@ -68,7 +68,10 @@ mod tests {
 
     use super::end_capable_pump_read;
     use crate::identity::identity;
-    use crate::{Codec, Drain, DrainCodec, Error, Progress, Pump, Source};
+    use crate::{
+        Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, Progress, Pump,
+        Source,
+    };
 
     /// A `Source` over a byte slice, yielding it in fixed-size pulls
     /// no matter how much of `bytes` remains — stands in for a wrapped
@@ -251,5 +254,61 @@ mod tests {
         assert_eq!(read(), b"l");
         assert_eq!(read(), b"");
         assert_eq!(read(), b"");
+    }
+
+    /// An `EndCapableCodec` that copies bytes 1:1 but ends its stream
+    /// after `limit` bytes, like a self-describing format with an
+    /// in-band terminator.
+    struct EarlyEnd {
+        limit: usize,
+        done: usize,
+    }
+
+    impl DrainCodec for EarlyEnd {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+    }
+
+    impl EndCapableCodec for EarlyEnd {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [u8],
+        ) -> Result<EndCapableProgress, Error> {
+            let remaining = self.limit - self.done;
+            let n = input.len().min(output.len()).min(remaining);
+            output[..n].copy_from_slice(&input[..n]);
+            self.done += n;
+            if self.done >= self.limit {
+                Ok(EndCapableProgress::End {
+                    consumed: n,
+                    written: n,
+                })
+            } else if n == input.len() {
+                Ok(EndCapableProgress::InputConsumed { written: n })
+            } else {
+                Ok(EndCapableProgress::OutputFilled { consumed: n })
+            }
+        }
+    }
+
+    #[test]
+    fn stops_at_in_band_end_without_touching_the_source_again() {
+        use crate::sources_and_sinks::slice::SliceSource;
+
+        let mut source = SliceSource::new(b"Hello World");
+        let mut pump = Pump::new(EarlyEnd { limit: 3, done: 0 });
+        let mut buf = [0u8; 8];
+
+        let n = end_capable_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"Hel");
+
+        // `pump.is_done()` must short-circuit before ever calling
+        // `source.chunk()` again — if it didn't, `source.consumed()`
+        // would advance past 3.
+        let n = end_capable_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(source.consumed(), 3);
     }
 }

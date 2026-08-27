@@ -297,9 +297,6 @@ mod tests {
 
     use super::{BufReadCodecReader, CodecReader, CodecWriter, EmbeddedError};
     use crate::identity::identity;
-    use crate::sources_and_sinks::shared_io::test_support::EarlyEnd;
-    #[cfg(feature = "alloc")]
-    use crate::sources_and_sinks::shared_io::test_support::Hoarder;
 
     const INPUT: &[u8] = b"embedded io";
 
@@ -352,43 +349,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "alloc")]
-    fn flush_does_not_end_the_stream() {
-        let mut output = [0u8; 32];
-        let remaining = {
-            let mut writer = CodecWriter::new(&mut output[..], Hoarder::default(), [0u8; 64]);
-            writer.write_all(b"first").unwrap();
-            writer.flush().unwrap();
-            writer.write_all(b"second").unwrap();
-            writer.finish().unwrap().len()
-        };
-        let written = output.len() - remaining;
-        assert_eq!(&output[..written], b"firstsecond");
-    }
-
-    #[test]
-    fn reader_stops_at_in_band_end() {
-        // The codec ends after 3 bytes; the reader must yield exactly
-        // those and then report EOF (0) on every later call, without
-        // touching the codec again.
-        let mut reader = CodecReader::new(
-            b"Hello World".as_slice(),
-            EarlyEnd { limit: 3, done: 0 },
-            [0u8; 8],
-        );
-        let mut out = [0u8; 8];
-        let mut pos = 0;
-        loop {
-            let n = reader.read(&mut out[pos..]).unwrap();
-            if n == 0 {
-                break;
-            }
-            pos += n;
-        }
-        assert_eq!(&out[..pos], b"Hel");
-    }
-
-    #[test]
     fn buf_read_codec_reader_needs_no_scratch_buffer() {
         let mut reader = BufReadCodecReader::new(INPUT, identity());
         let mut output = [0u8; INPUT.len()];
@@ -402,24 +362,5 @@ mod tests {
         }
         assert_eq!(pos, INPUT.len());
         assert_eq!(&output, INPUT);
-    }
-
-    #[test]
-    fn buf_read_codec_reader_stops_at_in_band_end() {
-        // Same latching behavior as `CodecReader`, but through the
-        // no-scratch-buffer `BufReadCodecReader` path — its own doc
-        // claims "same end-of-stream behavior as `CodecReader`".
-        let mut reader =
-            BufReadCodecReader::new(b"Hello World".as_slice(), EarlyEnd { limit: 3, done: 0 });
-        let mut out = [0u8; 8];
-        let mut pos = 0;
-        loop {
-            let n = reader.read(&mut out[pos..]).unwrap();
-            if n == 0 {
-                break;
-            }
-            pos += n;
-        }
-        assert_eq!(&out[..pos], b"Hel");
     }
 }

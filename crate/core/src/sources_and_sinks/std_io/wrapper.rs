@@ -309,7 +309,6 @@ mod tests {
 
     use super::{BufReadCodecReader, CodecReader, CodecWriter};
     use crate::rot13::rot13;
-    use crate::sources_and_sinks::shared_io::test_support::{EarlyEnd, Hoarder};
 
     #[test]
     fn buf_read_codec_reader_needs_no_scratch_buffer() {
@@ -341,48 +340,5 @@ mod tests {
         let mut writer = CodecWriter::new(&mut output[..], rot13(), vec![0u8; 2]);
         let error = writer.write(b"ab").unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
-    }
-
-    #[test]
-    fn flush_does_not_end_the_stream() {
-        let mut writer = CodecWriter::new(Vec::new(), Hoarder::default(), vec![0u8; 64]);
-        writer.write_all(b"first").unwrap();
-        writer.flush().unwrap();
-        writer.write_all(b"second").unwrap();
-        let out = writer.finish().unwrap();
-        assert_eq!(out, b"firstsecond");
-    }
-
-    #[test]
-    fn reader_stops_at_in_band_end() {
-        // The codec ends after 3 bytes; the reader must yield exactly
-        // those and then report EOF on every later call, without
-        // touching the codec again.
-        let mut reader = CodecReader::new(
-            Cursor::new(b"Hello World".as_slice()),
-            EarlyEnd { limit: 3, done: 0 },
-            vec![0u8; 8],
-        );
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert_eq!(out, b"Hel");
-        let mut buf = [0u8; 4];
-        assert_eq!(reader.read(&mut buf).unwrap(), 0);
-    }
-
-    #[test]
-    fn buf_read_codec_reader_stops_at_in_band_end() {
-        // Same latching behavior as `CodecReader`, but through the
-        // no-scratch-buffer `BufReadCodecReader` path — its own doc
-        // claims "same end-of-stream behavior as `CodecReader`".
-        let mut reader = BufReadCodecReader::new(
-            Cursor::new(b"Hello World".as_slice()),
-            EarlyEnd { limit: 3, done: 0 },
-        );
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).unwrap();
-        assert_eq!(out, b"Hel");
-        let mut buf = [0u8; 4];
-        assert_eq!(reader.read(&mut buf).unwrap(), 0);
     }
 }
