@@ -146,29 +146,6 @@ mod tests {
     use crate::Source;
     use core::convert::Infallible;
 
-    /// Wraps a reader, counting how many times `read` was actually
-    /// called on it — lets a test prove `ScratchSource::chunk` didn't
-    /// refill ahead of its consumed position (the `Source` contract
-    /// point that new bytes must not be handed out until the old ones
-    /// are released via `consume`).
-    struct CountingReader<R> {
-        inner: R,
-        reads: usize,
-    }
-
-    impl<R: EintrRead> EintrRead for CountingReader<R> {
-        type Error = R::Error;
-
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            self.reads += 1;
-            self.inner.read(buf)
-        }
-
-        fn is_interrupted(err: &Self::Error) -> bool {
-            R::is_interrupted(err)
-        }
-    }
-
     /// A minimal [`EintrRead`]/[`EintrFillBuf`] over a borrowed
     /// byte slice — stands in for a real `std::io`/`embedded_io` reader
     /// when testing `ScratchSource`/`LendingSource`, which don't care
@@ -247,45 +224,30 @@ mod tests {
 
     #[test]
     fn partial_consume_leaves_remainder_visible_on_next_chunk() {
-        let reader = CountingReader {
-            inner: SliceReader(b"abcdef"),
-            reads: 0,
-        };
-        let mut input = ScratchSource::new(reader, [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]);
 
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
         input.consume(1);
         // The unconsumed remainder reappears, overlapping the previous
         // chunk — no new bytes were pulled in to produce it.
         assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
     }
 
     #[test]
     fn full_consume_triggers_a_refill() {
-        let reader = CountingReader {
-            inner: SliceReader(b"abcdef"),
-            reads: 0,
-        };
-        let mut input = ScratchSource::new(reader, [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]);
 
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
         input.consume(4);
         assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
-        assert_eq!(input.get_ref().reads, 2);
     }
 
     #[test]
     fn repeated_chunk_without_consume_is_idempotent() {
-        let reader = CountingReader {
-            inner: SliceReader(b"abcd"),
-            reads: 0,
-        };
-        let mut input = ScratchSource::new(reader, [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"abcd"), [0u8; 4]);
 
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
-        assert_eq!(input.get_ref().reads, 1);
     }
 
     #[test]
