@@ -9,13 +9,10 @@ pub trait EintrRead {
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
 
-    /// Whether `err` means "the call was interrupted, try again".
     fn is_interrupted(err: &Self::Error) -> bool;
 }
 
-/// A `Source` over any [`EintrRead`], reading into an owned scratch
-/// buffer. The transport-independent core of `std_io::StdSource` /
-/// `embedded_io::EmbeddedSource`.
+/// A `Source`, Eintr-reading into an owned scratch buffer.
 pub struct ScratchSource<R, S> {
     inner: R,
     buffer: S,
@@ -28,8 +25,7 @@ impl<R: EintrRead, S: AsMut<[u8]>> ScratchSource<R, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `buffer`: it could never hold a byte read
-    /// from `inner`, so `chunk` could never return anything.
+    /// Panics on an empty `buffer`.
     pub fn new(inner: R, mut buffer: S) -> Self {
         assert!(
             !buffer.as_mut().is_empty(),
@@ -92,34 +88,23 @@ impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
 }
 
 /// A backend's raw, unretried `BufRead::fill_buf`, plus how that
-/// backend's error says "interrupted" — the two pieces of
-/// backend-specific knowledge [`LendingSource`] needs to retry a call
-/// itself via [`retry_fill_buf`].
+/// backend's error says "interrupted" (`std::io::ErrorKind::Interrupted`,
+/// `embedded_io::ErrorKind::Interrupted`, ...).
 pub trait EintrFillBuf {
     type Error;
 
-    /// Return the contents of the internal buffer, filling it with
-    /// more data from the inner reader if it is empty, without
-    /// retrying. An empty slice means EOF, same as
-    /// `std::io::BufRead::fill_buf`/`embedded_io::BufRead::fill_buf`.
+    /// Like `std::io::BufRead::fill_buf`/`embedded_io::BufRead::fill_buf`.
     fn fill_buf(&mut self) -> Result<&[u8], Self::Error>;
 
     /// Whether `err` means "the call was interrupted, try again".
     fn is_interrupted(err: &Self::Error) -> bool;
 
-    /// Tell this buffer that `amount` bytes have been consumed.
+    /// Like `std::io::BufRead::consume`/`embedded_io::BufRead::consume`.
     fn consume(&mut self, amount: usize);
 }
 
-/// A `Source` over any [`EintrFillBuf`], with no scratch buffer of
-/// its own — the transport-independent core of `std_io::BufReadSource`
-/// / `embedded_io::BufReadSource`.
-///
-/// Unlike [`ScratchSource`], which owns a buffer and calls
-/// `EintrRead::read` into it, this forwards straight to
-/// `fill_buf`/`consume` — `BufRead` is already a lending API with the
-/// same shape as [`Source`], so a reader that already implements it
-/// can be adapted with no extra copy.
+/// A `Source`, Eintr-reading into the buffer of `inner`, so that
+/// a `BufRead`-implementing reader can be adapted with no extra copy.
 pub struct LendingSource<R> {
     inner: R,
 }
@@ -137,9 +122,6 @@ impl<R: EintrFillBuf> LendingSource<R> {
         &mut self.inner
     }
 
-    /// Return the wrapped reader. Unlike `ScratchSource::into_inner`,
-    /// nothing is lost: `LendingSource` owns no scratch buffer of its
-    /// own, so any bytes `R` was still holding come back with it.
     pub fn into_inner(self) -> R {
         self.inner
     }
