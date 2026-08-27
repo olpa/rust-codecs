@@ -173,38 +173,33 @@ mod tests {
     /// byte slice — stands in for a real `std::io`/`embedded_io` reader
     /// when testing `ScratchSource`/`LendingSource`, which don't care
     /// which backend supplies bytes.
-    struct SliceReader<'a> {
-        bytes: &'a [u8],
-    }
+    struct SliceReader<'a>(&'a [u8]);
 
     impl<'a> EintrRead for SliceReader<'a> {
-        type Error = Infallible;
+        type Error = std::io::Error;
 
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            let n = buf.len().min(self.bytes.len());
-            buf[..n].copy_from_slice(&self.bytes[..n]);
-            self.bytes = &self.bytes[n..];
-            Ok(n)
+            std::io::Read::read(&mut self.0, buf)
         }
 
-        fn is_interrupted(_err: &Self::Error) -> bool {
-            false
+        fn is_interrupted(err: &Self::Error) -> bool {
+            err.kind() == std::io::ErrorKind::Interrupted
         }
     }
 
     impl<'a> EintrFillBuf for SliceReader<'a> {
-        type Error = Infallible;
+        type Error = std::io::Error;
 
         fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
-            Ok(self.bytes)
+            std::io::BufRead::fill_buf(&mut self.0)
         }
 
-        fn is_interrupted(_err: &Self::Error) -> bool {
-            false
+        fn is_interrupted(err: &Self::Error) -> bool {
+            err.kind() == std::io::ErrorKind::Interrupted
         }
 
         fn consume(&mut self, amount: usize) {
-            self.bytes = &self.bytes[amount..];
+            std::io::BufRead::consume(&mut self.0, amount)
         }
     }
 
@@ -246,14 +241,14 @@ mod tests {
 
     #[test]
     fn chunk_returns_none_at_genuine_eof() {
-        let mut input = ScratchSource::new(SliceReader { bytes: b"" }, [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b""), [0u8; 4]);
         assert_eq!(input.chunk().unwrap(), None);
     }
 
     #[test]
     fn partial_consume_leaves_remainder_visible_on_next_chunk() {
         let reader = CountingReader {
-            inner: SliceReader { bytes: b"abcdef" },
+            inner: SliceReader(b"abcdef"),
             reads: 0,
         };
         let mut input = ScratchSource::new(reader, [0u8; 4]);
@@ -269,7 +264,7 @@ mod tests {
     #[test]
     fn full_consume_triggers_a_refill() {
         let reader = CountingReader {
-            inner: SliceReader { bytes: b"abcdef" },
+            inner: SliceReader(b"abcdef"),
             reads: 0,
         };
         let mut input = ScratchSource::new(reader, [0u8; 4]);
@@ -283,7 +278,7 @@ mod tests {
     #[test]
     fn repeated_chunk_without_consume_is_idempotent() {
         let reader = CountingReader {
-            inner: SliceReader { bytes: b"abcd" },
+            inner: SliceReader(b"abcd"),
             reads: 0,
         };
         let mut input = ScratchSource::new(reader, [0u8; 4]);
@@ -296,14 +291,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn consume_more_than_available_panics() {
-        let mut input = ScratchSource::new(SliceReader { bytes: b"ab" }, [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]);
         input.chunk().unwrap();
         input.consume(3);
     }
 
     #[test]
     fn lending_source_forwards_to_fill_buf() {
-        let mut input = LendingSource::new(SliceReader { bytes: b"hello" });
+        let mut input = LendingSource::new(SliceReader(b"hello"));
         assert_eq!(input.chunk().unwrap(), Some(b"hello".as_slice()));
         input.consume(5);
         assert_eq!(input.chunk().unwrap(), None);
@@ -311,7 +306,7 @@ mod tests {
 
     #[test]
     fn lending_source_leaves_unconsumed_remainder_visible() {
-        let mut input = LendingSource::new(SliceReader { bytes: b"abcdef" });
+        let mut input = LendingSource::new(SliceReader(b"abcdef"));
         assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
         input.consume(2);
         assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
