@@ -91,6 +91,12 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         self.input.get_ref()
     }
 
+    /// The unconsumed bytes already pulled from the reader into the
+    /// scratch buffer, but not yet yielded to the caller.
+    pub fn pending(&mut self) -> &[u8] {
+        self.input.pending()
+    }
+
     /// Mutable counterpart to [`CodecReader::get_ref`].
     pub fn get_mut(&mut self) -> &mut R {
         self.input.get_mut()
