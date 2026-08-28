@@ -232,7 +232,7 @@ fn install_sigusr1_handler() {
     // SAFETY: registers a plain C function pointer that does nothing;
     // safe to run in a signal handler context.
     unsafe {
-        libc::signal(libc::SIGUSR1, no_op as libc::sighandler_t);
+        libc::signal(libc::SIGUSR1, no_op as *const () as libc::sighandler_t);
     }
 }
 
