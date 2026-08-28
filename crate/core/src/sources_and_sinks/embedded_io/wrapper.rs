@@ -1,6 +1,3 @@
-//! `embedded_io::Read`/`Write` wrappers over a [`Codec`](crate::Codec)
-//! or [`EndCapableCodec`](crate::EndCapableCodec).
-
 use core::fmt;
 
 use embedded_io::{BufRead, ErrorType, Read, Write};
@@ -77,9 +74,7 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `inbuf`: it could never hold a byte read
-    /// from `inner`, so the codec could never see any input — a caller
-    /// bug, not a runtime condition.
+    /// Panics on an empty `inbuf`.
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
         Self {
             input: EmbeddedSource::new(inner, inbuf),
@@ -87,26 +82,15 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         }
     }
 
-    /// Unwrap this reader, discarding the codec, and return the
-    /// wrapped reader. Any buffered, unconsumed input is discarded.
     pub fn into_inner(self) -> R {
         self.input.into_inner()
     }
 
-    /// Reclaim the reader, the codec, and the scratch buffer — e.g. to
-    /// read state the codec holds (a checksum, a digest), or to reuse
-    /// the buffer's allocation for another `CodecReader`. `into_inner`
-    /// discards the codec and the buffer; this is the exhaustive
-    /// teardown, keeping all three. Same caveat as `into_inner`:
-    /// buffered, unconsumed input is discarded.
     pub fn into_parts(self) -> (R, C, S) {
         let (inner, buffer) = self.input.into_parts();
         (inner, self.pump.into_inner(), buffer)
     }
 
-    /// Direct access to the wrapped reader, bypassing the codec.
-    /// Bytes already pulled from it into this reader's scratch buffer,
-    /// but not yet yielded to the caller, aren't visible here.
     pub fn get_ref(&self) -> &R {
         self.input.get_ref()
     }
@@ -117,19 +101,14 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         self.input.pending()
     }
 
-    /// Mutable counterpart to [`CodecReader::get_ref`].
     pub fn get_mut(&mut self) -> &mut R {
         self.input.get_mut()
     }
 
-    /// Direct access to the codec — e.g. to read state a
-    /// `EndCapableCodec` call doesn't expose (a checksum, a digest)
-    /// once its stream has ended in-band.
     pub fn codec_ref(&self) -> &C {
         self.pump.get_ref()
     }
 
-    /// Mutable counterpart to [`CodecReader::codec_ref`].
     pub fn codec_mut(&mut self) -> &mut C {
         self.pump.get_mut()
     }
@@ -164,38 +143,26 @@ impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
         }
     }
 
-    /// Unwrap this reader, discarding the codec, and return the wrapped
-    /// reader. Any bytes already buffered by `inner` but not yet
-    /// yielded to the caller are still there — unlike `CodecReader`,
-    /// nothing was copied out of `inner`'s own buffer.
     pub fn into_inner(self) -> R {
         self.input.into_inner()
     }
 
-    /// Reclaim the reader and the codec — e.g. to read state the codec
-    /// holds (a checksum, a digest). Same caveat as `into_inner`.
     pub fn into_parts(self) -> (R, C) {
         (self.input.into_inner(), self.pump.into_inner())
     }
 
-    /// Direct access to the wrapped reader, bypassing the codec.
     pub fn get_ref(&self) -> &R {
         self.input.get_ref()
     }
 
-    /// Mutable counterpart to [`BufReadCodecReader::get_ref`].
     pub fn get_mut(&mut self) -> &mut R {
         self.input.get_mut()
     }
 
-    /// Direct access to the codec — e.g. to read state a
-    /// `EndCapableCodec` call doesn't expose (a checksum, a digest)
-    /// once its stream has ended in-band.
     pub fn codec_ref(&self) -> &C {
         self.pump.get_ref()
     }
 
-    /// Mutable counterpart to [`BufReadCodecReader::codec_ref`].
     pub fn codec_mut(&mut self) -> &mut C {
         self.pump.get_mut()
     }
@@ -212,9 +179,11 @@ impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
     }
 }
 
-/// Wraps an [`embedded_io::Write`], transforming bytes before writing
-/// them to the wrapped endpoint. Don't forget to call
-/// [`finish`](CodecWriter::finish).
+/// Wraps an [`embedded_io::Write`]; bytes written to this wrapper are
+/// run through `C` before being written to the wrapped writer. Same
+/// behavior as
+/// [`std_io::CodecWriter`](crate::sources_and_sinks::std_io::CodecWriter);
+/// don't forget to call [`finish`](CodecWriter::finish).
 pub struct CodecWriter<W, C: Codec, S> {
     output: EmbeddedSink<W, S>,
     pump: Pump<C>,
@@ -225,9 +194,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `outbuf`, for the same reason
-    /// [`CodecReader::new`] does: it could never hold a byte for
-    /// `inner` to receive.
+    /// Panics on an empty `outbuf`, same as [`CodecReader::new`].
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
         Self {
             output: EmbeddedSink::new(inner, outbuf),
@@ -235,56 +202,30 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         }
     }
 
-    /// Direct access to the wrapped writer, bypassing the codec — e.g.
-    /// to interleave raw framing bytes with codec output. Safe to use
-    /// any time the codec has no output still owed from a prior
-    /// `write`/`flush` (fresh, or right after `flush`/`finish`);
-    /// writing here while the codec is mid-unit reorders bytes ahead of
-    /// whatever it's still holding.
     pub fn get_ref(&self) -> &W {
         self.output.get_ref()
     }
 
-    /// Mutable counterpart to [`CodecWriter::get_ref`].
     pub fn get_mut(&mut self) -> &mut W {
         self.output.get_mut()
     }
 
-    /// Direct access to the codec — e.g. to read state a `Codec` call
-    /// doesn't expose (a checksum, a digest) before calling
-    /// [`CodecWriter::finish`].
     pub fn codec_ref(&self) -> &C {
         self.pump.get_ref()
     }
 
-    /// Mutable counterpart to [`CodecWriter::codec_ref`].
     pub fn codec_mut(&mut self) -> &mut C {
         self.pump.get_mut()
     }
 
-    /// Drain the codec by calling its `finish` repeatedly until
-    /// `Drain::Done` (delivering any trailer/checksum/padding bytes it
-    /// was still holding), finalize the sink itself ([`Sink::finish`](crate::Sink::finish),
-    /// e.g. flushing the wrapped writer), and hand back ownership of it.
-    ///
-    /// Don't forget to call this: dropping a `CodecWriter` without
-    /// calling `finish` silently drops any trailer/padding/checksum
-    /// bytes the codec was still holding. There is no compiler
-    /// warning or runtime error, only truncated output discovered
-    /// later.
+    /// Drain the codec, finalize the sink, and hand back ownership of
+    /// the writer. Same behavior as
+    /// [`std_io::CodecWriter::finish`](crate::sources_and_sinks::std_io::CodecWriter::finish).
     pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
         Ok(self.output.into_inner())
     }
 
-    /// Reclaim the writer, the codec, and the scratch buffer without
-    /// finishing the codec stream — e.g. to read state the codec holds
-    /// (a checksum, a digest) after an error, or to reuse the buffer's
-    /// allocation for another `CodecWriter`. Same caveat as dropping
-    /// without calling `finish`: any trailer/padding/checksum bytes the
-    /// codec was still holding are discarded, and any output already
-    /// staged in the buffer via a prior `write`/`flush` but not yet
-    /// written to the wrapped writer is discarded too.
     pub fn into_parts(self) -> (W, C, S) {
         let (inner, buffer) = self.output.into_parts();
         (inner, self.pump.into_inner(), buffer)
