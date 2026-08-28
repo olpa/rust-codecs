@@ -1,24 +1,3 @@
-//! `std::io::Read`/`Write` wrappers over a [`Codec`](crate::Codec) or
-//! [`EndCapableCodec`](crate::EndCapableCodec).
-//!
-//! - [`CodecReader`]: wraps a `Read`, runs the transform on the fly, and
-//!   is itself a `Read` yielding the transformed bytes.
-//! - [`BufReadCodecReader`]: the same, for an `R: std::io::BufRead` —
-//!   no scratch buffer, since it lends straight out of `R`'s own buffer.
-//! - [`CodecWriter`]: wraps a `Write`; bytes written to it are
-//!   transformed on the fly before reaching the wrapped writer.
-//!
-//! Both use the same pump loops as `stream_to_stream`; they
-//! retain only the lifecycle policy imposed by `Read` or `Write`. The reader owns input
-//! scratch and writes directly into its caller's output; the writer
-//! reads directly from its caller and owns output scratch. Both take a
-//! caller-provided scratch buffer
-//! (`S: AsMut<[u8]>` — same convention as [`Chain`](crate::Chain))
-//! rather than allocating one internally: batching policy already has
-//! a canonical, composable expression in `BufReader`/`BufWriter`
-//! placement in the client's own stack, so a knob inside these
-//! wrappers would just duplicate that.
-
 use std::io::{self, BufRead, Read, Write};
 
 use core::convert::Infallible;
@@ -35,16 +14,11 @@ fn to_io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
 }
 
-/// `SinkExhausted`/`NoProgress` never carry endpoint data of their own
-/// (`DriveError`'s two data-less variants) — they mean the pump/codec
-/// pairing itself is broken, the same class of failure the crate's own
-/// [`ErrorKind::ContractViolation`] already names, so both route
-/// through `to_io_error` like a codec error would.
 fn adapter_contract_violation() -> io::Error {
     to_io_error(Error::new(ErrorKind::ContractViolation, 0, 0))
 }
 
-fn reader_error(err: DriveError<io::Error, Infallible>) -> io::Error {
+fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error {
     match err {
         DriveError::Source(error) => error,
         DriveError::Sink(never) => match never {},
@@ -53,7 +27,7 @@ fn reader_error(err: DriveError<io::Error, Infallible>) -> io::Error {
     }
 }
 
-fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
+fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error {
     match err {
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => error,
@@ -64,18 +38,19 @@ fn writer_error(err: DriveError<Infallible, io::Error>) -> io::Error {
 
 /// Wraps a `Read`, running `C` over the bytes as they're pulled through.
 ///
-/// `C` may be an ordinary [`Codec`] or a [`EndCapableCodec`] — every
-/// `Codec` is automatically a `EndCapableCodec` that never ends
-/// in-band.
+/// End-of-stream: when the wrapped reader hits EOF, the reader
+/// runs codec's `finish` (trailer, padding) and its bytes are
+/// yielded before this reader reports EOF itself.
 ///
-/// End-of-stream: when the wrapped reader hits EOF, the codec's
-/// `finish` runs (trailer, padding) and its bytes are yielded before
-/// this reader reports EOF itself — the caller never calls `finish`
-/// explicitly. If the codec ends its stream in-band before the input
-/// does, this reader yields exactly the bytes produced up to that
-/// point and then reports EOF itself, without touching the codec
-/// again; trailing input bytes already pulled from the wrapped reader
-/// are lost.
+/// For an end-capable codec that ends its stream before the input
+/// does, the reader yields exactly the bytes produced up to that
+/// point and then reports EOF itself:
+///
+/// - `finish` is not called: a codec that ends its own stream
+///   is assumed to have already taken care of its own finalization
+///   before reporting `End`.
+/// - Trailing input bytes already pulled from the wrapped reader are
+///   left in the buffer; the caller must handle that on its own.
 pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: StdSource<R, S>,
     pump: Pump<C>,
@@ -86,9 +61,7 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `inbuf`: it could never hold a byte read
-    /// from `inner`, so the codec could never see any input — a caller
-    /// bug, not a runtime condition.
+    /// Panics on an empty `inbuf`.
     pub fn new(inner: R, codec: C, inbuf: S) -> Self {
         Self {
             input: StdSource::new(inner, inbuf),
@@ -103,21 +76,17 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         self.input.into_inner()
     }
 
-    /// Reclaim the reader, the codec, and the scratch buffer — e.g. to
-    /// read state the codec holds (a checksum, a digest), or to reuse
-    /// the buffer's allocation for another `CodecReader`. `into_inner`
-    /// discards the codec and the buffer; this is the exhaustive
-    /// teardown, keeping all three. Same caveat as `into_inner`: bytes
-    /// already pulled from the reader but not yet yielded to the
-    /// caller are lost.
+    /// Reclaim the reader, the codec, and the scratch buffer. Same
+    /// caveat as `into_inner`: bytes already pulled from the reader
+    /// but not yet yielded to the caller are lost.
     pub fn into_parts(self) -> (R, C, S) {
         let (inner, buffer) = self.input.into_parts();
         (inner, self.pump.into_inner(), buffer)
     }
 
     /// Direct access to the wrapped reader, bypassing the codec.
-    /// Bytes already pulled from it into this reader's scratch buffer,
-    /// but not yet yielded to the caller, aren't visible here.
+    /// Bytes already pulled into this reader's scratch buffer but not
+    /// yet yielded aren't visible here.
     pub fn get_ref(&self) -> &R {
         self.input.get_ref()
     }
@@ -142,14 +111,13 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        end_capable_pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
+            .map_err(reader_error_to_io_error)
     }
 }
 
-/// Like [`CodecReader`], but for an `R` that already implements
-/// `std::io::BufRead` — no caller-provided scratch buffer, since
-/// [`BufReadSource`] lends straight out of `R`'s own buffer instead of
-/// copying into one of its own. Same end-of-stream behavior as
+/// Like [`CodecReader`], but for an `R: std::io::BufRead` — no
+/// caller-provided scratch buffer. Same end-of-stream behavior as
 /// `CodecReader`.
 pub struct BufReadCodecReader<R, C: EndCapableCodec> {
     input: BufReadSource<R>,
@@ -165,10 +133,9 @@ impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
         }
     }
 
-    /// Unwrap this reader, discarding the codec, and return the wrapped
-    /// reader. Any bytes already buffered by `inner` but not yet
-    /// yielded to the caller are still there — unlike `CodecReader`,
-    /// nothing was copied out of `inner`'s own buffer.
+    /// Unwrap this reader, discarding the codec. Unlike
+    /// `CodecReader::into_inner`, nothing is lost — there's no scratch
+    /// buffer to discard.
     pub fn into_inner(self) -> R {
         self.input.into_inner()
     }
@@ -204,7 +171,8 @@ impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
 
 impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        end_capable_pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
+            .map_err(reader_error_to_io_error)
     }
 }
 
@@ -227,9 +195,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     ///
     /// # Panics
     ///
-    /// Panics on an empty `outbuf`, for the same reason
-    /// [`CodecReader::new`] does: it could never hold a byte for
-    /// `inner` to receive.
+    /// Panics on an empty `outbuf`, same as [`CodecReader::new`].
     pub fn new(inner: W, codec: C, outbuf: S) -> Self {
         Self {
             output: StdSink::new(inner, outbuf),
@@ -275,18 +241,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// warning or runtime error, only truncated output discovered
     /// later.
     pub fn finish(mut self) -> io::Result<W> {
-        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
+        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)?;
         Ok(self.output.into_inner())
     }
 
     /// Reclaim the writer, the codec, and the scratch buffer without
-    /// finishing the codec stream — e.g. to read state the codec holds
-    /// (a checksum, a digest) after an error, or to reuse the buffer's
-    /// allocation for another `CodecWriter`. Same caveat as dropping
-    /// without calling `finish`: any trailer/padding/checksum bytes the
-    /// codec was still holding are discarded, and any output already
-    /// staged in the buffer via a prior `write`/`flush` but not yet
-    /// written to the wrapped writer is discarded too.
+    /// finishing the codec stream. Same caveat as dropping without
+    /// calling `finish`: trailer/padding/checksum bytes and any
+    /// staged-but-unwritten output are lost.
     pub fn into_parts(self) -> (W, C, S) {
         let (inner, buffer) = self.output.into_parts();
         (inner, self.pump.into_inner(), buffer)
@@ -295,11 +257,11 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error)
+        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error_to_io_error)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error)
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)
     }
 }
 

@@ -24,7 +24,9 @@ fn adapter_contract_violation<E>() -> EmbeddedError<E> {
     EmbeddedError::Codec(Error::new(ErrorKind::ContractViolation, 0, 0))
 }
 
-fn reader_error<E>(error: DriveError<E, core::convert::Infallible>) -> EmbeddedError<E> {
+fn reader_error_to_embedded_error<E>(
+    error: DriveError<E, core::convert::Infallible>,
+) -> EmbeddedError<E> {
     match error {
         DriveError::Source(error) => EmbeddedError::Io(error),
         DriveError::Sink(never) => match never {},
@@ -33,7 +35,9 @@ fn reader_error<E>(error: DriveError<E, core::convert::Infallible>) -> EmbeddedE
     }
 }
 
-fn writer_error<E>(error: DriveError<core::convert::Infallible, E>) -> EmbeddedError<E> {
+fn writer_error_to_embedded_error<E>(
+    error: DriveError<core::convert::Infallible, E>,
+) -> EmbeddedError<E> {
     match error {
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => EmbeddedError::Io(error),
@@ -128,7 +132,8 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C
 
 impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        end_capable_pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
+            .map_err(reader_error_to_embedded_error)
     }
 }
 
@@ -194,7 +199,8 @@ impl<R: BufRead, C: EndCapableCodec> ErrorType for BufReadCodecReader<R, C> {
 
 impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        end_capable_pump_read(&mut self.pump, &mut self.input, buf).map_err(reader_error)
+        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
+            .map_err(reader_error_to_embedded_error)
     }
 }
 
@@ -259,7 +265,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// warning or runtime error, only truncated output discovered
     /// later.
     pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
-        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error)?;
+        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
         Ok(self.output.into_inner())
     }
 
@@ -283,11 +289,11 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> ErrorType for CodecWriter<W, C, S> {
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error)
+        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error_to_embedded_error)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error)
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)
     }
 }
 
