@@ -64,6 +64,9 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 }
 
 /// Wraps an [`embedded_io::Read`], yielding bytes transformed by `C`.
+///
+/// Same end-of-stream and end-of-codec behavior as
+/// [`std_io::CodecReader`](crate::sources_and_sinks::std_io::CodecReader).
 pub struct CodecReader<R, C: EndCapableCodec, S> {
     input: EmbeddedSource<R, S>,
     pump: Pump<C>,
@@ -143,10 +146,9 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> 
     }
 }
 
-/// Like [`CodecReader`], but for an `R` that already implements
-/// `embedded_io::BufRead` — no caller-provided scratch buffer, since
-/// [`BufReadSource`] lends straight out of `R`'s own buffer instead of
-/// copying into one of its own. Same end-of-stream behavior as
+/// Like [`CodecReader`], but for an `R: embedded_io::BufRead`, using
+/// the `BufRead`'s buffer directly instead of a caller-provided
+/// scratch buffer. Same end-of-stream and end-of-codec behavior as
 /// `CodecReader`.
 pub struct BufReadCodecReader<R, C: EndCapableCodec> {
     input: BufReadSource<R>,
