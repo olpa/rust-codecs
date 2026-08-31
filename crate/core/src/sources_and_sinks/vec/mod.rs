@@ -7,7 +7,6 @@ mod adapter;
 
 pub use adapter::{VecSink, VecSource};
 
-#[cfg(feature = "alloc")]
 use crate::{stream_to_stream, DriveError, EndCapableCodec};
 
 /// Error from [`encode_str`]/[`encode_string`]: the codec failed, the
@@ -15,7 +14,6 @@ use crate::{stream_to_stream, DriveError, EndCapableCodec};
 /// the collected bytes weren't valid UTF-8. Both run entirely over an
 /// in-memory source and sink, so there's no source/sink error to
 /// report.
-#[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub enum EncodeError {
     Codec(crate::Error),
@@ -23,7 +21,6 @@ pub enum EncodeError {
     Utf8(alloc::string::FromUtf8Error),
 }
 
-#[cfg(feature = "alloc")]
 impl<EI, EO> From<DriveError<EI, EO>> for EncodeError {
     fn from(error: DriveError<EI, EO>) -> Self {
         match error {
@@ -39,7 +36,6 @@ impl<EI, EO> From<DriveError<EI, EO>> for EncodeError {
     }
 }
 
-#[cfg(feature = "alloc")]
 impl From<alloc::string::FromUtf8Error> for EncodeError {
     fn from(error: alloc::string::FromUtf8Error) -> Self {
         Self::Utf8(error)
@@ -52,7 +48,6 @@ impl From<alloc::string::FromUtf8Error> for EncodeError {
 /// A convenience combinator over
 /// [`crate::sources_and_sinks::slice::SliceSource`]/[`VecSink`]/
 /// [`stream_to_stream`].
-#[cfg(feature = "alloc")]
 pub fn encode_str(
     codec: impl EndCapableCodec,
     input: impl AsRef<str>,
@@ -68,7 +63,6 @@ pub fn encode_str(
 /// `String`.
 ///
 /// Built on [`encode_str`], for codecs whose output is text.
-#[cfg(feature = "alloc")]
 pub fn encode_string(
     codec: impl EndCapableCodec,
     input: impl AsRef<str>,
