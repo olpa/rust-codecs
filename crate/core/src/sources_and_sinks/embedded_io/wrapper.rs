@@ -1,3 +1,4 @@
+use core::convert::Infallible;
 use core::fmt;
 
 use embedded_io::{BufRead, ErrorType, Read, Write};
@@ -21,9 +22,7 @@ fn adapter_contract_violation<E>() -> EmbeddedError<E> {
     EmbeddedError::Codec(Error::new(ErrorKind::ContractViolation, 0, 0))
 }
 
-fn reader_error_to_embedded_error<E>(
-    error: DriveError<E, core::convert::Infallible>,
-) -> EmbeddedError<E> {
+fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> EmbeddedError<E> {
     match error {
         DriveError::Source(error) => EmbeddedError::Io(error),
         DriveError::Sink(never) => match never {},
@@ -33,7 +32,7 @@ fn reader_error_to_embedded_error<E>(
 }
 
 fn writer_error_to_embedded_error<E>(
-    error: DriveError<core::convert::Infallible, WriteError<E>>,
+    error: DriveError<Infallible, WriteError<E>>,
 ) -> EmbeddedError<E> {
     match error {
         DriveError::Source(never) => match never {},
