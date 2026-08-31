@@ -21,6 +21,9 @@ pub trait Source {
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
 
     /// Release the first `amount` bytes of the current chunk.
+    ///
+    /// Never fails. This is mostly accounting, not I/O; any fallible
+    /// work belongs in `chunk`, not here.
     fn consume(&mut self, amount: usize);
 }
 
@@ -36,6 +39,8 @@ pub trait Sink {
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
 
     /// Commit the first `amount` bytes of the space returned by `spare`.
+    ///
+    /// Can fail. Unlike `Source::consume`, I/O is possible here.
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
 
     /// Complete the destination after the codec stream has ended.

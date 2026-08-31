@@ -20,8 +20,8 @@ impl<'a> SliceSource<'a> {
 impl Source for SliceSource<'_> {
     type Error = Infallible;
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        // Starts at `pos`, so an unconsumed remainder overlaps the
-        // previous call's chunk.
+        // Not `self.bytes.get(self.pos..)`: that returns `Some(&[])` when
+        // `pos == len`, but exhaustion must report `None`.
         Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
     }
     fn consume(&mut self, amount: usize) {
@@ -47,10 +47,36 @@ impl<'a> SliceSink<'a> {
 impl Sink for SliceSink<'_> {
     type Error = Infallible;
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+        // Not `self.bytes.get_mut(self.pos..)`: that returns `Some(&mut [])`
+        // when `pos == len`, but a full sink must report `None`.
         Ok((self.pos < self.bytes.len()).then_some(&mut self.bytes[self.pos..]))
     }
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         self.pos += amount;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_chunk_is_none_once_fully_consumed() {
+        let mut src = SliceSource::new(&[1, 2, 3]);
+        assert_eq!(src.chunk().unwrap(), Some(&[1, 2, 3][..]));
+        src.consume(3);
+        // pos == len here: must be None, not Some(&[]).
+        assert_eq!(src.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn sink_spare_is_none_once_fully_filled() {
+        let mut buf = [0u8; 3];
+        let mut sink = SliceSink::new(&mut buf);
+        assert_eq!(sink.spare().unwrap(), Some(&mut [0u8, 0, 0][..]));
+        sink.commit(3).unwrap();
+        // pos == len here: must be None, not Some(&mut []).
+        assert_eq!(sink.spare().unwrap(), None);
     }
 }
