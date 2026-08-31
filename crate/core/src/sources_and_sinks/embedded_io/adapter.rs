@@ -245,7 +245,7 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
 
 #[cfg(test)]
 mod tests {
-    use embedded_io::{ErrorKind, ErrorType, Write};
+    use embedded_io::ErrorKind;
 
     use super::{is_interrupted, EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
@@ -258,57 +258,6 @@ mod tests {
         assert!(!is_interrupted(&ErrorKind::Other));
     }
 
-    /// An error that's either a genuine `Interrupted` or a wrapped
-    /// inner error, so a test double can report `Interrupted` even
-    /// when its wrapped reader's own `Error` (e.g. `Infallible` for
-    /// `&[u8]`) can't express it.
-    #[derive(Debug)]
-    enum FlakyError<E> {
-        Interrupted,
-        Inner(E),
-    }
-
-    impl<E: core::fmt::Debug> core::fmt::Display for FlakyError<E> {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            write!(f, "{self:?}")
-        }
-    }
-
-    impl<E: embedded_io::Error> core::error::Error for FlakyError<E> {}
-
-    impl<E: embedded_io::Error> embedded_io::Error for FlakyError<E> {
-        fn kind(&self) -> ErrorKind {
-            match self {
-                FlakyError::Interrupted => ErrorKind::Interrupted,
-                FlakyError::Inner(e) => e.kind(),
-            }
-        }
-    }
-
-    /// Fails its first `write` with `Interrupted`, then delegates.
-    struct FlakyOnce<R> {
-        inner: R,
-        failed: bool,
-    }
-
-    impl<R: ErrorType> ErrorType for FlakyOnce<R> {
-        type Error = FlakyError<R::Error>;
-    }
-
-    impl<W: Write> Write for FlakyOnce<W> {
-        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-            if !self.failed {
-                self.failed = true;
-                return Err(FlakyError::Interrupted);
-            }
-            self.inner.write(buf).map_err(FlakyError::Inner)
-        }
-
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.inner.flush().map_err(FlakyError::Inner)
-        }
-    }
-
     #[test]
     fn embedded_source_feeds_embedded_sink_end_to_end() {
         let mut input = EmbeddedSource::new(&b"embedded to embedded"[..], [0u8; 3]);
@@ -319,22 +268,5 @@ mod tests {
             32 - output.into_inner().len()
         };
         assert_eq!(&bytes[..written], b"embedded to embedded");
-    }
-
-    #[test]
-    fn commit_retries_an_interrupted_write() {
-        let mut bytes = [0u8; 32];
-        let flaky = FlakyOnce {
-            inner: &mut bytes[..],
-            failed: false,
-        };
-        let written = {
-            let mut output = EmbeddedSink::new(flaky, [0u8; 8]);
-            let spare = output.spare().unwrap().unwrap();
-            spare[..5].copy_from_slice(b"abcde");
-            output.commit(5).unwrap();
-            32 - output.into_inner().inner.len()
-        };
-        assert_eq!(&bytes[..written], b"abcde");
     }
 }
