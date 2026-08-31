@@ -250,7 +250,6 @@ mod tests {
     use super::{is_interrupted, EmbeddedSink, EmbeddedSource};
     use crate::identity::identity;
     use crate::stream_to_stream;
-    use crate::Sink;
 
     #[test]
     fn is_interrupted_recognizes_the_embedded_io_kind() {
