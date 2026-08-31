@@ -8,7 +8,7 @@ use crate::sources_and_sinks::shared_io::{
 use crate::stream::Pump;
 use crate::{Codec, DriveError, EndCapableCodec, Error, ErrorKind};
 
-use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource};
+use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
 
 /// An endpoint error or a codec error from an embedded I/O wrapper.
 #[derive(Debug)]
@@ -33,11 +33,14 @@ fn reader_error_to_embedded_error<E>(
 }
 
 fn writer_error_to_embedded_error<E>(
-    error: DriveError<core::convert::Infallible, E>,
+    error: DriveError<core::convert::Infallible, WriteError<E>>,
 ) -> EmbeddedError<E> {
     match error {
         DriveError::Source(never) => match never {},
-        DriveError::Sink(error) => EmbeddedError::Io(error),
+        DriveError::Sink(WriteError::Io(error)) => EmbeddedError::Io(error),
+        // A zero-length write on non-empty input is a backend contract
+        // violation, same bucket as `SinkExhausted`/`NoProgress` below.
+        DriveError::Sink(WriteError::ZeroWrite) => adapter_contract_violation(),
         DriveError::Codec(error) => EmbeddedError::Codec(error),
         DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
     }

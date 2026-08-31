@@ -134,22 +134,56 @@ impl<R: BufRead> Source for BufReadSource<R> {
     }
 }
 
+/// An `embedded_io::Write::write` error, or a synthesized
+/// `ZeroWrite` for a zero-length write on non-empty input.
+///
+/// `embedded_io::Write::write`'s doc comment says implementations
+/// "must not" do this, but that's wishful thinking on the trait's
+/// part, not something the type system enforces: nothing stops a
+/// backend from returning `Ok(0)`.
+#[derive(Debug)]
+pub enum WriteError<E> {
+    Io(E),
+    ZeroWrite,
+}
+
+impl<E: core::fmt::Debug> core::fmt::Display for WriteError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl<E: embedded_io::Error> core::error::Error for WriteError<E> {}
+
+impl<E: embedded_io::Error> embedded_io::Error for WriteError<E> {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            WriteError::Io(e) => e.kind(),
+            WriteError::ZeroWrite => ErrorKind::WriteZero,
+        }
+    }
+}
+
 /// Wraps an `embedded_io::Write`, retrying via `retry_write_all` —
 /// unlike `std::io::Write::write_all`, `embedded_io`'s doesn't retry
 /// on its own.
 struct EmbeddedWriter<W>(W);
 
 impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
-    type Error = W::Error;
+    type Error = WriteError<W::Error>;
 
     fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-        retry_write_all(&mut self.0, W::write, buf, is_interrupted, || {
-            unreachable!("embedded_io::Write::write must not return Ok(0) for non-empty input")
-        })
+        retry_write_all(
+            &mut self.0,
+            |w, buf| w.write(buf).map_err(WriteError::Io),
+            buf,
+            is_interrupted,
+            || WriteError::ZeroWrite,
+        )
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush()
+        self.0.flush().map_err(WriteError::Io)
     }
 }
 
@@ -190,7 +224,7 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
 }
 
 impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
-    type Error = W::Error;
+    type Error = WriteError<W::Error>;
 
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
         self.0.spare()
