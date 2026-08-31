@@ -1,3 +1,5 @@
+//! Adapters for `std::io` backends.
+
 mod adapter;
 mod wrapper;
 
