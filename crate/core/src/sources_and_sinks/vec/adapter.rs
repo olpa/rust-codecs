@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::convert::Infallible;
 use core::mem::MaybeUninit;
 
@@ -12,25 +13,25 @@ use crate::{Sink, Source};
 
 /// An owned `Vec<u8>` used directly as an input stream.
 pub struct VecSource {
-    inner: alloc::vec::Vec<u8>,
+    inner: Vec<u8>,
     pos: usize,
 }
 
 impl VecSource {
-    pub fn new(inner: alloc::vec::Vec<u8>) -> Self {
+    pub fn new(inner: Vec<u8>) -> Self {
         Self { inner, pos: 0 }
     }
 
-    pub fn get_ref(&self) -> &alloc::vec::Vec<u8> {
+    pub fn get_ref(&self) -> &Vec<u8> {
         &self.inner
     }
 
     // Forbidden to add: see the file-level comment above.
-    // pub fn get_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
+    // pub fn get_mut(&mut self) -> &mut Vec<u8> {
     //     &mut self.inner
     // }
 
-    pub fn into_inner(self) -> alloc::vec::Vec<u8> {
+    pub fn into_inner(self) -> Vec<u8> {
         self.inner
     }
 }
@@ -50,7 +51,7 @@ impl Source for VecSource {
 /// A `Vec<u8>` output stream. Codec output is written straight into
 /// the vector's spare allocation without zero-initializing it first.
 pub struct VecSink {
-    inner: alloc::vec::Vec<u8>,
+    inner: Vec<u8>,
     grow_by: usize,
     offered: usize,
 }
@@ -62,11 +63,11 @@ impl VecSink {
     // small size), so this value is a floor, not the actual step size.
     pub const DEFAULT_GROWTH: usize = 1024;
 
-    pub fn new(inner: alloc::vec::Vec<u8>) -> Self {
+    pub fn new(inner: Vec<u8>) -> Self {
         Self::with_growth(inner, Self::DEFAULT_GROWTH)
     }
 
-    pub fn with_growth(inner: alloc::vec::Vec<u8>, grow_by: usize) -> Self {
+    pub fn with_growth(inner: Vec<u8>, grow_by: usize) -> Self {
         debug_assert!(grow_by > 0, "VecSink growth must be non-zero");
         Self {
             inner,
@@ -79,23 +80,23 @@ impl VecSink {
         }
     }
 
-    pub fn get_ref(&self) -> &alloc::vec::Vec<u8> {
+    pub fn get_ref(&self) -> &Vec<u8> {
         &self.inner
     }
 
     // Forbidden to add: see the file-level comment above.
-    // pub fn get_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
+    // pub fn get_mut(&mut self) -> &mut Vec<u8> {
     //     &mut self.inner
     // }
 
-    pub fn into_inner(self) -> alloc::vec::Vec<u8> {
+    pub fn into_inner(self) -> Vec<u8> {
         self.inner
     }
 }
 
 impl Default for VecSink {
     fn default() -> Self {
-        Self::new(alloc::vec::Vec::new())
+        Self::new(Vec::new())
     }
 }
 
@@ -135,7 +136,7 @@ mod tests {
 
     #[test]
     fn sink_spare_is_never_none_even_after_filling() {
-        let mut sink = VecSink::with_growth(alloc::vec::Vec::new(), 4);
+        let mut sink = VecSink::with_growth(Vec::new(), 4);
         let offered = sink.spare().unwrap().unwrap().len();
         sink.commit(offered).unwrap();
         // Unlike `SliceSink`, `VecSink` grows on demand: filling every
