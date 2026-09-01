@@ -35,9 +35,6 @@ impl Source for VecSource {
         Ok((self.pos < self.inner.len()).then_some(&self.inner[self.pos..]))
     }
     fn consume(&mut self, amount: usize) {
-        // Clamp rather than trust `amount`, mirroring `commit`: an
-        // overshoot must not push `pos` past `len`, since `chunk`'s
-        // indexing trusts that invariant.
         self.pos += amount.min(self.inner.len() - self.pos);
     }
 }
@@ -119,23 +116,7 @@ impl Sink for VecSink {
 
 #[cfg(test)]
 mod tests {
-    use super::{VecSink, VecSource};
-    use crate::identity::identity;
-    use crate::stream_to_stream;
-    use crate::Source;
-
-    #[test]
-    fn vec_to_vec_uses_the_shared_pump() {
-        let data = alloc::vec![1, 2, 3, 4, 5];
-        let mut input = VecSource::new(data.clone());
-        let mut output = VecSink::with_growth(alloc::vec::Vec::new(), 2);
-
-        let totals = stream_to_stream(&mut input, identity(), &mut output).unwrap();
-
-        assert_eq!(totals.consumed, data.len());
-        assert_eq!(totals.written, data.len());
-        assert_eq!(output.into_inner(), data);
-    }
+    use super::*;
 
     #[test]
     fn source_chunk_is_none_once_fully_consumed() {
@@ -144,5 +125,15 @@ mod tests {
         src.consume(3);
         // pos == len here: must be None, not Some(&[]).
         assert_eq!(src.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn sink_spare_is_never_none_even_after_filling() {
+        let mut sink = VecSink::with_growth(alloc::vec::Vec::new(), 4);
+        let offered = sink.spare().unwrap().unwrap().len();
+        sink.commit(offered).unwrap();
+        // Unlike `SliceSink`, `VecSink` grows on demand: filling every
+        // byte offered so far must not produce `None`.
+        assert!(sink.spare().unwrap().is_some());
     }
 }

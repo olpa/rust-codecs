@@ -27,7 +27,7 @@ impl Source for SliceSource<'_> {
         Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
     }
     fn consume(&mut self, amount: usize) {
-        self.pos += amount;
+        self.pos += amount.min(self.bytes.len() - self.pos);
     }
 }
 
@@ -54,7 +54,7 @@ impl Sink for SliceSink<'_> {
         Ok((self.pos < self.bytes.len()).then_some(as_uninit_mut(&mut self.bytes[self.pos..])))
     }
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
-        self.pos += amount;
+        self.pos += amount.min(self.bytes.len() - self.pos);
         Ok(())
     }
 }
