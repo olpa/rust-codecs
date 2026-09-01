@@ -118,7 +118,7 @@ pub trait DrainCodec {
 ///
 /// # The contract
 ///
-/// 1) Each call to `process` does one of two things:
+/// 1) Each successful call to `process` does one of two things:
 /// - it consumes all of `input`, or
 /// - it fills all of `output`.
 ///
@@ -146,12 +146,12 @@ pub trait DrainCodec {
 /// elsewhere in a larger composition — and must see a no-op, not a
 /// repeat.
 ///
-/// `finish` and `flush` are independent of each other. A `Done` from
-/// one does not make the other idempotent. When `flush` reaches
-/// `Done`, it means only that the codec reached a sync point; the
-/// stream stays open. So if `finish` is then called, with no new
-/// `process` input in between, it does its real work: it produces
-/// the actual trailer, not a no-op.
+/// A completed `flush` does not complete `finish`. `Done` from
+/// `flush` means only that the codec reached a sync point; the stream
+/// stays open. If `finish` is called afterward, with no new `process`
+/// input in between, it still does its real work and produces the
+/// actual trailer. The reverse order, calling `flush` after `finish`,
+/// is covered by point 5 and is not generally defined.
 ///
 /// 4)
 /// A call that returns `Err` does not put the codec into a defined
@@ -160,6 +160,11 @@ pub trait DrainCodec {
 /// If a caller wants a codec to stay dead after an error, the caller
 /// must enforce that itself. The contract does not give this for
 /// free.
+///
+/// The error's `consumed` and `written` fields report the exact input
+/// and output prefixes already processed by that call. Both counts
+/// must fit within the slices passed to the call, just like counts in
+/// a successful result.
 ///
 /// 5)
 /// This contract does not define what happens when `process` or
@@ -181,40 +186,10 @@ pub trait DrainCodec {
 /// a call stalls: reporting `OutputFilled` without having actually
 /// written all of a non-empty buffer.
 ///
-/// # Why full consumption, not partial — a codec must always make progress
-///
-/// One alternative design would let a single call report partial
-/// progress on both sides at once: consume some input, write some
-/// output, and leave the rest for later. This sounds more flexible,
-/// but it causes a problem.
-///
-/// Imagine an encoder that needs several more input bytes, or
-/// several more bytes of free output space, before it can produce
-/// anything. What happens when neither side has enough room for it
-/// to make progress?
-///
-/// If the caller had to handle this case, it would call `process`
-/// again, and hope that more input or output space is available
-/// next time. But the caller would have no way to know how many
-/// retries are normal, and how many mean the codec is stuck or
-/// broken.
-///
-/// This is not a rare edge case. A [`Source`] that reads from a
-/// network socket may hand over data one byte at a time. In that
-/// case, the caller could need many retries just to gather enough
-/// input for the codec to do anything.
-///
-/// There is also a broader question: where should this complexity
-/// live, on the codec side or on the caller side? Putting it on the
-/// codec side has two benefits.
-///
-/// - The caller's code stays simpler. Handling partial progress on
-///   both sides at once tends to produce messy code.
-/// - This benefit reaches beyond this crate. People will build on
-///   top of the `Codec` trait not only new codecs, but also wrappers
-///   around custom [`Source`]s and [`Sink`]s. That caller-side code
-///   deserves to stay simple, just as much as codec implementations
-///   do.
+/// Requiring one side to complete prevents ambiguous zero-progress
+/// stalls and keeps drivers simple. Codecs that need larger input or
+/// output units must buffer those units internally. The implementation
+/// patterns and fuller rationale are in `CREATING-CODECS.md`.
 ///
 /// # Creating a codec
 ///
@@ -250,9 +225,9 @@ pub trait Codec: DrainCodec {
 ///
 /// # The contract
 ///
-/// This trait follows [`Codec`]'s points 1–6, with one addition:
-/// `process` may also resolve to [`EndSignallingProgress::End`]. When it
-/// does:
+/// This trait follows [`Codec`]'s points 1–6, with one addition: a
+/// successful `process` call may also resolve to
+/// [`EndSignallingProgress::End`]. When it does:
 /// - the `consumed` input bytes belong to the ended stream,
 /// - the `written` output bytes were produced by this call,
 /// - `input[consumed..]` was not consumed; it belongs to whatever

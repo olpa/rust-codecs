@@ -186,7 +186,7 @@ impl<C: EndSignallingCodec> Pump<C> {
         Self { codec, done: false }
     }
 
-    /// Reach the wrapped codec, e.g. to read state a `EndSignallingCodec`
+    /// Reach the wrapped codec, e.g. to read state an `EndSignallingCodec`
     /// call doesn't expose (a checksum, a digest) once the stream has
     /// ended.
     pub fn get_ref(&self) -> &C {
