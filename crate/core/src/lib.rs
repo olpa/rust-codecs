@@ -3,12 +3,12 @@
 //! the stream adapters a codec crate and its clients build on.
 //!
 //! - [`Codec`]: implement this for a whole-stream codec. Every ordinary
-//!   codec is automatically a [`EndCapableCodec`] too, for input-side
+//!   codec is automatically a [`EndSignallingCodec`] too, for input-side
 //!   drivers that can use an in-band end.
-//! - [`Progress`], [`EndCapableProgress`], [`Drain`], [`Error`],
+//! - [`Progress`], [`EndSignallingProgress`], [`Drain`], [`Error`],
 //!   [`ErrorKind`]: the vocabulary these traits' methods speak in. The
 //!   contract in one sentence: every call fully consumes its input,
-//!   fully fills its output, or (for a `EndCapableCodec`) ends the
+//!   fully fills its output, or (for an `EndSignallingCodec`) ends the
 //!   stream in-band.
 //! - [`Source`]/[`Sink`]/[`stream_to_stream`]: the lending stream
 //!   contract, independent of any particular byte transport.
@@ -154,7 +154,7 @@
 //!
 //! ## Parsing using early-stop codecs
 //!
-//! A [`EndCapableCodec`] does not have to run through
+//! A [`EndSignallingCodec`] does not have to run through
 //! [`stream_to_stream`] end to end. It can also power a small
 //! hand-written parser, driven one step at a time. The full source for
 //! this example lives in `core/tests/early_stop_input.rs`, which
@@ -210,8 +210,8 @@ extern crate alloc;
 
 mod protocol;
 pub use protocol::{
-    Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, ErrorKind, Progress,
-    Sink, Source,
+    Codec, Drain, DrainCodec, EndSignallingCodec, EndSignallingProgress, Error, ErrorKind,
+    Progress, Sink, Source,
 };
 
 mod uninit;

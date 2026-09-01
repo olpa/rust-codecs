@@ -1,4 +1,4 @@
-//! Demonstrates driving a [`EndCapableCodec`] directly, call by call,
+//! Demonstrates driving a [`EndSignallingCodec`] directly, call by call,
 //! instead of through `stream_to_stream`'s internal pump loop — and
 //! what an early-stop input (in-band `End`) looks like from that
 //! level.
@@ -22,8 +22,8 @@ use core::convert::Infallible;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
 use rust_codecs_core::{
-    stream_to_stream, Drain, DrainCodec, DriveError, EndCapableCodec, EndCapableProgress, Error,
-    Source,
+    stream_to_stream, Drain, DrainCodec, DriveError, EndSignallingCodec, EndSignallingProgress,
+    Error, Source,
 };
 use std::mem::MaybeUninit;
 
@@ -39,28 +39,28 @@ impl DrainCodec for QuoteEnd {
     }
 }
 
-impl EndCapableCodec for QuoteEnd {
+impl EndSignallingCodec for QuoteEnd {
     fn process(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
-    ) -> Result<EndCapableProgress, Error> {
+    ) -> Result<EndSignallingProgress, Error> {
         let quote_pos = input.iter().position(|&b| b == b'"');
         let available = quote_pos.unwrap_or(input.len());
         let n = available.min(output.len());
         output[..n].write_copy_of_slice(&input[..n]);
         if n < available {
             // Output ran out before reaching the quote (or the end of input).
-            Ok(EndCapableProgress::OutputFilled { consumed: n })
+            Ok(EndSignallingProgress::OutputFilled { consumed: n })
         } else if quote_pos.is_some() {
             // Reached the quote; it's left unconsumed for the driver to deal with.
-            Ok(EndCapableProgress::End {
+            Ok(EndSignallingProgress::End {
                 consumed: n,
                 written: n,
             })
         } else {
             // Consumed all of input; no quote in sight.
-            Ok(EndCapableProgress::InputConsumed { written: n })
+            Ok(EndSignallingProgress::InputConsumed { written: n })
         }
     }
 }
@@ -87,7 +87,7 @@ fn drives_three_segments_across_two_early_stops() {
     let progress = codec
         .process(&input[pos..], as_uninit_mut(&mut output))
         .unwrap();
-    let EndCapableProgress::End { consumed, written } = progress else {
+    let EndSignallingProgress::End { consumed, written } = progress else {
         panic!("expected End, got {progress:?}");
     };
     assert_eq!(&output[..written], b"let s = ");
@@ -101,7 +101,7 @@ fn drives_three_segments_across_two_early_stops() {
         .unwrap();
     assert_eq!(
         progress,
-        EndCapableProgress::End {
+        EndSignallingProgress::End {
             consumed: 0,
             written: 0
         }
@@ -117,7 +117,7 @@ fn drives_three_segments_across_two_early_stops() {
     let progress = codec
         .process(&input[pos..], as_uninit_mut(&mut output))
         .unwrap();
-    let EndCapableProgress::End { consumed, written } = progress else {
+    let EndSignallingProgress::End { consumed, written } = progress else {
         panic!("expected End, got {progress:?}");
     };
     assert_eq!(&output[..written], b"Hello, world!");
@@ -130,7 +130,7 @@ fn drives_three_segments_across_two_early_stops() {
         .unwrap();
     assert_eq!(
         progress,
-        EndCapableProgress::End {
+        EndSignallingProgress::End {
             consumed: 0,
             written: 0
         }
@@ -143,7 +143,7 @@ fn drives_three_segments_across_two_early_stops() {
     let progress = codec
         .process(&input[pos..], as_uninit_mut(&mut output))
         .unwrap();
-    let EndCapableProgress::InputConsumed { written } = progress else {
+    let EndSignallingProgress::InputConsumed { written } = progress else {
         panic!("expected InputConsumed, got {progress:?}");
     };
     assert_eq!(&output[..written], b";");
@@ -268,7 +268,7 @@ impl Source for TwoByteSource<'_> {
 /// only ever reads from a borrowed `&str` of its own.
 fn encode_string<S: Source>(
     source: &mut S,
-    codec: impl EndCapableCodec,
+    codec: impl EndSignallingCodec,
 ) -> Result<String, DriveError<S::Error, Infallible>> {
     let mut sink = VecSink::default();
     stream_to_stream(source, codec, &mut sink)?;
@@ -397,12 +397,12 @@ fn tokenizes_a_string_array_literal_from_a_base64_decoded_two_byte_source() {
 
 /// Wraps a [`Source`] with a codec, decoding through an owned,
 /// fixed-size scratch buffer of `N` bytes — turning the codec's output
-/// into a `Source` in its own right. Built on [`Pump`]/`end_capable_pump_read`,
+/// into a `Source` in its own right. Built on [`Pump`]/`end_signalling_pump_read`,
 /// the same pieces `std_io`/`embedded_io`'s own `CodecReader` uses
 /// internally to do the equivalent for `std::io::Read`/
 /// `embedded_io::Read`; see `CREATING-IO-BACKENDS.md` for the general
 /// pattern.
-struct CodecSource<I: Source, C: EndCapableCodec, const N: usize> {
+struct CodecSource<I: Source, C: EndSignallingCodec, const N: usize> {
     inner: I,
     pump: rust_codecs_core::Pump<C>,
     buf: [u8; N],
@@ -410,7 +410,7 @@ struct CodecSource<I: Source, C: EndCapableCodec, const N: usize> {
     len: usize,
 }
 
-impl<I: Source, C: EndCapableCodec, const N: usize> CodecSource<I, C, N> {
+impl<I: Source, C: EndSignallingCodec, const N: usize> CodecSource<I, C, N> {
     fn new(inner: I, codec: C) -> Self {
         Self {
             inner,
@@ -422,12 +422,12 @@ impl<I: Source, C: EndCapableCodec, const N: usize> CodecSource<I, C, N> {
     }
 }
 
-impl<I: Source, C: EndCapableCodec, const N: usize> Source for CodecSource<I, C, N> {
+impl<I: Source, C: EndSignallingCodec, const N: usize> Source for CodecSource<I, C, N> {
     type Error = rust_codecs_core::DriveError<I::Error, Infallible>;
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         if self.pos == self.len {
-            self.len = rust_codecs_core::sources_and_sinks::shared_io::end_capable_pump_read(
+            self.len = rust_codecs_core::sources_and_sinks::shared_io::end_signalling_pump_read(
                 &mut self.pump,
                 &mut self.inner,
                 &mut self.buf,

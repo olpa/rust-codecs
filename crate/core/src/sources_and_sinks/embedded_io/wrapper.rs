@@ -4,10 +4,10 @@ use core::fmt;
 use embedded_io::{BufRead, ErrorType, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    end_capable_pump_read, pump_finish, pump_flush, pump_write,
+    end_signalling_pump_read, pump_finish, pump_flush, pump_write,
 };
 use crate::stream::Pump;
-use crate::{Codec, DriveError, EndCapableCodec, Error, ErrorKind};
+use crate::{Codec, DriveError, EndSignallingCodec, Error, ErrorKind};
 
 use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
 
@@ -66,12 +66,12 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
 ///
 /// Same end-of-stream and end-of-codec behavior as
 /// [`std_io::CodecReader`](crate::sources_and_sinks::std_io::CodecReader).
-pub struct CodecReader<R, C: EndCapableCodec, S> {
+pub struct CodecReader<R, C: EndSignallingCodec, S> {
     input: EmbeddedSource<R, S>,
     pump: Pump<C>,
 }
 
-impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+impl<R: Read, C: EndSignallingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Build a `CodecReader`.
     ///
     /// # Panics
@@ -116,13 +116,13 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     }
 }
 
-impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
+impl<R: Read, C: EndSignallingCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
     type Error = EmbeddedError<R::Error>;
 }
 
-impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
+impl<R: Read, C: EndSignallingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
+        end_signalling_pump_read(&mut self.pump, &mut self.input, buf)
             .map_err(reader_error_to_embedded_error)
     }
 }
@@ -131,12 +131,12 @@ impl<R: Read, C: EndCapableCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> 
 /// the `BufRead`'s buffer directly instead of a caller-provided
 /// scratch buffer. Same end-of-stream and end-of-codec behavior as
 /// `CodecReader`.
-pub struct BufReadCodecReader<R, C: EndCapableCodec> {
+pub struct BufReadCodecReader<R, C: EndSignallingCodec> {
     input: BufReadSource<R>,
     pump: Pump<C>,
 }
 
-impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
+impl<R: BufRead, C: EndSignallingCodec> BufReadCodecReader<R, C> {
     /// Build a `BufReadCodecReader`.
     pub fn new(inner: R, codec: C) -> Self {
         Self {
@@ -170,13 +170,13 @@ impl<R: BufRead, C: EndCapableCodec> BufReadCodecReader<R, C> {
     }
 }
 
-impl<R: BufRead, C: EndCapableCodec> ErrorType for BufReadCodecReader<R, C> {
+impl<R: BufRead, C: EndSignallingCodec> ErrorType for BufReadCodecReader<R, C> {
     type Error = EmbeddedError<R::Error>;
 }
 
-impl<R: BufRead, C: EndCapableCodec> Read for BufReadCodecReader<R, C> {
+impl<R: BufRead, C: EndSignallingCodec> Read for BufReadCodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        end_capable_pump_read(&mut self.pump, &mut self.input, buf)
+        end_signalling_pump_read(&mut self.pump, &mut self.input, buf)
             .map_err(reader_error_to_embedded_error)
     }
 }

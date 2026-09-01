@@ -5,9 +5,9 @@
 //! `Chain` owns this — both depend on it, which is why it lives in its
 //! own module rather than inside `pump`.
 //!
-//! [`codec_step`]/[`end_capable_step`] are the `process`-side halves:
+//! [`codec_step`]/[`end_signalling_step`] are the `process`-side halves:
 //! two entry points, not one generic function, because `Chain` accepts
-//! only [`Codec`] members. A single `EndCapableCodec`-bound `step`
+//! only [`Codec`] members. A single `EndSignallingCodec`-bound `step`
 //! would still work for `Chain` — every `Codec` is one via the blanket
 //! implementation — but its result type could represent an in-band
 //! `End` that `Chain`'s members can never actually produce. Keeping
@@ -20,11 +20,11 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, Progress};
+use crate::{Codec, Drain, DrainCodec, EndSignallingCodec, EndSignallingProgress, Error, Progress};
 
 /// Why one step of an ordinary [`Codec::process`] call stopped. No
-/// in-band end is possible — see [`EndCapableStepEnd`] for the
-/// [`EndCapableCodec`] counterpart that has one.
+/// in-band end is possible — see [`EndSignallingStepEnd`] for the
+/// [`EndSignallingCodec`] counterpart that has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodecStepEnd {
     /// The complete input window was consumed.
@@ -68,9 +68,9 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
     })
 }
 
-/// Why one step of a [`EndCapableCodec::process`] call stopped.
+/// Why one step of an [`EndSignallingCodec::process`] call stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EndCapableStepEnd {
+pub(crate) enum EndSignallingStepEnd {
     /// The complete input window was consumed.
     InputExhausted,
     /// The complete output window was filled.
@@ -79,22 +79,22 @@ pub(crate) enum EndCapableStepEnd {
     End,
 }
 
-/// Exact progress made by one validated [`EndCapableCodec::process`]
+/// Exact progress made by one validated [`EndSignallingCodec::process`]
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EndCapableStep {
+pub(crate) struct EndSignallingStep {
     pub(crate) consumed: usize,
     pub(crate) written: usize,
-    pub(crate) end: EndCapableStepEnd,
+    pub(crate) end: EndSignallingStepEnd,
 }
 
-/// Run one step of a [`EndCapableCodec`], validated against the
+/// Run one step of an [`EndSignallingCodec`], validated against the
 /// buffers it was given.
-pub(crate) fn end_capable_step<C: EndCapableCodec + ?Sized>(
+pub(crate) fn end_signalling_step<C: EndSignallingCodec + ?Sized>(
     codec: &mut C,
     input: &[u8],
     output: &mut [MaybeUninit<u8>],
-) -> Result<EndCapableStep, Error> {
+) -> Result<EndSignallingStep, Error> {
     let input_len = input.len();
     let output_len = output.len();
     let outcome = codec
@@ -102,20 +102,20 @@ pub(crate) fn end_capable_step<C: EndCapableCodec + ?Sized>(
         .validated(input_len, output_len)?;
 
     Ok(match outcome {
-        EndCapableProgress::InputConsumed { written } => EndCapableStep {
+        EndSignallingProgress::InputConsumed { written } => EndSignallingStep {
             consumed: input_len,
             written,
-            end: EndCapableStepEnd::InputExhausted,
+            end: EndSignallingStepEnd::InputExhausted,
         },
-        EndCapableProgress::OutputFilled { consumed } => EndCapableStep {
+        EndSignallingProgress::OutputFilled { consumed } => EndSignallingStep {
             consumed,
             written: output_len,
-            end: EndCapableStepEnd::OutputExhausted,
+            end: EndSignallingStepEnd::OutputExhausted,
         },
-        EndCapableProgress::End { consumed, written } => EndCapableStep {
+        EndSignallingProgress::End { consumed, written } => EndSignallingStep {
             consumed,
             written,
-            end: EndCapableStepEnd::End,
+            end: EndSignallingStepEnd::End,
         },
     })
 }

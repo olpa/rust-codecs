@@ -2,7 +2,7 @@
 //! string, collecting the result into an in-memory `Vec<u8>`/`String`.
 
 use super::VecSink;
-use crate::{stream_to_stream, DriveError, EndCapableCodec};
+use crate::{stream_to_stream, DriveError, EndSignallingCodec};
 
 /// Everything that can go wrong in [`encode_str`]/[`encode_string`].
 #[derive(Debug)]
@@ -39,7 +39,7 @@ impl From<alloc::string::FromUtf8Error> for EncodeError {
 /// [`crate::sources_and_sinks::slice::SliceSource`]/[`VecSink`]/
 /// [`stream_to_stream`].
 pub fn encode_str(
-    codec: impl EndCapableCodec,
+    codec: impl EndSignallingCodec,
     input: impl AsRef<str>,
 ) -> Result<alloc::vec::Vec<u8>, EncodeError> {
     let input = input.as_ref().as_bytes();
@@ -53,7 +53,7 @@ pub fn encode_str(
 ///
 /// Built on [`encode_str`], for codecs whose output is text.
 pub fn encode_string(
-    codec: impl EndCapableCodec,
+    codec: impl EndSignallingCodec,
     input: impl AsRef<str>,
 ) -> Result<alloc::string::String, EncodeError> {
     Ok(alloc::string::String::from_utf8(encode_str(codec, input)?)?)
