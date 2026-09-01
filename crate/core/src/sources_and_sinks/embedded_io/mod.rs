@@ -1,4 +1,4 @@
-//! Adapters for `embedded_io` backends.
+//! Adapters for `embedded_io` backend.
 
 mod adapter;
 mod wrapper;

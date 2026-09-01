@@ -11,7 +11,7 @@ use crate::{Sink, Source};
 // resize the vec directly, and that could make the position wrong
 // with no check to catch it.
 
-/// An owned `Vec<u8>` used directly as an input stream.
+/// `Vec<u8>` input stream.
 pub struct VecSource {
     inner: Vec<u8>,
     pos: usize,
@@ -48,8 +48,7 @@ impl Source for VecSource {
     }
 }
 
-/// A `Vec<u8>` output stream. Codec output is written straight into
-/// the vector's spare allocation without zero-initializing it first.
+/// `Vec<u8>` auto-growing output stream.
 pub struct VecSink {
     inner: Vec<u8>,
     grow_by: usize,

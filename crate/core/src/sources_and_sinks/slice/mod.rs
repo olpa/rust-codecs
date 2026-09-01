@@ -1,4 +1,4 @@
-//! Adapters for `&[u8]` backends.
+//! Adapters for `&[u8]` backend.
 
 mod adapter;
 
