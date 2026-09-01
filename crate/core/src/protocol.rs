@@ -68,22 +68,21 @@ pub trait Sink {
 // Codec traits
 // ----
 
-/// Operations shared by [`Codec`] and [`EndSignallingCodec`], for two
-/// things: telling the codec that input has ended, and reaching a
-/// sync point.
+/// Operations that tell a codec that input has ended or request a
+/// sync point. Both [`Codec`] and [`EndSignallingCodec`] use these
+/// operations.
 pub trait DrainCodec {
     /// Tell the codec that no more input will come. The codec flushes
     /// any buffered state. If the format has a trailer or a checksum,
     /// the codec writes it now.
     ///
     /// One call may not be enough. If `output` is too small to hold
-    /// everything the codec owes, `finish` returns
+    /// all pending output, `finish` returns
     /// `Drain::OutputFilled` instead of `Drain::Done`. Call `finish`
     /// again, and drain `output` between calls, until it returns
-    /// [`Drain::Done`]. A driver that calls `finish` only once, and
-    /// treats `OutputFilled` as success, will silently cut off the
-    /// end of the stream: part of the trailer, checksum, or padding
-    /// will be missing.
+    /// [`Drain::Done`]. If a driver treats `OutputFilled` as success,
+    /// it truncates the stream. Part of the trailer, checksum, or
+    /// padding will be missing.
     ///
     /// Once `finish` returns `Done`, it is idempotent: see [`Codec`]
     /// contract point 3. `finish` must always return one of three
@@ -93,14 +92,13 @@ pub trait DrainCodec {
     /// [`EndSignallingProgress::End`]; see that trait's contract.
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
 
-    /// Release any bytes the codec is holding back, up to a sync
-    /// boundary. This does not end the stream: unlike `finish`, the
-    /// stream stays open, and more calls to `process` may follow.
+    /// Write all buffered output up to a sync boundary. This does not
+    /// end the stream. More calls to `process` may follow.
     ///
-    /// This method matters only for codecs that buffer output for a
-    /// sync marker defined by the format — deflate, zlib, and gzip do
-    /// this. The default implementation owes nothing, so it does
-    /// nothing.
+    /// Override this method only when the format defines a sync
+    /// marker and the codec buffers output for it. Deflate, zlib, and
+    /// gzip are examples. The default implementation has no pending
+    /// output and does nothing.
     ///
     /// Once `flush` returns `Done`, it is idempotent: see [`Codec`]
     /// contract point 3. `flush` must always return one of three
@@ -112,9 +110,9 @@ pub trait DrainCodec {
     }
 }
 
-/// A stateful transform that rewrites a whole stream of bytes. A call
-/// to `process` never declares the stream finished. To signal the
-/// end of input, call `finish` separately.
+/// A stateful transform for a complete byte stream. `process` never
+/// declares the stream complete. Call `finish` to signal the end of
+/// input.
 ///
 /// # The contract
 ///
@@ -134,17 +132,13 @@ pub trait DrainCodec {
 /// buffer; copying the bytes is not required.
 ///
 /// 3)
-/// `finish` and `flush` are each idempotent, but only against repeats
-/// of themselves, and only once they reach [`Drain::Done`]. Suppose
-/// `finish` returns `Done`, and no call to `process` supplies new
-/// input in between. Then a later call to `finish` must return
-/// `Drain::Done { written: 0 }` again. It must not repeat the
-/// format-level effect that produced the first `Done`: no second
-/// trailer, no second sync marker. The same rule applies to `flush`
-/// against itself. A caller may call `finish` or `flush` again after
-/// `Done` — for example, to resume a call that was interrupted
-/// elsewhere in a larger composition — and must see a no-op, not a
-/// repeat.
+/// `finish` and `flush` become idempotent separately after they return
+/// [`Drain::Done`]. Suppose `finish` returns `Done` and no later call
+/// to `process` supplies new input. Each later call to `finish` must
+/// return `Drain::Done { written: 0 }`. It must not write another
+/// trailer. The same rule applies to repeated `flush` calls: they must
+/// not write another sync marker. This permits a caller to repeat an
+/// operation after an interruption in a larger composition.
 ///
 /// A completed `flush` does not complete `finish`. `Done` from
 /// `flush` means only that the codec reached a sync point; the stream
@@ -154,12 +148,9 @@ pub trait DrainCodec {
 /// is covered by point 5 and is not generally defined.
 ///
 /// 4)
-/// A call that returns `Err` does not put the codec into a defined
-/// failure state. A later call is not required to keep failing. It
-/// may make ordinary progress, as if the error had never happened.
-/// If a caller wants a codec to stay dead after an error, the caller
-/// must enforce that itself. The contract does not give this for
-/// free.
+/// The codec state after `Err` is not defined. A later call can fail
+/// again or make normal progress. A caller that requires a permanent
+/// failure state must implement that state itself.
 ///
 /// The error's `consumed` and `written` fields report the exact input
 /// and output prefixes already processed by that call. Both counts
@@ -167,24 +158,20 @@ pub trait DrainCodec {
 /// a successful result.
 ///
 /// 5)
-/// This contract does not define what happens when `process` or
-/// `flush` is called after `finish`. A codec with no real trailer
-/// and no terminal state may keep processing, as if `finish` had
-/// never been called. A codec with a hard terminal state — for
-/// example, one that already wrote a final checksum and closed out
-/// the format — should return `Err` instead of doing something
-/// silently wrong. Both behaviors are valid `Codec` implementations.
-/// A caller cannot rely on which one it is talking to.
+/// This contract does not define a call to `process` or `flush` after
+/// `finish`. A codec without a trailer or terminal state can continue
+/// to process input. A codec that has closed its format, for example
+/// by writing a final checksum, should return `Err`. Both behaviors
+/// are valid. A caller must not depend on either behavior.
 ///
 /// 6)
 /// `finish` and `flush` must always return one of three results:
 /// [`Drain::OutputFilled`], [`Drain::Done`], or `Err`. This is the
 /// `Drain` counterpart of point 1. `Drain::OutputFilled` carries no
 /// count. Unlike `Progress::OutputFilled`, it is not a
-/// partial-progress report — it means the call filled the entire
-/// non-empty `output` it was given. There is no fourth option where
-/// a call stalls: reporting `OutputFilled` without having actually
-/// written all of a non-empty buffer.
+/// partial-progress report. It means that the call filled the entire
+/// non-empty `output` slice. A call must not report `OutputFilled`
+/// without filling a non-empty output slice.
 ///
 /// Requiring one side to complete prevents ambiguous zero-progress
 /// stalls and keeps drivers simple. Codecs that need larger input or
@@ -200,10 +187,9 @@ pub trait Codec: DrainCodec {
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error>;
 }
 
-/// A stateful transform that rewrites bytes and may also recognize
-/// its own logical end inside an input slice. This is a
-/// self-terminating format saying "I am finished" in the middle of
-/// the stream. It is not a failure, and not an early cancellation.
+/// A stateful byte transform that can recognize its logical end
+/// inside an input slice. This is an in-band end of a self-terminating
+/// format. It is not an error or a cancellation.
 ///
 /// Input-side drivers accept this trait:
 /// [`CodecReader`](crate::sources_and_sinks::std_io::CodecReader) and
@@ -215,13 +201,12 @@ pub trait Codec: DrainCodec {
 /// successful permanent short write.
 ///
 /// Every [`Codec`] is automatically an `EndSignallingCodec` that never
-/// returns `End` — see the blanket implementation below. This
-/// conversion goes one way only: an `EndSignallingCodec` cannot be used
-/// where `Codec` is required, because it cannot promise to consume
-/// the whole logical input stream. One concrete type also cannot
-/// implement both traits with different behavior. A format that
-/// offers both an ordinary mode and a terminating mode should expose
-/// two distinct types.
+/// returns `End`; see the blanket implementation below. An
+/// `EndSignallingCodec` cannot be used where `Codec` is required. It
+/// cannot promise to consume the complete logical input stream. One
+/// concrete type also cannot implement both traits with different
+/// behavior. A format that has an ordinary mode and a terminating
+/// mode should provide two distinct types.
 ///
 /// # The contract
 ///
@@ -245,19 +230,18 @@ pub trait Codec: DrainCodec {
 /// signal and answer later calls themselves with zero-progress
 /// terminal results.
 ///
-/// This trait deliberately does not define what raw codec calls do
+/// This trait does not define what direct codec calls do
 /// after `End`. A concrete codec may document that its instance can
 /// be reused for another logical stream; another may have entered a
 /// permanently terminal internal state. Generic code must rely on
 /// neither behavior.
 ///
-/// This crate does not impose one universal meaning on EOF before a
-/// signalling codec reports `End`. If the in-band terminator is
-/// required, `finish` should return an `UnexpectedEnd` error when EOF
-/// arrives first. If both an in-band terminator and source EOF are
-/// valid endings, `finish` may drain buffered output and return
-/// `Done`. Each `EndSignallingCodec` should document which rule it
-/// uses.
+/// EOF before `End` does not have one required meaning. If the format
+/// requires an in-band terminator, `finish` should return an
+/// `UnexpectedEnd` error when EOF occurs first. If either the
+/// terminator or EOF can end the stream, `finish` may write buffered
+/// output and return `Done`. Each `EndSignallingCodec` should document
+/// its rule.
 ///
 /// # Naming the operation
 ///
