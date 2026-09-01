@@ -469,12 +469,12 @@ impl<C: EndCapableCodec> Pump<C> {
     /// layer up.
     ///
     /// `self.done` is only ever set by [`Pump::latched_step`] reaching
-    /// a genuine `EndCapableProgress::End` (contract point 4 — pinned
-    /// forever, across every method). Reaching `Drain::Done` here is
-    /// governed by point 3 instead: this call is idempotent against
-    /// repeats of itself, but that doesn't license skipping
-    /// `latched_step` or a call with the other `op` afterward (point
-    /// 6), so a `Done` from `self.codec` is never latched into
+    /// a genuine `EndCapableProgress::End` (which the end-capable
+    /// contract pins forever, across every method). Reaching
+    /// `Drain::Done` here is governed by point 3 instead: this call is
+    /// idempotent against repeats of itself, but that doesn't license
+    /// skipping `latched_step` or a call with the other `op` afterward
+    /// (point 5), so a `Done` from `self.codec` is never latched into
     /// `self.done` — only reported.
     fn finish_or_flush_step(
         &mut self,
@@ -778,8 +778,9 @@ mod tests {
         assert!(!filled.is_done());
 
         // `finish_or_flush_step` reaching `Done` is only point-3 self-idempotency,
-        // not a point-4 pin — `latched_step` must still be free to run
-        // normally afterward (point 6), so `is_done()` stays false and
+        // not the permanent pin caused by an in-band `End` — `latched_step`
+        // must still be free to run normally afterward (point 5), so
+        // `is_done()` stays false and
         // the codec, not a synthetic `End`, answers the next
         // `latched_step` call.
         let mut done = Pump::new(Scripted {

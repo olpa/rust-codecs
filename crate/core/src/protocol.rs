@@ -105,8 +105,8 @@ pub trait DrainCodec {
     /// Once `flush` returns `Done`, it is idempotent: see [`Codec`]
     /// contract point 3. `flush` must always return one of three
     /// results: `OutputFilled`, `Done`, or `Err`. See [`Codec`]
-    /// contract point 7. For what happens when `flush` is called
-    /// after `finish`, see [`Codec`] contract point 6.
+    /// contract point 6. For what happens when `flush` is called
+    /// after `finish`, see [`Codec`] contract point 5.
     fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }
@@ -129,9 +129,9 @@ pub trait DrainCodec {
 /// Each call reads `input` and writes `output` starting at byte 0 of
 /// the slices it was given. The codec does not remember a "leftover"
 /// position from the previous call. If a call did not consume all of
-/// `input`, those bytes are gone once the call returns. The caller
-/// must copy them to the front of the next `input` slice, if it
-/// wants them processed at all.
+/// `input`, the caller must retain those bytes and supply them again
+/// if it wants them processed. It may pass a suffix of the same
+/// buffer; copying the bytes is not required.
 ///
 /// 3)
 /// `finish` and `flush` are each idempotent, but only against repeats
