@@ -1,3 +1,6 @@
+use core::mem::MaybeUninit;
+
+use crate::uninit::as_uninit_mut;
 use crate::Sink;
 
 /// A backend's "write this whole buffer out", already retrying
@@ -64,10 +67,10 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> ScratchSink<W, S> {
 impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
     type Error = W::Error;
 
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
         let buf = self.buffer.as_mut();
         self.offered = buf.len();
-        Ok(Some(buf))
+        Ok(Some(as_uninit_mut(buf)))
     }
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
@@ -176,7 +179,7 @@ mod tests {
                 [0u8; 8],
             );
             let spare = output.spare().unwrap().unwrap();
-            spare[..5].copy_from_slice(b"abcde");
+            spare[..5].write_copy_of_slice(b"abcde");
             output.commit(3).unwrap();
             32 - output.into_inner().remaining.len()
         };

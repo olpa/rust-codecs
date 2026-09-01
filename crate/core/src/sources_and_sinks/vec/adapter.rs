@@ -1,4 +1,5 @@
 use core::convert::Infallible;
+use core::mem::MaybeUninit;
 
 use crate::{Sink, Source};
 
@@ -62,7 +63,11 @@ impl VecSink {
         debug_assert!(grow_by > 0, "VecSink growth must be non-zero");
         Self {
             inner,
-            grow_by: if grow_by > 0 { grow_by } else { Self::DEFAULT_GROWTH },
+            grow_by: if grow_by > 0 {
+                grow_by
+            } else {
+                Self::DEFAULT_GROWTH
+            },
             offered: 0,
         }
     }
@@ -91,7 +96,7 @@ impl Default for VecSink {
 
 impl Sink for VecSink {
     type Error = Infallible;
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
         if self.inner.spare_capacity_mut().is_empty() {
             self.inner.reserve(self.grow_by);
         }
@@ -99,20 +104,13 @@ impl Sink for VecSink {
         self.offered = spare.len();
         // DESIGN: codecs are trusted, cooperative extensions of this
         // high-performance library. In particular, a codec must initialize
-        // every byte it reports as written. Deliberately do not zero this
-        // spare capacity: avoiding that initialization is the reason this
-        // adapter writes into `Vec` allocation directly. Treat a codec that
-        // claims unwritten bytes as outside the supported safety contract,
-        // not as an adversarial implementation this adapter must defend
-        // against.
-        // SAFETY: this deliberately lends uninitialized `u8` storage to
-        // `Codec::process`/`finish`. The codec contract permits claiming
-        // only the prefix it initialized; `commit` is the sole operation
-        // that adds that prefix to the Vec's length. Codecs must treat the
-        // output slice as write-only before initialization.
-        Ok(Some(unsafe {
-            core::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), spare.len())
-        }))
+        // every byte it reports as written. Lending this spare capacity
+        // as `MaybeUninit<u8>` (never zeroing it) is the reason this
+        // adapter writes into `Vec` allocation directly. Treat a codec
+        // that claims unwritten bytes as outside the supported safety
+        // contract, not as an adversarial implementation this adapter
+        // must defend against.
+        Ok(Some(spare))
     }
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {

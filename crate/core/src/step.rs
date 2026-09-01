@@ -18,6 +18,8 @@
 //! caller needs a narrower type here, since `Drain` has no in-band-end
 //! counterpart to begin with.
 
+use core::mem::MaybeUninit;
+
 use crate::{Codec, Drain, DrainCodec, EndCapableCodec, EndCapableProgress, Error, Progress};
 
 /// Why one step of an ordinary [`Codec::process`] call stopped. No
@@ -44,7 +46,7 @@ pub(crate) struct CodecStep {
 pub(crate) fn codec_step<C: Codec + ?Sized>(
     codec: &mut C,
     input: &[u8],
-    output: &mut [u8],
+    output: &mut [MaybeUninit<u8>],
 ) -> Result<CodecStep, Error> {
     let input_len = input.len();
     let output_len = output.len();
@@ -91,7 +93,7 @@ pub(crate) struct EndCapableStep {
 pub(crate) fn end_capable_step<C: EndCapableCodec + ?Sized>(
     codec: &mut C,
     input: &[u8],
-    output: &mut [u8],
+    output: &mut [MaybeUninit<u8>],
 ) -> Result<EndCapableStep, Error> {
     let input_len = input.len();
     let output_len = output.len();
@@ -155,7 +157,7 @@ impl DrainOp {
     pub(crate) fn step<C: DrainCodec + ?Sized>(
         self,
         codec: &mut C,
-        output: &mut [u8],
+        output: &mut [MaybeUninit<u8>],
     ) -> Result<DrainStep, Error> {
         let output_len = output.len();
         let result = match self {

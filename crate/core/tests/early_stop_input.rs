@@ -25,21 +25,30 @@ use rust_codecs_core::{
     stream_to_stream, Drain, DrainCodec, DriveError, EndCapableCodec, EndCapableProgress, Error,
     Source,
 };
+use std::mem::MaybeUninit;
+
+fn as_uninit_mut(bytes: &mut [u8]) -> &mut [MaybeUninit<u8>] {
+    unsafe { &mut *(bytes as *mut [u8] as *mut [MaybeUninit<u8>]) }
+}
 
 struct QuoteEnd;
 
 impl DrainCodec for QuoteEnd {
-    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }
 }
 
 impl EndCapableCodec for QuoteEnd {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error> {
+    fn process(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<EndCapableProgress, Error> {
         let quote_pos = input.iter().position(|&b| b == b'"');
         let available = quote_pos.unwrap_or(input.len());
         let n = available.min(output.len());
-        output[..n].copy_from_slice(&input[..n]);
+        output[..n].write_copy_of_slice(&input[..n]);
         if n < available {
             // Output ran out before reaching the quote (or the end of input).
             Ok(EndCapableProgress::OutputFilled { consumed: n })
@@ -75,7 +84,9 @@ fn drives_three_segments_across_two_early_stops() {
     // First call: copies everything up to (not including) the opening
     // quote, then gets stuck — End, with the quote itself still
     // sitting unconsumed at the front of what's left.
-    let progress = codec.process(&input[pos..], &mut output).unwrap();
+    let progress = codec
+        .process(&input[pos..], as_uninit_mut(&mut output))
+        .unwrap();
     let EndCapableProgress::End { consumed, written } = progress else {
         panic!("expected End, got {progress:?}");
     };
@@ -85,7 +96,9 @@ fn drives_three_segments_across_two_early_stops() {
 
     // Confirm it's actually stuck: calling again with the quote still
     // at the front makes zero progress on either side.
-    let progress = codec.process(&input[pos..], &mut output).unwrap();
+    let progress = codec
+        .process(&input[pos..], as_uninit_mut(&mut output))
+        .unwrap();
     assert_eq!(
         progress,
         EndCapableProgress::End {
@@ -101,7 +114,9 @@ fn drives_three_segments_across_two_early_stops() {
     // Second call: same codec instance, now past the opening quote —
     // copies the quoted content up to the closing quote, then gets
     // stuck again the same way.
-    let progress = codec.process(&input[pos..], &mut output).unwrap();
+    let progress = codec
+        .process(&input[pos..], as_uninit_mut(&mut output))
+        .unwrap();
     let EndCapableProgress::End { consumed, written } = progress else {
         panic!("expected End, got {progress:?}");
     };
@@ -110,7 +125,9 @@ fn drives_three_segments_across_two_early_stops() {
     assert_eq!(input[pos], b'"');
 
     // Same check at the closing quote: stuck again, zero progress.
-    let progress = codec.process(&input[pos..], &mut output).unwrap();
+    let progress = codec
+        .process(&input[pos..], as_uninit_mut(&mut output))
+        .unwrap();
     assert_eq!(
         progress,
         EndCapableProgress::End {
@@ -123,7 +140,9 @@ fn drives_three_segments_across_two_early_stops() {
 
     // Third call: nothing left but the trailing `;` and no more
     // quotes — an ordinary InputConsumed, no early stop this time.
-    let progress = codec.process(&input[pos..], &mut output).unwrap();
+    let progress = codec
+        .process(&input[pos..], as_uninit_mut(&mut output))
+        .unwrap();
     let EndCapableProgress::InputConsumed { written } = progress else {
         panic!("expected InputConsumed, got {progress:?}");
     };

@@ -187,7 +187,7 @@ impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
 impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
     type Error = std::io::Error;
 
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+    fn spare(&mut self) -> Result<Option<&mut [core::mem::MaybeUninit<u8>]>, Self::Error> {
         self.0.spare()
     }
 

@@ -1,5 +1,7 @@
 use core::convert::Infallible;
+use core::mem::MaybeUninit;
 
+use crate::uninit::as_uninit_mut;
 use crate::{Sink, Source};
 
 /// A borrowed `&[u8]` used directly as an input stream.
@@ -46,10 +48,10 @@ impl<'a> SliceSink<'a> {
 
 impl Sink for SliceSink<'_> {
     type Error = Infallible;
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
         // Not `self.bytes.get_mut(self.pos..)`: that returns `Some(&mut [])`
         // when `pos == len`, but a full sink must report `None`.
-        Ok((self.pos < self.bytes.len()).then_some(&mut self.bytes[self.pos..]))
+        Ok((self.pos < self.bytes.len()).then_some(as_uninit_mut(&mut self.bytes[self.pos..])))
     }
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         self.pos += amount;
@@ -74,9 +76,9 @@ mod tests {
     fn sink_spare_is_none_once_fully_filled() {
         let mut buf = [0u8; 3];
         let mut sink = SliceSink::new(&mut buf);
-        assert_eq!(sink.spare().unwrap(), Some(&mut [0u8, 0, 0][..]));
+        assert_eq!(sink.spare().unwrap().unwrap().len(), 3);
         sink.commit(3).unwrap();
         // pos == len here: must be None, not Some(&mut []).
-        assert_eq!(sink.spare().unwrap(), None);
+        assert!(sink.spare().unwrap().is_none());
     }
 }

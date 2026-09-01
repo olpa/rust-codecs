@@ -1,5 +1,7 @@
 //! The vocabulary and contracts for codecs and I/O backends.
 
+use core::mem::MaybeUninit;
+
 // ----
 // I/O backend contracts
 // ----
@@ -33,10 +35,16 @@ pub trait Sink {
 
     /// Return writable space, or `None` when the destination is full.
     ///
+    /// The returned bytes are not necessarily initialized — a `Sink`
+    /// backed by growable storage (e.g. `VecSink`) may lend spare
+    /// capacity straight from the allocator. A codec must only ever
+    /// write to this space, never read from it, and must not claim any
+    /// byte as written to `commit` that it did not itself initialize.
+    ///
     /// A caller is never required to commit any of it before calling
     /// `spare` again — an uncommitted call may simply be re-issued,
     /// returning the same (or an equivalent) span.
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
+    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error>;
 
     /// Commit the first `amount` bytes of the space returned by `spare`.
     ///
@@ -79,7 +87,7 @@ pub trait DrainCodec {
     /// forever once `process` has reported
     /// [`EndCapableProgress::End`]. Must always resolve to
     /// `OutputFilled`, `Done`, or `Err`: see [`Codec`] contract point 6.
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error>;
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
 
     /// Drain any bytes this codec is withholding to a sync boundary,
     /// *without* ending the stream — unlike `finish`, the stream
@@ -90,7 +98,7 @@ pub trait DrainCodec {
     /// to `OutputFilled`, `Done`, or `Err`: see [`Codec`] contract
     /// point 7. Calling this after `finish`: see [`Codec`] contract
     /// point 6.
-    fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }
 }
@@ -202,7 +210,7 @@ pub trait DrainCodec {
 ///
 pub trait Codec: DrainCodec {
     /// Push input bytes and pull output bytes.
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error>;
 }
 
 /// A stateful byte-rewrite transform that may additionally recognize
@@ -279,11 +287,19 @@ pub trait EndCapableCodec: DrainCodec {
     /// Push input bytes and pull output bytes, possibly recognizing the
     /// stream's in-band end. Pinned to reporting `End` forever once
     /// it's reached. Calling this after `finish` is unsupported.
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error>;
+    fn process(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<EndCapableProgress, Error>;
 }
 
 impl<C: Codec> EndCapableCodec for C {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<EndCapableProgress, Error> {
+    fn process(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<EndCapableProgress, Error> {
         Codec::process(self, input, output).map(Into::into)
     }
 }
@@ -415,18 +431,18 @@ use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
-    fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         (**self).finish(output)
     }
 
-    fn flush(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         (**self).flush(output)
     }
 }
 
 #[cfg(feature = "alloc")]
 impl<C: Codec + ?Sized> Codec for Box<C> {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         (**self).process(input, output)
     }
 }

@@ -17,6 +17,8 @@
 //! `PendingOutput` is checked the same way, via
 //! [`PendingOutput::is_empty`].
 
+use core::mem::MaybeUninit;
+
 use crate::{Error, ErrorKind};
 
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
@@ -27,6 +29,24 @@ use crate::{Error, ErrorKind};
 // no matter which `Engine` a caller plugs in via `with_engine`.
 pub(super) const GROUP: usize = 3;
 pub(super) const ENCODED_GROUP: usize = 4;
+
+/// Block-initialize `dst` (a single bulk write, not a per-element one)
+/// and hand back the now-genuinely-initialized `&mut [u8]` view.
+///
+/// For bridging to a foreign API that only accepts `&mut [u8]` (e.g.
+/// the `base64` crate's `Engine::encode_slice`/`decode_slice`) and
+/// always overwrites every byte of the span it's given before any read
+/// — so the value written here is never observed, only its
+/// initializedness matters.
+pub(super) fn zero_init_mut(dst: &mut [MaybeUninit<u8>]) -> &mut [u8] {
+    // SAFETY: `write_bytes` is a single bulk store establishing that
+    // every byte of `dst` is initialized (to 0), satisfying
+    // `assume_init_mut`'s precondition below.
+    unsafe {
+        core::ptr::write_bytes(dst.as_mut_ptr().cast::<u8>(), 0, dst.len());
+        dst.assume_init_mut()
+    }
+}
 
 /// Holds a transform-unit's worth of input that arrived incomplete, to
 /// be topped up and consumed on a later call. See the module docs for
@@ -140,12 +160,12 @@ impl<const N: usize> PendingOutput<N> {
 
     /// Copy held bytes into the front of `out`; returns how many were
     /// copied. After this, either this is empty or `out` is full.
-    pub(super) fn drain(&mut self, out: &mut [u8]) -> usize {
+    pub(super) fn drain(&mut self, out: &mut [MaybeUninit<u8>]) -> usize {
         if self.is_empty() {
             return 0;
         }
         let take = (self.len - self.pos).min(out.len());
-        out[..take].copy_from_slice(&self.buf[self.pos..self.pos + take]);
+        out[..take].write_copy_of_slice(&self.buf[self.pos..self.pos + take]);
         self.pos += take;
         take
     }
@@ -212,6 +232,7 @@ pub(super) fn stage_group<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::{PendingOutput, PendingOutputError};
+    use crate::uninit::as_uninit_mut;
 
     fn fill(pending: &mut PendingOutput<4>, bytes: &[u8]) -> Result<(), PendingOutputError> {
         pending.buffer()?[..bytes.len()].copy_from_slice(bytes);
@@ -225,11 +246,11 @@ mod tests {
 
         fill(&mut pending, b"abcd").unwrap();
         assert_eq!(pending.drain(&mut []), 0);
-        assert_eq!(pending.drain(&mut output[..1]), 1);
+        assert_eq!(pending.drain(as_uninit_mut(&mut output[..1])), 1);
         assert!(!pending.is_empty());
-        assert_eq!(pending.drain(&mut output[1..3]), 2);
+        assert_eq!(pending.drain(as_uninit_mut(&mut output[1..3])), 2);
         assert!(!pending.is_empty());
-        assert_eq!(pending.drain(&mut output[3..]), 1);
+        assert_eq!(pending.drain(as_uninit_mut(&mut output[3..])), 1);
         assert!(pending.is_empty());
         assert_eq!(&output, b"abcd");
     }

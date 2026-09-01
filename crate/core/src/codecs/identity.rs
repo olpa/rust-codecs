@@ -1,5 +1,7 @@
 //! Passes bytes through unchanged.
 
+use core::mem::MaybeUninit;
+
 use crate::{Codec, Drain, DrainCodec, Error, Progress};
 
 /// Output is identical to input.
@@ -7,15 +9,15 @@ use crate::{Codec, Drain, DrainCodec, Error, Progress};
 pub struct Identity;
 
 impl DrainCodec for Identity {
-    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }
 }
 
 impl Codec for Identity {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
-        output[..n].copy_from_slice(&input[..n]);
+        output[..n].write_copy_of_slice(&input[..n]);
         if n == input.len() {
             Ok(Progress::InputConsumed { written: n })
         } else {

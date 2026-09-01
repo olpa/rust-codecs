@@ -14,6 +14,8 @@
 //! boundary every `Pump::latched_step` call and [`stream_to_stream`] call
 //! goes through.
 
+use core::mem::MaybeUninit;
+
 use crate::step::{end_capable_step, DrainOp, DrainStop, EndCapableStep, EndCapableStepEnd};
 use crate::{EndCapableCodec, Error, Sink, Source};
 
@@ -209,7 +211,7 @@ impl<C: EndCapableCodec> Pump<C> {
     pub(crate) fn latched_step(
         &mut self,
         input: &[u8],
-        output: &mut [u8],
+        output: &mut [MaybeUninit<u8>],
     ) -> Result<EndCapableStep, Error> {
         if self.done {
             return Ok(EndCapableStep {
@@ -476,7 +478,7 @@ impl<C: EndCapableCodec> Pump<C> {
     /// `self.done` — only reported.
     fn finish_or_flush_step(
         &mut self,
-        output: &mut [u8],
+        output: &mut [MaybeUninit<u8>],
         op: DrainOp,
     ) -> Result<PumpDrainStep, Error> {
         if self.done {
@@ -498,6 +500,8 @@ impl<C: EndCapableCodec> Pump<C> {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::MaybeUninit;
+
     use super::{EndCapableStep, EndCapableStepEnd, Pump, PumpDrainEnd, PumpEnd};
     use crate::step::{end_capable_step, DrainOp};
     use crate::{
@@ -511,11 +515,11 @@ mod tests {
     }
 
     impl DrainCodec for Scripted {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(self.drain)
         }
 
-        fn flush(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(self.drain)
         }
     }
@@ -524,7 +528,7 @@ mod tests {
         fn process(
             &mut self,
             _input: &[u8],
-            _output: &mut [u8],
+            _output: &mut [MaybeUninit<u8>],
         ) -> Result<EndCapableProgress, Error> {
             Ok(self.process)
         }
@@ -556,7 +560,7 @@ mod tests {
     impl Sink for NullSink {
         type Error = core::convert::Infallible;
 
-        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
             Ok(Some(&mut []))
         }
 
@@ -574,8 +578,10 @@ mod tests {
     impl Sink for RecordingSink {
         type Error = core::convert::Infallible;
 
-        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
-            Ok(Some(&mut self.bytes[self.written..]))
+        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+            Ok(Some(crate::uninit::as_uninit_mut(
+                &mut self.bytes[self.written..],
+            )))
         }
 
         fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
@@ -589,13 +595,17 @@ mod tests {
     struct DropEverything;
 
     impl DrainCodec for DropEverything {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
     }
 
     impl Codec for DropEverything {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+        fn process(
+            &mut self,
+            _input: &[u8],
+            _output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
             Ok(Progress::InputConsumed { written: 0 })
         }
     }
@@ -617,15 +627,19 @@ mod tests {
     struct FailsAfterProgress;
 
     impl DrainCodec for FailsAfterProgress {
-        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
-            output[0] = b'!';
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            output[0].write(b'!');
             Err(Error::new(ErrorKind::Corrupt, 0, 1))
         }
     }
 
     impl Codec for FailsAfterProgress {
-        fn process(&mut self, _input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-            output[..2].copy_from_slice(b"ok");
+        fn process(
+            &mut self,
+            _input: &[u8],
+            output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            output[..2].write_copy_of_slice(b"ok");
             Err(Error::new(ErrorKind::Corrupt, 1, 2))
         }
     }
@@ -716,7 +730,9 @@ mod tests {
             process: EndCapableProgress::OutputFilled { consumed: 2 },
             drain: Drain::Done { written: 0 },
         });
-        let moved = pump.latched_step(b"abc", &mut [0; 4]).unwrap();
+        let moved = pump
+            .latched_step(b"abc", &mut [MaybeUninit::uninit(); 4])
+            .unwrap();
         assert_eq!(moved.consumed, 2);
         assert_eq!(moved.written, 4);
         assert_eq!(moved.end, EndCapableStepEnd::OutputExhausted);
@@ -731,7 +747,8 @@ mod tests {
             },
             drain: Drain::OutputFilled,
         });
-        pump.latched_step(b"abc", &mut [0; 4]).unwrap();
+        pump.latched_step(b"abc", &mut [MaybeUninit::uninit(); 4])
+            .unwrap();
         assert!(pump.is_done());
         assert_eq!(
             pump.finish_or_flush_step(&mut [], DrainOp::Finish)
@@ -739,7 +756,9 @@ mod tests {
                 .end,
             PumpDrainEnd::Done
         );
-        let repeated = pump.latched_step(b"trailing", &mut [0; 4]).unwrap();
+        let repeated = pump
+            .latched_step(b"trailing", &mut [MaybeUninit::uninit(); 4])
+            .unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
         assert_eq!(repeated.end, EndCapableStepEnd::End);
@@ -752,7 +771,7 @@ mod tests {
             drain: Drain::OutputFilled,
         });
         let moved = filled
-            .finish_or_flush_step(&mut [0; 3], DrainOp::Finish)
+            .finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
             .unwrap();
         assert_eq!(moved.written, 3);
         assert_eq!(moved.end, PumpDrainEnd::SinkExhausted);
@@ -768,12 +787,14 @@ mod tests {
             drain: Drain::Done { written: 2 },
         });
         let moved = done
-            .finish_or_flush_step(&mut [0; 3], DrainOp::Finish)
+            .finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
             .unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, PumpDrainEnd::Done);
         assert!(!done.is_done());
-        let resumed = done.latched_step(b"abc", &mut [0; 8]).unwrap();
+        let resumed = done
+            .latched_step(b"abc", &mut [MaybeUninit::uninit(); 8])
+            .unwrap();
         assert_eq!(resumed.written, 5);
     }
 
@@ -784,7 +805,7 @@ mod tests {
             drain: Drain::Done { written: 2 },
         });
         let moved = pump
-            .finish_or_flush_step(&mut [0; 3], DrainOp::Flush)
+            .finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Flush)
             .unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, PumpDrainEnd::Done);
@@ -798,7 +819,7 @@ mod tests {
             drain: Drain::Done { written: 4 },
         });
         assert_eq!(
-            pump.finish_or_flush_step(&mut [0; 3], DrainOp::Finish),
+            pump.finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish),
             Err(Error::new(ErrorKind::ContractViolation, 0, 0))
         );
     }
@@ -806,7 +827,7 @@ mod tests {
     struct Reports(EndCapableProgress);
 
     impl DrainCodec for Reports {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
     }
@@ -815,7 +836,7 @@ mod tests {
         fn process(
             &mut self,
             _input: &[u8],
-            _output: &mut [u8],
+            _output: &mut [MaybeUninit<u8>],
         ) -> Result<EndCapableProgress, Error> {
             Ok(self.0)
         }
@@ -824,7 +845,7 @@ mod tests {
     #[test]
     fn input_exhaustion_implies_all_input_was_consumed() {
         let mut codec = Reports(EndCapableProgress::InputConsumed { written: 2 });
-        let mut output = [0; 5];
+        let mut output = [MaybeUninit::uninit(); 5];
 
         assert_eq!(
             end_capable_step(&mut codec, b"abc", &mut output),
@@ -839,7 +860,7 @@ mod tests {
     #[test]
     fn output_exhaustion_implies_all_output_was_written() {
         let mut codec = Reports(EndCapableProgress::OutputFilled { consumed: 2 });
-        let mut output = [0; 5];
+        let mut output = [MaybeUninit::uninit(); 5];
 
         assert_eq!(
             end_capable_step(&mut codec, b"abc", &mut output),
@@ -857,7 +878,7 @@ mod tests {
             consumed: 2,
             written: 4,
         });
-        let mut output = [0; 5];
+        let mut output = [MaybeUninit::uninit(); 5];
 
         assert_eq!(
             end_capable_step(&mut codec, b"abc", &mut output),
@@ -898,13 +919,13 @@ mod tests {
 
         let mut input_done = Reports(EndCapableProgress::InputConsumed { written: 6 });
         assert_eq!(
-            end_capable_step(&mut input_done, b"abc", &mut [0; 5]),
+            end_capable_step(&mut input_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(violation)
         );
 
         let mut output_done = Reports(EndCapableProgress::OutputFilled { consumed: 4 });
         assert_eq!(
-            end_capable_step(&mut output_done, b"abc", &mut [0; 5]),
+            end_capable_step(&mut output_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(violation)
         );
 
@@ -913,7 +934,7 @@ mod tests {
             written: 6,
         });
         assert_eq!(
-            end_capable_step(&mut ended, b"abc", &mut [0; 5]),
+            end_capable_step(&mut ended, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(violation)
         );
     }
@@ -921,13 +942,17 @@ mod tests {
     struct Fails;
 
     impl DrainCodec for Fails {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
     }
 
     impl Codec for Fails {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+        fn process(
+            &mut self,
+            _input: &[u8],
+            _output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
             Err(Error::new(ErrorKind::Corrupt, 1, 2))
         }
     }
@@ -935,7 +960,7 @@ mod tests {
     #[test]
     fn codec_errors_are_preserved() {
         assert_eq!(
-            end_capable_step(&mut Fails, b"abc", &mut [0; 5]),
+            end_capable_step(&mut Fails, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(Error::new(ErrorKind::Corrupt, 1, 2))
         );
     }

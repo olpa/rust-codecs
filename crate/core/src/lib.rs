@@ -214,6 +214,8 @@ pub use protocol::{
     Sink, Source,
 };
 
+mod uninit;
+
 mod step;
 
 mod stream;

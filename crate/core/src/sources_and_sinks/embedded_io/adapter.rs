@@ -226,7 +226,7 @@ impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
 impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
     type Error = WriteError<W::Error>;
 
-    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+    fn spare(&mut self) -> Result<Option<&mut [core::mem::MaybeUninit<u8>]>, Self::Error> {
         self.0.spare()
     }
 

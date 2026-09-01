@@ -64,6 +64,8 @@ fn widen<T>(error: DriveError<Infallible, Infallible>) -> DriveError<T, Infallib
 
 #[cfg(test)]
 mod tests {
+    use core::mem::MaybeUninit;
+
     use core::convert::Infallible;
 
     use super::end_capable_pump_read;
@@ -131,11 +133,11 @@ mod tests {
     }
 
     impl DrainCodec for CanProgressWithoutOutput {
-        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             match self.held.take() {
                 None => Ok(Drain::Done { written: 0 }),
                 Some(held) => {
-                    output[0] = held;
+                    output[0].write(held);
                     Ok(Drain::Done { written: 1 })
                 }
             }
@@ -143,7 +145,11 @@ mod tests {
     }
 
     impl Codec for CanProgressWithoutOutput {
-        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
             debug_assert_eq!(input.len(), 1);
             match self.held.take() {
                 None => {
@@ -151,8 +157,8 @@ mod tests {
                     Ok(Progress::InputConsumed { written: 0 })
                 }
                 Some(held) => {
-                    output[0] = held;
-                    output[1] = input[0];
+                    output[0].write(held);
+                    output[1].write(input[0]);
                     Ok(Progress::InputConsumed { written: 2 })
                 }
             }
@@ -213,10 +219,10 @@ mod tests {
     }
 
     impl DrainCodec for EmitsTrailerOnFinish {
-        fn finish(&mut self, output: &mut [u8]) -> Result<Drain, Error> {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             const TRAILER: &[u8] = b"final";
             let n = (TRAILER.len() - self.position).min(output.len());
-            output[..n].copy_from_slice(&TRAILER[self.position..self.position + n]);
+            output[..n].write_copy_of_slice(&TRAILER[self.position..self.position + n]);
             self.position += n;
             if self.position == TRAILER.len() {
                 Ok(Drain::Done { written: n })
@@ -227,7 +233,11 @@ mod tests {
     }
 
     impl Codec for EmitsTrailerOnFinish {
-        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
+        fn process(
+            &mut self,
+            _input: &[u8],
+            _output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
             Ok(Progress::InputConsumed { written: 0 })
         }
     }
@@ -265,7 +275,7 @@ mod tests {
     }
 
     impl DrainCodec for EarlyEnd {
-        fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
     }
@@ -274,11 +284,11 @@ mod tests {
         fn process(
             &mut self,
             input: &[u8],
-            output: &mut [u8],
+            output: &mut [MaybeUninit<u8>],
         ) -> Result<EndCapableProgress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
-            output[..n].copy_from_slice(&input[..n]);
+            output[..n].write_copy_of_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
                 Ok(EndCapableProgress::End {
