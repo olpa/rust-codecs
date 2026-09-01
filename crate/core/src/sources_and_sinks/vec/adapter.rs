@@ -35,8 +35,10 @@ impl Source for VecSource {
         Ok((self.pos < self.inner.len()).then_some(&self.inner[self.pos..]))
     }
     fn consume(&mut self, amount: usize) {
-        assert!(amount <= self.inner.len() - self.pos);
-        self.pos += amount;
+        // Clamp rather than trust `amount`, mirroring `commit`: an
+        // overshoot must not push `pos` past `len`, since `chunk`'s
+        // indexing trusts that invariant.
+        self.pos += amount.min(self.inner.len() - self.pos);
     }
 }
 
@@ -102,23 +104,13 @@ impl Sink for VecSink {
         }
         let spare = self.inner.spare_capacity_mut();
         self.offered = spare.len();
-        // DESIGN: codecs are trusted, cooperative extensions of this
-        // high-performance library. In particular, a codec must initialize
-        // every byte it reports as written. Lending this spare capacity
-        // as `MaybeUninit<u8>` (never zeroing it) is the reason this
-        // adapter writes into `Vec` allocation directly. Treat a codec
-        // that claims unwritten bytes as outside the supported safety
-        // contract, not as an adversarial implementation this adapter
-        // must defend against.
         Ok(Some(spare))
     }
 
+    // SAFETY: the driver must only pass an `amount` that reflects how much
+    // of the spare slice it actually initialized since the last `spare` call.
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
-        // `offered` resets to 0 below, so a stray commit without a prior
-        // `spare` call hits this assert instead of silently growing the
-        // vec past what was actually initialized.
-        assert!(amount <= self.offered);
-        // SAFETY: the codec reported that exactly this prefix was written.
+        let amount = amount.min(self.offered);
         unsafe { self.inner.set_len(self.inner.len() + amount) };
         self.offered = 0;
         Ok(())
@@ -130,7 +122,7 @@ mod tests {
     use super::{VecSink, VecSource};
     use crate::identity::identity;
     use crate::stream_to_stream;
-    use crate::{Sink, Source};
+    use crate::Source;
 
     #[test]
     fn vec_to_vec_uses_the_shared_pump() {
@@ -152,13 +144,5 @@ mod tests {
         src.consume(3);
         // pos == len here: must be None, not Some(&[]).
         assert_eq!(src.chunk().unwrap(), None);
-    }
-
-    #[test]
-    #[should_panic]
-    fn commit_more_than_offered_panics() {
-        let mut sink = VecSink::new(alloc::vec::Vec::new());
-        let offered = sink.spare().unwrap().unwrap().len();
-        sink.commit(offered + 1).unwrap();
     }
 }
