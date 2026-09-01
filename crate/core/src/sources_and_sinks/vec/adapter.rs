@@ -3,6 +3,13 @@ use core::mem::MaybeUninit;
 
 use crate::{Sink, Source};
 
+// `VecSource` and `VecSink` have no `get_mut` method. `get_ref` and
+// `into_inner` exist, so `get_mut` may look missing by accident. It is
+// not. Each type keeps a position (`pos` or `offered`) that must match
+// the vec's real size. A public `get_mut` would let outside code
+// resize the vec directly, and that could make the position wrong
+// with no check to catch it.
+
 /// An owned `Vec<u8>` used directly as an input stream.
 pub struct VecSource {
     inner: alloc::vec::Vec<u8>,
@@ -18,9 +25,10 @@ impl VecSource {
         &self.inner
     }
 
-    pub fn get_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
-        &mut self.inner
-    }
+    // Forbidden to add: see the file-level comment above.
+    // pub fn get_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
+    //     &mut self.inner
+    // }
 
     pub fn into_inner(self) -> alloc::vec::Vec<u8> {
         self.inner
@@ -75,12 +83,10 @@ impl VecSink {
         &self.inner
     }
 
-    // No `get_mut`: `commit`'s `unsafe { set_len }` trusts `self.offered`
-    // (captured at the last `spare` call) to still describe the vec's
-    // actual spare capacity. A caller reaching in via `&mut Vec<u8>`
-    // between `spare` and `commit` (e.g. `shrink_to_fit`) could
-    // invalidate that without tripping any check, turning `commit`
-    // into real unsoundness rather than a panic.
+    // Forbidden to add: see the file-level comment above.
+    // pub fn get_mut(&mut self) -> &mut alloc::vec::Vec<u8> {
+    //     &mut self.inner
+    // }
 
     pub fn into_inner(self) -> alloc::vec::Vec<u8> {
         self.inner
