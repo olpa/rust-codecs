@@ -137,7 +137,7 @@ pub(crate) enum PumpDrainEnd {
 }
 
 /// Result of one whole `drain_to` run (behind [`Pump::finish_to`]/
-/// [`Pump::flush_to`]) — the [`PumpTransfer`] counterpart for the
+/// [`Pump::sync_flush_to`]) — the [`PumpTransfer`] counterpart for the
 /// drain side: `written` accumulates across every call `drain_to`
 /// made, not one call's contribution, kept as a distinct type so the
 /// two can't be mixed up at a call site.
@@ -147,9 +147,10 @@ pub(crate) struct PumpDrainTransfer {
     pub(crate) end: PumpDrainEnd,
 }
 
-/// Exact progress and boundary of one validated `finish` or `flush`
-/// call, as reported by [`Pump::finish_or_flush_step`] — the
-/// single-call counterpart to [`PumpDrainTransfer`], which covers a
+/// Exact progress and boundary of one validated `finish` or
+/// `sync_flush` call, as reported by
+/// [`Pump::finish_or_sync_flush_step`] — the single-call counterpart
+/// to [`PumpDrainTransfer`], which covers a
 /// whole `drain_to` run. Renames [`DrainStop`] to
 /// `SinkExhausted`/`Done`, since at this layer `output` is always
 /// exactly one [`Sink::spare`] slice, so "the buffer filled" and "the
@@ -368,15 +369,15 @@ impl<C: EndSignallingCodec> Pump<C> {
     }
 
     /// Drain the codec's trailing output by repeatedly calling
-    /// [`Pump::finish_or_flush_step`] against spare space taken from
-    /// `output`, until the codec reports `Done`.
+    /// [`Pump::finish_or_sync_flush_step`] against spare space taken
+    /// from `output`, until the codec reports `Done`.
     ///
     /// This is the finalizing counterpart to `transfer_from`: it is
     /// called once the source is exhausted, to flush whatever bytes
     /// the codec still owes (e.g. block padding, trailers) with no
-    /// further input. It shares its loop with `flush_to` via
+    /// further input. It shares its loop with `sync_flush_to` via
     /// `drain_to(output, DrainOp::Finish)`, which selects `finish`
-    /// (permanently ends the stream) over `flush` (may be called
+    /// (permanently ends the stream) over `sync_flush` (may be called
     /// again later).
     pub(crate) fn finish_to<O: Sink>(
         &mut self,
@@ -385,17 +386,17 @@ impl<C: EndSignallingCodec> Pump<C> {
         self.drain_to(output, DrainOp::Finish)
     }
 
-    pub(crate) fn flush_to<O: Sink>(
+    pub(crate) fn sync_flush_to<O: Sink>(
         &mut self,
         output: &mut O,
     ) -> Result<PumpDrainTransfer, DriveError<core::convert::Infallible, O::Error>> {
-        self.drain_to(output, DrainOp::Flush)
+        self.drain_to(output, DrainOp::SyncFlush)
     }
 
-    /// Shared loop behind `finish_to`/`flush_to`: repeatedly obtain
-    /// spare space from `output` and hand it to
-    /// [`Pump::finish_or_flush_step`], committing what was written,
-    /// until the codec reports `Done`.
+    /// Shared loop behind `finish_to`/`sync_flush_to`: repeatedly
+    /// obtain spare space from `output` and hand it to
+    /// [`Pump::finish_or_sync_flush_step`], committing what was
+    /// written, until the codec reports `Done`.
     ///
     /// When `output.spare()` returns `None`, the sink has no room —
     /// but rather than immediately reporting `SinkExhausted`, one more
@@ -424,7 +425,7 @@ impl<C: EndSignallingCodec> Pump<C> {
         let mut written = 0;
         loop {
             let moved = match output.spare().map_err(DriveError::Sink)? {
-                Some(spare) => match self.finish_or_flush_step(spare, op) {
+                Some(spare) => match self.finish_or_sync_flush_step(spare, op) {
                     Ok(moved) if moved.written > 0 || moved.end == PumpDrainEnd::Done => Ok(moved),
                     Ok(_) => return Err(DriveError::NoProgress),
                     Err(error) => {
@@ -439,7 +440,7 @@ impl<C: EndSignallingCodec> Pump<C> {
                 },
                 None => {
                     let moved = self
-                        .finish_or_flush_step(&mut [], op)
+                        .finish_or_sync_flush_step(&mut [], op)
                         .map_err(DriveError::Codec)?;
                     return Ok(PumpDrainTransfer {
                         written,
@@ -465,10 +466,10 @@ impl<C: EndSignallingCodec> Pump<C> {
         }
     }
 
-    /// Run one `finish`/`flush` call against `output`, selecting which
-    /// by `op` — the `drain_to` loop's counterpart to [`DrainOp::step`]
-    /// dispatching to `DrainCodec::finish`/`DrainCodec::flush`, one
-    /// layer up.
+    /// Run one `finish`/`sync_flush` call against `output`, selecting
+    /// which by `op` — the `drain_to` loop's counterpart to
+    /// [`DrainOp::step`] dispatching to
+    /// `DrainCodec::finish`/`DrainCodec::sync_flush`, one layer up.
     ///
     /// `self.done` is only ever set by [`Pump::latched_step`] reaching
     /// a genuine `EndSignallingProgress::End`. `Pump` then pins that
@@ -478,7 +479,7 @@ impl<C: EndSignallingCodec> Pump<C> {
     /// that doesn't license skipping `latched_step` or a call with the
     /// other `op` afterward (point 5), so a `Done` from `self.codec` is
     /// never latched into `self.done` — only reported.
-    fn finish_or_flush_step(
+    fn finish_or_sync_flush_step(
         &mut self,
         output: &mut [MaybeUninit<u8>],
         op: DrainOp,
@@ -517,7 +518,7 @@ mod tests {
     }
 
     impl DrainCodec for Scripted {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(self.drain)
         }
 
@@ -597,10 +598,6 @@ mod tests {
     struct DropEverything;
 
     impl DrainCodec for DropEverything {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -633,10 +630,6 @@ mod tests {
     struct FailsAfterProgress;
 
     impl DrainCodec for FailsAfterProgress {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             output[0].write(b'!');
             Err(Error::new(ErrorKind::Corrupt, 0, 1))
@@ -761,7 +754,7 @@ mod tests {
             .unwrap();
         assert!(pump.is_done());
         assert_eq!(
-            pump.finish_or_flush_step(&mut [], DrainOp::Finish)
+            pump.finish_or_sync_flush_step(&mut [], DrainOp::Finish)
                 .unwrap()
                 .end,
             PumpDrainEnd::Done
@@ -781,13 +774,13 @@ mod tests {
             drain: Drain::OutputFilled,
         });
         let moved = filled
-            .finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
+            .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
             .unwrap();
         assert_eq!(moved.written, 3);
         assert_eq!(moved.end, PumpDrainEnd::SinkExhausted);
         assert!(!filled.is_done());
 
-        // `finish_or_flush_step` reaching `Done` is only point-3 self-idempotency,
+        // `finish_or_sync_flush_step` reaching `Done` is only point-3 self-idempotency,
         // not the permanent pin caused by an in-band `End` — `latched_step`
         // must still be free to run normally afterward (point 5), so
         // `is_done()` stays false and
@@ -798,7 +791,7 @@ mod tests {
             drain: Drain::Done { written: 2 },
         });
         let moved = done
-            .finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
+            .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
             .unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, PumpDrainEnd::Done);
@@ -816,7 +809,7 @@ mod tests {
             drain: Drain::Done { written: 2 },
         });
         let moved = pump
-            .finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Flush)
+            .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::SyncFlush)
             .unwrap();
         assert_eq!(moved.written, 2);
         assert_eq!(moved.end, PumpDrainEnd::Done);
@@ -830,7 +823,7 @@ mod tests {
             drain: Drain::Done { written: 4 },
         });
         assert_eq!(
-            pump.finish_or_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish),
+            pump.finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish),
             Err(Error::new(ErrorKind::ContractViolation, 0, 0))
         );
     }
@@ -838,10 +831,6 @@ mod tests {
     struct Reports(EndSignallingProgress);
 
     impl DrainCodec for Reports {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -957,10 +946,6 @@ mod tests {
     struct Fails;
 
     impl DrainCodec for Fails {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }

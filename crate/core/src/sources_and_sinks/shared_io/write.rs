@@ -44,7 +44,7 @@ pub fn pump_flush<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
-    pump.flush_to(output)?;
+    pump.sync_flush_to(output)?;
     output.flush().map_err(DriveError::Sink)?;
     Ok(())
 }

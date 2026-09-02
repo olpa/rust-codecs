@@ -14,9 +14,9 @@
 //! [`CodecStep`] end-less makes that impossibility a type-level fact
 //! instead of a runtime one.
 //!
-//! [`DrainOp`] is the `finish`/`flush`-side half, shared as-is: neither
-//! caller needs a narrower type here, since `Drain` has no in-band-end
-//! counterpart to begin with.
+//! [`DrainOp`] is the `finish`/`sync_flush`-side half, shared as-is:
+//! neither caller needs a narrower type here, since `Drain` has no
+//! in-band-end counterpart to begin with.
 
 use core::mem::MaybeUninit;
 
@@ -125,7 +125,7 @@ pub(crate) fn end_signalling_step<C: EndSignallingCodec + ?Sized>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrainOp {
     Finish,
-    Flush,
+    SyncFlush,
 }
 
 /// Why one [`DrainOp::step`] call stopped.
@@ -138,7 +138,8 @@ pub(crate) enum DrainStop {
     Done,
 }
 
-/// Exact progress and boundary of one validated `finish`/`flush` call.
+/// Exact progress and boundary of one validated `finish`/`sync_flush`
+/// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DrainStep {
     pub(crate) written: usize,
@@ -162,7 +163,7 @@ impl DrainOp {
         let output_len = output.len();
         let result = match self {
             DrainOp::Finish => codec.finish(output),
-            DrainOp::Flush => codec.flush(output),
+            DrainOp::SyncFlush => codec.sync_flush(output),
         };
         Ok(match result?.validated(output_len)? {
             Drain::OutputFilled => DrainStep {

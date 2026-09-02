@@ -68,23 +68,17 @@ pub trait Sink {
 // Codec traits
 // ----
 
-/// Operations that tell a codec that input has ended or request a
-/// sync point. Both [`Codec`] and [`EndSignallingCodec`] use these
-/// operations.
+/// Shared supertrait with [`Self::sync_flush`] and [`Self::finish`].
+///
+/// This trait is a technical artifact, not a standalone abstraction.
+/// Write code against [`Codec`] or [`EndSignallingCodec`] instead.
 pub trait DrainCodec {
-    /// Write all buffered output up to a sync boundary. This does not
-    /// end the stream. More calls to `process` may follow.
-    ///
-    /// Implement a real sync marker only when the format defines one
-    /// and the codec buffers output for it. Deflate, zlib, and gzip
-    /// are examples. Otherwise, return `Drain::Done { written: 0 }`.
-    ///
-    /// Once `flush` returns `Done`, it is idempotent: see [`Codec`]
-    /// contract point 3. `flush` must always return one of three
-    /// results: `OutputFilled`, `Done`, or `Err`. See [`Codec`]
-    /// contract point 6. For what happens when `flush` is called
-    /// after `finish`, see [`Codec`] contract point 5.
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
+    /// Deflate, zlib, and similar codecs support this: they write
+    /// buffered output and a sync marker. Most codecs do not need
+    /// `sync_flush`.
+    fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
+    }
 
     /// Tell the codec that no more input will come. The codec flushes
     /// any buffered state. If the format has a trailer or a checksum,
@@ -129,20 +123,22 @@ pub trait DrainCodec {
 /// buffer; copying the bytes is not required.
 ///
 /// 3)
-/// `finish` and `flush` become idempotent separately after they return
-/// [`Drain::Done`]. Suppose `finish` returns `Done` and no later call
-/// to `process` supplies new input. Each later call to `finish` must
-/// return `Drain::Done { written: 0 }`. It must not write another
-/// trailer. The same rule applies to repeated `flush` calls: they must
-/// not write another sync marker. This permits a caller to repeat an
-/// operation after an interruption in a larger composition.
+/// `finish` and `sync_flush` become idempotent separately after they
+/// return [`Drain::Done`]. Suppose `finish` returns `Done` and no
+/// later call to `process` supplies new input. Each later call to
+/// `finish` must return `Drain::Done { written: 0 }`. It must not
+/// write another trailer. The same rule applies to repeated
+/// `sync_flush` calls: they must not write another sync marker. This
+/// permits a caller to repeat an operation after an interruption in a
+/// larger composition.
 ///
-/// A completed `flush` does not complete `finish`. `Done` from
-/// `flush` means only that the codec reached a sync point; the stream
-/// stays open. If `finish` is called afterward, with no new `process`
-/// input in between, it still does its real work and produces the
-/// actual trailer. The reverse order, calling `flush` after `finish`,
-/// is covered by point 5 and is not generally defined.
+/// A completed `sync_flush` does not complete `finish`. `Done` from
+/// `sync_flush` means only that the codec reached a sync point; the
+/// stream stays open. If `finish` is called afterward, with no new
+/// `process` input in between, it still does its real work and
+/// produces the actual trailer. The reverse order, calling
+/// `sync_flush` after `finish`, is covered by point 5 and is not
+/// generally defined.
 ///
 /// 4)
 /// The codec state after `Err` is not defined. A later call can fail
@@ -155,14 +151,14 @@ pub trait DrainCodec {
 /// a successful result.
 ///
 /// 5)
-/// This contract does not define a call to `process` or `flush` after
-/// `finish`. A codec without a trailer or terminal state can continue
-/// to process input. A codec that has closed its format, for example
-/// by writing a final checksum, should return `Err`. Both behaviors
-/// are valid. A caller must not depend on either behavior.
+/// This contract does not define a call to `process` or `sync_flush`
+/// after `finish`. A codec without a trailer or terminal state can
+/// continue to process input. A codec that has closed its format, for
+/// example by writing a final checksum, should return `Err`. Both
+/// behaviors are valid. A caller must not depend on either behavior.
 ///
 /// 6)
-/// `finish` and `flush` must always return one of three results:
+/// `finish` and `sync_flush` must always return one of three results:
 /// [`Drain::OutputFilled`], [`Drain::Done`], or `Err`. This is the
 /// `Drain` counterpart of point 1. `Drain::OutputFilled` carries no
 /// count. Unlike `Progress::OutputFilled`, it is not a
@@ -321,7 +317,8 @@ impl From<Progress> for EndSignallingProgress {
     }
 }
 
-/// Progress of one [`DrainCodec::finish`] or [`DrainCodec::flush`] call.
+/// Progress of one [`DrainCodec::finish`] or [`DrainCodec::sync_flush`]
+/// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drain {
     /// All of `output` was filled and there is more to come — call
@@ -329,7 +326,8 @@ pub enum Drain {
     OutputFilled,
     /// Everything owed was delivered; the final `written` bytes (at
     /// most the output's length) landed in this call. For `finish`
-    /// this is the end of the stream; for `flush`, the sync point.
+    /// this is the end of the stream; for `sync_flush`, the sync
+    /// point.
     Done { written: usize },
 }
 
@@ -400,8 +398,8 @@ use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        (**self).flush(output)
+    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        (**self).sync_flush(output)
     }
 
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {

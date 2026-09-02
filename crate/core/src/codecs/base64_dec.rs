@@ -63,10 +63,6 @@ impl<E: Engine> Base64Dec<E> {
 }
 
 impl<E: Engine> DrainCodec for Base64Dec<E> {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
-    }
-
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {

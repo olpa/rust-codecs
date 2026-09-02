@@ -209,7 +209,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         Ok(())
     }
 
-    /// Shared engine behind `finish` and `flush`: both drive `first`
+    /// Shared engine behind `finish` and `sync_flush`: both drive `first`
     /// through staging into `second`, one pass at a time (same pass
     /// structure as `process`), and differ only in which operation —
     /// `op` — runs on each side.
@@ -284,8 +284,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        self.drain_through(output, DrainOp::Flush)
+    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        self.drain_through(output, DrainOp::SyncFlush)
     }
 
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
@@ -525,8 +525,9 @@ mod tests {
     }
 
     /// A block-buffering codec: hoards all input internally and emits
-    /// it only on `flush`/`finish` — the codec class `DrainCodec::flush`
-    /// exists for (deflate-style sync boundaries).
+    /// it only on `sync_flush`/`finish` — the codec class
+    /// `DrainCodec::sync_flush` exists for (deflate-style sync
+    /// boundaries).
     #[derive(Default)]
     struct Hoarder {
         buf: Vec<u8>,
@@ -546,7 +547,7 @@ mod tests {
     }
 
     impl DrainCodec for Hoarder {
-        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             self.emit(output)
         }
 
@@ -568,7 +569,7 @@ mod tests {
 
     #[test]
     fn flush_drains_a_hoarding_first_through_second() {
-        // `first` withholds everything until flushed; `Chain::flush`
+        // `first` withholds everything until flushed; `Chain::sync_flush`
         // must pull it out *through* `second`, so the bytes arrive
         // transformed — and the stream stays open for more input.
         let expected = collect(rot13(), INPUT).unwrap();
@@ -576,7 +577,7 @@ mod tests {
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, as_uninit_mut(&mut out)).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let drain = chain.flush(as_uninit_mut(&mut out)).unwrap();
+        let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
             drain,
             Drain::Done {
@@ -588,14 +589,14 @@ mod tests {
 
     #[test]
     fn flush_drains_a_hoarding_second() {
-        // `second` withholds; `Chain::flush` must invoke `second`'s
-        // own flush after `first`'s.
+        // `second` withholds; `Chain::sync_flush` must invoke `second`'s
+        // own sync_flush after `first`'s.
         let expected = collect(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]);
         let mut out = [0u8; 64];
         let outcome = chain.process(INPUT, as_uninit_mut(&mut out)).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let drain = chain.flush(as_uninit_mut(&mut out)).unwrap();
+        let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
             drain,
             Drain::Done {
@@ -619,7 +620,7 @@ mod tests {
         let mut collected = Vec::new();
         loop {
             let mut out = [0u8; 1];
-            match chain.flush(as_uninit_mut(&mut out)).unwrap() {
+            match chain.sync_flush(as_uninit_mut(&mut out)).unwrap() {
                 Drain::OutputFilled => collected.extend_from_slice(&out),
                 Drain::Done { written } => {
                     collected.extend_from_slice(&out[..written]);
@@ -632,7 +633,7 @@ mod tests {
         // Second round: new input after a completed flush.
         chain.process(b"abc", as_uninit_mut(&mut big)).unwrap();
         let expected2 = collect(rot13(), b"abc").unwrap();
-        let drain = chain.flush(as_uninit_mut(&mut big)).unwrap();
+        let drain = chain.sync_flush(as_uninit_mut(&mut big)).unwrap();
         assert_eq!(
             drain,
             Drain::Done {
@@ -646,10 +647,6 @@ mod tests {
     struct Overclaimer;
 
     impl DrainCodec for Overclaimer {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -686,10 +683,6 @@ mod tests {
     }
 
     impl DrainCodec for FirstFailsOnce {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -736,10 +729,6 @@ mod tests {
     }
 
     impl DrainCodec for SecondFailsOnce {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
-        }
-
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }

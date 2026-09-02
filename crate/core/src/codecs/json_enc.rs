@@ -85,10 +85,6 @@ impl JsonEnc {
 }
 
 impl DrainCodec for JsonEnc {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
-    }
-
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         // A well-behaved driver never reaches this with pending_literal_len
         // nonzero: as long as it's nonzero, `process` reports less than
