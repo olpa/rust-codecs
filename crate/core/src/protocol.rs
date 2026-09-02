@@ -91,82 +91,32 @@ pub trait DrainCodec {
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
 }
 
-/// A stateful transform for a complete byte stream. `process` never
-/// declares the stream complete. Call `finish` to signal the end of
-/// input.
-///
-/// # The contract
-///
-/// 1) Each successful call to `process` does one of two things:
-/// - it consumes all of `input`, or
-/// - it fills all of `output`.
-///
-/// If the codec runs out of input before `output` is full, it
-/// reports this with `InputConsumed`.
-///
-/// 2)
-/// Each call reads `input` and writes `output` starting at byte 0 of
-/// the slices it was given. The codec does not remember a "leftover"
-/// position from the previous call. If a call did not consume all of
-/// `input`, the caller must retain those bytes and supply them again
-/// if it wants them processed. It may pass a suffix of the same
-/// buffer; copying the bytes is not required.
-///
-/// 3)
-/// `finish` and `sync_flush` become idempotent separately after they
-/// return [`Drain::Done`]. Suppose `finish` returns `Done` and no
-/// later call to `process` supplies new input. Each later call to
-/// `finish` must return `Drain::Done { written: 0 }`. It must not
-/// write another trailer. The same rule applies to repeated
-/// `sync_flush` calls: they must not write another sync marker. This
-/// permits a caller to repeat an operation after an interruption in a
-/// larger composition.
-///
-/// A completed `sync_flush` does not complete `finish`. `Done` from
-/// `sync_flush` means only that the codec reached a sync point; the
-/// stream stays open. If `finish` is called afterward, with no new
-/// `process` input in between, it still does its real work and
-/// produces the actual trailer. The reverse order, calling
-/// `sync_flush` after `finish`, is covered by point 5 and is not
-/// generally defined.
-///
-/// 4)
-/// The codec state after `Err` is not defined. A later call can fail
-/// again or make normal progress. A caller that requires a permanent
-/// failure state must implement that state itself.
-///
-/// The error's `consumed` and `written` fields report the exact input
-/// and output prefixes already processed by that call. Both counts
-/// must fit within the slices passed to the call, just like counts in
-/// a successful result.
-///
-/// 5)
-/// This contract does not define a call to `process` or `sync_flush`
-/// after `finish`. A codec without a trailer or terminal state can
-/// continue to process input. A codec that has closed its format, for
-/// example by writing a final checksum, should return `Err`. Both
-/// behaviors are valid. A caller must not depend on either behavior.
-///
-/// 6)
-/// `finish` and `sync_flush` must always return one of three results:
-/// [`Drain::OutputFilled`], [`Drain::Done`], or `Err`. This is the
-/// `Drain` counterpart of point 1. `Drain::OutputFilled` carries no
-/// count. Unlike `Progress::OutputFilled`, it is not a
-/// partial-progress report. It means that the call filled the entire
-/// non-empty `output` slice. A call must not report `OutputFilled`
-/// without filling a non-empty output slice.
-///
-/// Requiring one side to complete prevents ambiguous zero-progress
-/// stalls and keeps drivers simple. Codecs that need larger input or
-/// output units must buffer those units internally. The implementation
-/// patterns and fuller rationale are in `CREATING-CODECS.md`.
-///
-/// # Creating a codec
+/// A stateful transform for a complete chunked stream.
 ///
 /// See `CREATING-CODECS.md` for how to write one.
-///
 pub trait Codec: DrainCodec {
-    /// Push input bytes and pull output bytes.
+    /// Transform one chunk of input into output.
+    ///
+    /// 1) Each successful call does one of two things:
+    /// - it consumes **all** of `input`, reporting [`Progress::InputConsumed`], or
+    /// - it fills **all** of `output`, reporting [`Progress::OutputFilled`].
+    ///
+    /// 2) Each call reads `input` and writes `output` starting at byte 0 of
+    /// the slices it was given.
+    ///
+    /// The codec does not remember a "leftover" position from the previous call.
+    /// If a call did not consume all of `input`, the caller must retain those
+    /// bytes and supply them again.
+    ///
+    /// 3) The codec state after `Err` is not defined. A later call can fail
+    /// again or make normal progress.
+    ///
+    /// 4) This contract does not define a call to `process` or `sync_flush`
+    /// after `finish`. Two behaviors are valid:
+    /// - a codec without a trailer or terminal state may continue to
+    ///   process input, or
+    /// - a codec that has closed its format, for example by writing a
+    ///   final checksum, may return `Err`.
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error>;
 }
 
@@ -193,7 +143,7 @@ pub trait Codec: DrainCodec {
 ///
 /// # The contract
 ///
-/// This trait follows [`Codec`]'s points 1–6, with one addition: a
+/// This trait follows [`Codec`]'s points 1–4, with one addition: a
 /// successful `process` call may also resolve to
 /// [`EndSignallingProgress::End`]. When it does:
 /// - the `consumed` input bytes belong to the ended stream,
