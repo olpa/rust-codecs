@@ -133,6 +133,10 @@ mod tests {
     }
 
     impl DrainCodec for CanProgressWithoutOutput {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             match self.held.take() {
                 None => Ok(Drain::Done { written: 0 }),
@@ -219,6 +223,10 @@ mod tests {
     }
 
     impl DrainCodec for EmitsTrailerOnFinish {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             const TRAILER: &[u8] = b"final";
             let n = (TRAILER.len() - self.position).min(output.len());
@@ -275,6 +283,10 @@ mod tests {
     }
 
     impl DrainCodec for EarlyEnd {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }

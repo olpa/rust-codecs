@@ -72,6 +72,20 @@ pub trait Sink {
 /// sync point. Both [`Codec`] and [`EndSignallingCodec`] use these
 /// operations.
 pub trait DrainCodec {
+    /// Write all buffered output up to a sync boundary. This does not
+    /// end the stream. More calls to `process` may follow.
+    ///
+    /// Implement a real sync marker only when the format defines one
+    /// and the codec buffers output for it. Deflate, zlib, and gzip
+    /// are examples. Otherwise, return `Drain::Done { written: 0 }`.
+    ///
+    /// Once `flush` returns `Done`, it is idempotent: see [`Codec`]
+    /// contract point 3. `flush` must always return one of three
+    /// results: `OutputFilled`, `Done`, or `Err`. See [`Codec`]
+    /// contract point 6. For what happens when `flush` is called
+    /// after `finish`, see [`Codec`] contract point 5.
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
+
     /// Tell the codec that no more input will come. The codec flushes
     /// any buffered state. If the format has a trailer or a checksum,
     /// the codec writes it now.
@@ -91,23 +105,6 @@ pub trait DrainCodec {
     /// forward this call after `process` has returned
     /// [`EndSignallingProgress::End`]; see that trait's contract.
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
-
-    /// Write all buffered output up to a sync boundary. This does not
-    /// end the stream. More calls to `process` may follow.
-    ///
-    /// Override this method only when the format defines a sync
-    /// marker and the codec buffers output for it. Deflate, zlib, and
-    /// gzip are examples. The default implementation has no pending
-    /// output and does nothing.
-    ///
-    /// Once `flush` returns `Done`, it is idempotent: see [`Codec`]
-    /// contract point 3. `flush` must always return one of three
-    /// results: `OutputFilled`, `Done`, or `Err`. See [`Codec`]
-    /// contract point 6. For what happens when `flush` is called
-    /// after `finish`, see [`Codec`] contract point 5.
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
-    }
 }
 
 /// A stateful transform for a complete byte stream. `process` never
@@ -403,12 +400,12 @@ use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        (**self).finish(output)
-    }
-
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         (**self).flush(output)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        (**self).finish(output)
     }
 }
 

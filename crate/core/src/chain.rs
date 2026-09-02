@@ -284,12 +284,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        self.drain_through(output, DrainOp::Finish)
-    }
-
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         self.drain_through(output, DrainOp::Flush)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        self.drain_through(output, DrainOp::Finish)
     }
 }
 
@@ -546,11 +546,11 @@ mod tests {
     }
 
     impl DrainCodec for Hoarder {
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             self.emit(output)
         }
 
-        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             self.emit(output)
         }
     }
@@ -646,6 +646,10 @@ mod tests {
     struct Overclaimer;
 
     impl DrainCodec for Overclaimer {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -682,6 +686,10 @@ mod tests {
     }
 
     impl DrainCodec for FirstFailsOnce {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -728,6 +736,10 @@ mod tests {
     }
 
     impl DrainCodec for SecondFailsOnce {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }

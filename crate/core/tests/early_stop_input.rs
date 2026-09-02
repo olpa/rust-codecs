@@ -34,6 +34,10 @@ fn as_uninit_mut(bytes: &mut [u8]) -> &mut [MaybeUninit<u8>] {
 struct QuoteEnd;
 
 impl DrainCodec for QuoteEnd {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
+    }
+
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }

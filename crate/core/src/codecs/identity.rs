@@ -9,6 +9,10 @@ use crate::{Codec, Drain, DrainCodec, Error, Progress};
 pub struct Identity;
 
 impl DrainCodec for Identity {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        Ok(Drain::Done { written: 0 })
+    }
+
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
         Ok(Drain::Done { written: 0 })
     }

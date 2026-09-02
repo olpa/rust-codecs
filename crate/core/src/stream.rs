@@ -517,11 +517,11 @@ mod tests {
     }
 
     impl DrainCodec for Scripted {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(self.drain)
         }
 
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(self.drain)
         }
     }
@@ -597,6 +597,10 @@ mod tests {
     struct DropEverything;
 
     impl DrainCodec for DropEverything {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -629,6 +633,10 @@ mod tests {
     struct FailsAfterProgress;
 
     impl DrainCodec for FailsAfterProgress {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             output[0].write(b'!');
             Err(Error::new(ErrorKind::Corrupt, 0, 1))
@@ -830,6 +838,10 @@ mod tests {
     struct Reports(EndSignallingProgress);
 
     impl DrainCodec for Reports {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
@@ -945,6 +957,10 @@ mod tests {
     struct Fails;
 
     impl DrainCodec for Fails {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+            Ok(Drain::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
             Ok(Drain::Done { written: 0 })
         }
