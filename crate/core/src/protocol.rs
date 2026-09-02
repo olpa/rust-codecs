@@ -85,19 +85,9 @@ pub trait DrainCodec {
     /// the codec writes it now.
     ///
     /// One call may not be enough. If `output` is too small to hold
-    /// all pending output, `finish` returns
-    /// `Drain::OutputFilled` instead of `Drain::Done`. Call `finish`
-    /// again, and drain `output` between calls, until it returns
-    /// [`Drain::Done`]. If a driver treats `OutputFilled` as success,
-    /// it truncates the stream. Part of the trailer, checksum, or
-    /// padding will be missing.
-    ///
-    /// Once `finish` returns `Done`, it is idempotent: see [`Codec`]
-    /// contract point 3. `finish` must always return one of three
-    /// results: `OutputFilled`, `Done`, or `Err`. See [`Codec`]
-    /// contract point 6. An [`EndSignallingCodec`] driver must not
-    /// forward this call after `process` has returned
-    /// [`EndSignallingProgress::End`]; see that trait's contract.
+    /// all pending output, `finish` returns `Drain::OutputFilled`
+    /// instead of `Drain::Done`. Call `finish` repeatedly until it
+    /// returns [`Drain::Done`].
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
 }
 
