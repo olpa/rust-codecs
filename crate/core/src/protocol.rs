@@ -85,8 +85,8 @@ pub trait DrainCodec {
     /// the codec writes it now.
     ///
     /// One call may not be enough. If `output` is too small to hold
-    /// all pending output, `finish` returns `Drain::OutputFilled`
-    /// instead of `Drain::Done`. Call `finish` repeatedly until it
+    /// all pending output, `finish` returns [`Drain::OutputFilled`]
+    /// instead of [`Drain::Done`]. Call `finish` repeatedly until it
     /// returns [`Drain::Done`].
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
 }
@@ -111,8 +111,9 @@ pub trait Codec: DrainCodec {
     /// 3) The codec state after `Err` is not defined. A later call can fail
     /// again or make normal progress.
     ///
-    /// 4) This contract does not define a call to `process` or `sync_flush`
-    /// after `finish`. Two behaviors are valid:
+    /// 4) This contract does not define a call to `process` or
+    /// [`sync_flush`](DrainCodec::sync_flush) after `finish`. Two
+    /// behaviors are valid:
     /// - a codec without a trailer or terminal state may continue to
     ///   process input, or
     /// - a codec that has closed its format, for example by writing a
@@ -120,79 +121,37 @@ pub trait Codec: DrainCodec {
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error>;
 }
 
-/// A stateful byte transform that can recognize its logical end
-/// inside an input slice. This is an in-band end of a self-terminating
-/// format. It is not an error or a cancellation.
+/// A stateful transform that can recognize the logical end of its input
+/// inside a byte stream.
 ///
-/// Input-side drivers accept this trait:
-/// [`CodecReader`](crate::sources_and_sinks::std_io::CodecReader) and
-/// [`stream_to_stream`](crate::stream_to_stream). They can expose the
-/// transformed bytes up to the reported end, and leave the rest of
-/// the source available to whatever comes next.
-/// [`CodecWriter`](crate::sources_and_sinks::std_io::CodecWriter) does
-/// not accept this trait, because `Write` cannot represent a
-/// successful permanent short write.
+/// It leaves the rest of the source available to whatever comes next.
 ///
 /// Every [`Codec`] is automatically an `EndSignallingCodec` that never
-/// returns `End`; see the blanket implementation below. An
-/// `EndSignallingCodec` cannot be used where `Codec` is required. It
-/// cannot promise to consume the complete logical input stream. One
-/// concrete type also cannot implement both traits with different
-/// behavior. A format that has an ordinary mode and a terminating
-/// mode should provide two distinct types.
-///
-/// # The contract
-///
-/// This trait follows [`Codec`]'s points 1–4, with one addition: a
-/// successful `process` call may also resolve to
-/// [`EndSignallingProgress::End`]. When it does:
-/// - the `consumed` input bytes belong to the ended stream,
-/// - the `written` output bytes were produced by this call,
-/// - `input[consumed..]` was not consumed; it belongs to whatever
-///   follows the terminated stream, and
-/// - the current logical driving operation is complete.
-///
-/// A codec may consume the delimiter that marks the boundary, or
-/// leave it unconsumed. This behavior is specific to each format, and
-/// the codec must document it.
-///
-/// Once `process` reaches `End`, a driver must stop driving the
-/// current logical stream. It must not forward later `process`,
-/// `finish`, or `flush` calls to the codec as part of that stream.
-/// Lifecycle wrappers such as [`Pump`](crate::stream::Pump) latch the
-/// signal and answer later calls themselves with zero-progress
-/// terminal results.
-///
-/// This trait does not define what direct codec calls do
-/// after `End`. A concrete codec may document that its instance can
-/// be reused for another logical stream; another may have entered a
-/// permanently terminal internal state. Generic code must rely on
-/// neither behavior.
-///
-/// EOF before `End` does not have one required meaning. If the format
-/// requires an in-band terminator, `finish` should return an
-/// `UnexpectedEnd` error when EOF occurs first. If either the
-/// terminator or EOF can end the stream, `finish` may write buffered
-/// output and return `Done`. Each `EndSignallingCodec` should document
-/// its rule.
-///
-/// # Naming the operation
-///
-/// Both `Codec` and `EndSignallingCodec` deliberately name their method
-/// `process`. Because of the blanket implementation, a direct method
-/// call on an ordinary concrete codec can be ambiguous when both
-/// traits are in scope. In that case, use Rust's fully qualified
-/// syntax:
-///
-/// ```text
-/// Codec::process(&mut codec, input, output);
-/// EndSignallingCodec::process(&mut codec, input, output);
-/// ```
+/// returns [`End`](EndSignallingProgress::End); see the blanket
+/// implementation.
 pub trait EndSignallingCodec: DrainCodec {
-    /// Push input bytes and pull output bytes. This may also
-    /// recognize the current logical stream's in-band end. Calling
-    /// this after `finish` or after it has returned `End` is not
-    /// specified by this trait.
+    /// This trait follows [`Codec::process`]'s contract, with one addition:
+    /// a successful `process` call may also resolve to
+    /// [`EndSignallingProgress::End`].
+    ///
+    /// Once `process` reaches [`End`](EndSignallingProgress::End), a
+    /// driver must stop driving the current logical stream. Lifecycle
+    /// wrappers such as [`Pump`](crate::stream::Pump) latch the signal
+    /// and answer later calls themselves with zero-progress terminal
+    /// results.
+    ///
+    /// This trait does not define what direct codec calls do after
+    /// [`End`](EndSignallingProgress::End). A concrete codec may
+    /// document that its instance can be reused for another logical
+    /// stream; another may have entered a permanently terminal internal
+    /// state.
+    ///
+    /// If EOF arrives before `process` reports
+    /// [`End`](EndSignallingProgress::End), `finish` decides what that
+    /// means. If the format requires an in-band terminator, `finish` may
+    /// report [`ErrorKind::UnexpectedEnd`]. If the format treats EOF
+    /// itself as a valid end, `finish` may instead return
+    /// [`Done`](Drain::Done).
     fn process(
         &mut self,
         input: &[u8],

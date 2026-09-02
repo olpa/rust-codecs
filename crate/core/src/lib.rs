@@ -23,9 +23,8 @@
 //!
 //! ## Wrapping an output
 //!
-//! Write a JSON string, escaping its content with
-//! [`json_enc`](json_enc::json_enc), while the surrounding quotes go
-//! straight through to the base writer, unescaped.
+//! Write a JSON string, escaping its content with `json_enc`, while the
+//! surrounding quotes go straight through to the base writer, unescaped.
 //!
 //! ```
 //! # #[cfg(feature = "json")]
