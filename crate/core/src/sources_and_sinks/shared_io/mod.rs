@@ -5,7 +5,7 @@ mod read;
 pub use read::end_signalling_pump_read;
 
 mod write;
-pub use write::{pump_finish, pump_flush, pump_write};
+pub use write::{pump_finish, pump_flush, pump_sync_flush, pump_write};
 
 mod sink;
 pub use sink::{RetryingWrite, ScratchSink};

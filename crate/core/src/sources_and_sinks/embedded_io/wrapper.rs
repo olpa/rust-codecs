@@ -4,7 +4,7 @@ use core::fmt;
 use embedded_io::{BufRead, ErrorType, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    end_signalling_pump_read, pump_finish, pump_flush, pump_write,
+    end_signalling_pump_read, pump_finish, pump_flush, pump_sync_flush, pump_write,
 };
 use crate::stream::Pump;
 use crate::{Codec, DriveError, EndSignallingCodec, Error, ErrorKind};
@@ -228,6 +228,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         Ok(self.output.into_inner())
     }
 
+    /// Ask the codec to emit buffered output and a sync marker without
+    /// ending its stream, then flush the wrapped writer.
+    ///
+    /// Unlike [`Write::flush`], this can change the encoded byte stream.
+    pub fn sync_flush(&mut self) -> Result<(), EmbeddedError<W::Error>> {
+        pump_sync_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)
+    }
+
     pub fn into_parts(self) -> (W, C, S) {
         let (inner, buffer) = self.output.into_parts();
         (inner, self.pump.into_inner(), buffer)
@@ -244,6 +252,6 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)
+        pump_flush(&mut self.output).map_err(writer_error_to_embedded_error)
     }
 }
