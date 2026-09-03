@@ -5,7 +5,7 @@
 //! - [`Codec`]: implement this for a whole-stream codec. Every ordinary
 //!   codec is automatically a [`BoundaryAwareCodec`] too, for input-side
 //!   drivers that can use an in-band end.
-//! - [`Progress`], [`BoundaryAwareProgress`], [`Drain`], [`Error`],
+//! - [`Progress`], [`BoundaryAwareProgress`], [`DrainProgress`], [`Error`],
 //!   [`ErrorKind`]: the vocabulary these traits' methods speak in. The
 //!   contract in one sentence: every call fully consumes its input,
 //!   fully fills its output, or (for a `BoundaryAwareCodec`) ends the
@@ -209,7 +209,7 @@ extern crate alloc;
 
 mod protocol;
 pub use protocol::{
-    BoundaryAwareCodec, BoundaryAwareProgress, Codec, Drain, DrainCodec, Error, ErrorKind,
+    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, ErrorKind,
     Progress, Sink, Source,
 };
 

@@ -15,12 +15,12 @@
 //! instead of a runtime one.
 //!
 //! [`DrainOp`] is the `finish`/`sync_flush`-side half, shared as-is:
-//! neither caller needs a narrower type here, since `Drain` has no
+//! neither caller needs a narrower type here, since `DrainProgress` has no
 //! in-band-end counterpart to begin with.
 
 use core::mem::MaybeUninit;
 
-use crate::{BoundaryAwareCodec, BoundaryAwareProgress, Codec, Drain, DrainCodec, Error, Progress};
+use crate::{BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, Progress};
 
 /// Why one step of an ordinary [`Codec::process`] call stopped. No
 /// in-band end is possible — see [`BoundaryAwareStepEnd`] for the
@@ -148,9 +148,9 @@ pub(crate) struct DrainStep {
 
 impl DrainOp {
     /// Run this operation once against `codec`, validated
-    /// (`Drain::validated`, which rejects a `Done { written }` that
+    /// (`DrainProgress::validated`, which rejects a `Done { written }` that
     /// overclaims past `output.len()` as `ErrorKind::ContractViolation`)
-    /// and normalized: `Drain` only tells you *how* the call stopped —
+    /// and normalized: `DrainProgress` only tells you *how* the call stopped —
     /// it doesn't carry the amount written for the filled case, since
     /// by contract that must be the whole buffer. This fills that in,
     /// so both variants collapse into the uniform `{ written, stop }`
@@ -166,11 +166,11 @@ impl DrainOp {
             DrainOp::SyncFlush => codec.sync_flush(output),
         };
         Ok(match result?.validated(output_len)? {
-            Drain::OutputFilled => DrainStep {
+            DrainProgress::OutputFilled => DrainStep {
                 written: output_len,
                 stop: DrainStop::OutputFilled,
             },
-            Drain::Done { written } => DrainStep {
+            DrainProgress::Done { written } => DrainStep {
                 written,
                 stop: DrainStop::Done,
             },

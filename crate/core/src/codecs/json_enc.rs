@@ -7,7 +7,7 @@ use core::mem::MaybeUninit;
 
 use json_escape::explicit::escape_bytes;
 
-use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
+use crate::{Codec, DrainProgress, DrainCodec, Error, ErrorKind, Progress};
 
 /// An escape sequence known for the byte right after `pending_literal_len`'s
 /// bytes, tracked through its two possible states so the invalid
@@ -85,7 +85,7 @@ impl JsonEnc {
 }
 
 impl DrainCodec for JsonEnc {
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         // A well-behaved driver never reaches this with pending_literal_len
         // nonzero: as long as it's nonzero, `process` reports less than
         // full input consumed, which keeps the driver calling `process`
@@ -95,9 +95,9 @@ impl DrainCodec for JsonEnc {
         }
         let (_, written) = self.flush_pending(&[], output)?;
         if matches!(self.pending_escape, PendingEscape::Started(_)) {
-            return Ok(Drain::OutputFilled);
+            return Ok(DrainProgress::OutputFilled);
         }
-        Ok(Drain::Done { written })
+        Ok(DrainProgress::Done { written })
     }
 }
 
@@ -164,7 +164,7 @@ mod tests {
     use super::{escape_bytes, json_enc, JsonEnc, PendingEscape};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{encode_string, VecSink, VecSource};
-    use crate::{Codec, Drain, DrainCodec, DriveError, ErrorKind, Progress};
+    use crate::{Codec, DrainProgress, DrainCodec, DriveError, ErrorKind, Progress};
 
     #[test]
     fn round_trip() {
@@ -337,13 +337,13 @@ mod tests {
             codec
                 .finish(crate::uninit::as_uninit_mut(&mut output))
                 .unwrap(),
-            Drain::Done { written: 0 }
+            DrainProgress::Done { written: 0 }
         );
         assert_eq!(
             codec
                 .finish(crate::uninit::as_uninit_mut(&mut output))
                 .unwrap(),
-            Drain::Done { written: 0 }
+            DrainProgress::Done { written: 0 }
         );
     }
 }

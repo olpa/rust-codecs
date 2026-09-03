@@ -474,7 +474,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// `self.done` is only ever set by [`Pump::latched_step`] reaching
     /// a genuine `BoundaryAwareProgress::Boundary`. `Pump` then pins that
     /// signal forever across every method, without calling the raw
-    /// codec again. Reaching `Drain::Done` here is governed by point 3
+    /// codec again. Reaching `DrainProgress::Done` here is governed by point 3
     /// instead: this call is idempotent against repeats of itself, but
     /// that doesn't license skipping `latched_step` or a call with the
     /// other `op` afterward (point 5), so a `Done` from `self.codec` is
@@ -508,21 +508,21 @@ mod tests {
     use super::{BoundaryAwareStep, BoundaryAwareStepEnd, Pump, PumpDrainEnd, PumpEnd};
     use crate::step::{boundary_aware_step, DrainOp};
     use crate::{
-        BoundaryAwareCodec, BoundaryAwareProgress, Codec, Drain, DrainCodec, DriveError, Error,
+        BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, DriveError, Error,
         ErrorKind, Progress, Sink, Source,
     };
 
     struct Scripted {
         process: BoundaryAwareProgress,
-        drain: Drain,
+        drain: DrainProgress,
     }
 
     impl DrainCodec for Scripted {
-        fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             Ok(self.drain)
         }
 
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             Ok(self.drain)
         }
     }
@@ -598,8 +598,8 @@ mod tests {
     struct DropEverything;
 
     impl DrainCodec for DropEverything {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 
@@ -630,7 +630,7 @@ mod tests {
     struct FailsAfterProgress;
 
     impl DrainCodec for FailsAfterProgress {
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             output[0].write(b'!');
             Err(Error::new(ErrorKind::Corrupt, 0, 1))
         }
@@ -721,7 +721,7 @@ mod tests {
         let mut output = NullSink;
         let mut pump = Pump::new(Scripted {
             process: BoundaryAwareProgress::OutputFilled { consumed: 0 },
-            drain: Drain::Done { written: 0 },
+            drain: DrainProgress::Done { written: 0 },
         });
         let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
         assert!(matches!(error, DriveError::NoProgress));
@@ -731,7 +731,7 @@ mod tests {
     fn process_uses_the_shared_step() {
         let mut pump = Pump::new(Scripted {
             process: BoundaryAwareProgress::OutputFilled { consumed: 2 },
-            drain: Drain::Done { written: 0 },
+            drain: DrainProgress::Done { written: 0 },
         });
         let moved = pump
             .latched_step(b"abc", &mut [MaybeUninit::uninit(); 4])
@@ -748,7 +748,7 @@ mod tests {
                 consumed: 1,
                 written: 2,
             },
-            drain: Drain::OutputFilled,
+            drain: DrainProgress::OutputFilled,
         });
         pump.latched_step(b"abc", &mut [MaybeUninit::uninit(); 4])
             .unwrap();
@@ -771,7 +771,7 @@ mod tests {
     fn finish_normalizes_output_progress_without_latching_done() {
         let mut filled = Pump::new(Scripted {
             process: BoundaryAwareProgress::InputConsumed { written: 0 },
-            drain: Drain::OutputFilled,
+            drain: DrainProgress::OutputFilled,
         });
         let moved = filled
             .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
@@ -788,7 +788,7 @@ mod tests {
         // `latched_step` call.
         let mut done = Pump::new(Scripted {
             process: BoundaryAwareProgress::InputConsumed { written: 5 },
-            drain: Drain::Done { written: 2 },
+            drain: DrainProgress::Done { written: 2 },
         });
         let moved = done
             .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
@@ -806,7 +806,7 @@ mod tests {
     fn flush_does_not_end_the_stream() {
         let mut pump = Pump::new(Scripted {
             process: BoundaryAwareProgress::InputConsumed { written: 0 },
-            drain: Drain::Done { written: 2 },
+            drain: DrainProgress::Done { written: 2 },
         });
         let moved = pump
             .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::SyncFlush)
@@ -820,7 +820,7 @@ mod tests {
     fn drain_overclaims_are_contract_violations() {
         let mut pump = Pump::new(Scripted {
             process: BoundaryAwareProgress::InputConsumed { written: 0 },
-            drain: Drain::Done { written: 4 },
+            drain: DrainProgress::Done { written: 4 },
         });
         assert_eq!(
             pump.finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish),
@@ -831,8 +831,8 @@ mod tests {
     struct Reports(BoundaryAwareProgress);
 
     impl DrainCodec for Reports {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 
@@ -946,8 +946,8 @@ mod tests {
     struct Fails;
 
     impl DrainCodec for Fails {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 

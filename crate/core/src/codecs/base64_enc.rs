@@ -11,7 +11,7 @@ use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
 use super::base64_shared::{self, PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
-use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
+use crate::{Codec, DrainProgress, DrainCodec, Error, ErrorKind, Progress};
 
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it encodes with.
@@ -44,11 +44,11 @@ impl<E: Engine> Base64Enc<E> {
 }
 
 impl<E: Engine> DrainCodec for Base64Enc<E> {
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
             debug_assert_eq!(out_pos, output.len());
-            return Ok(Drain::OutputFilled);
+            return Ok(DrainProgress::OutputFilled);
         }
         if !self.pending_input.is_empty() {
             // The engine pads a final short group itself — that's why
@@ -59,10 +59,10 @@ impl<E: Engine> DrainCodec for Base64Enc<E> {
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
                 debug_assert_eq!(out_pos, output.len());
-                return Ok(Drain::OutputFilled);
+                return Ok(DrainProgress::OutputFilled);
             }
         }
-        Ok(Drain::Done { written: out_pos })
+        Ok(DrainProgress::Done { written: out_pos })
     }
 }
 
@@ -160,7 +160,7 @@ mod tests {
     use crate::uninit::as_uninit_mut;
 
     use super::base64_enc;
-    use crate::{Codec, Drain, DrainCodec, Progress};
+    use crate::{Codec, DrainProgress, DrainCodec, Progress};
     use alloc::vec::Vec;
 
     const INPUT: &str = "Hello, World! 123";
@@ -194,8 +194,8 @@ mod tests {
         loop {
             let mut out = [0u8; 1];
             match enc.finish(as_uninit_mut(&mut out)).unwrap() {
-                Drain::OutputFilled => collected.extend_from_slice(&out),
-                Drain::Done { written } => {
+                DrainProgress::OutputFilled => collected.extend_from_slice(&out),
+                DrainProgress::Done { written } => {
                     collected.extend_from_slice(&out[..written]);
                     break;
                 }

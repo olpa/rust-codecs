@@ -22,7 +22,7 @@ use core::convert::Infallible;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
 use rust_codecs_core::{
-    stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, Drain, DrainCodec, DriveError,
+    stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, DrainCodec, DriveError,
     Error, Source,
 };
 use std::mem::MaybeUninit;
@@ -34,8 +34,8 @@ fn as_uninit_mut(bytes: &mut [u8]) -> &mut [MaybeUninit<u8>] {
 struct QuoteEnd;
 
 impl DrainCodec for QuoteEnd {
-    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
     }
 }
 

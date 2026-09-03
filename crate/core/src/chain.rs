@@ -15,7 +15,7 @@ use core::mem::MaybeUninit;
 
 use crate::step::{codec_step, DrainOp, DrainStop};
 use crate::uninit::as_uninit_mut;
-use crate::{Codec, Drain, DrainCodec, Error, Progress};
+use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
 /// `staging`) into a single [`Codec`].
@@ -217,7 +217,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         &mut self,
         output: &mut [MaybeUninit<u8>],
         op: DrainOp,
-    ) -> Result<Drain, Error> {
+    ) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
         let mut nothing_more_from_first = false;
 
@@ -268,14 +268,14 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     }
                 };
                 return Ok(match moved.stop {
-                    DrainStop::OutputFilled => Drain::OutputFilled,
-                    DrainStop::Done => Drain::Done {
+                    DrainStop::OutputFilled => DrainProgress::OutputFilled,
+                    DrainStop::Done => DrainProgress::Done {
                         written: out_pos + moved.written,
                     },
                 });
             }
             if out_pos == output.len() {
-                return Ok(Drain::OutputFilled);
+                return Ok(DrainProgress::OutputFilled);
             }
             // Otherwise staging came up empty but `first` isn't done
             // yet — run another pass.
@@ -284,11 +284,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
-    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.drain_through(output, DrainOp::SyncFlush)
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.drain_through(output, DrainOp::Finish)
     }
 }
@@ -372,7 +372,7 @@ mod tests {
     use crate::sources_and_sinks::vec::{VecSink, VecSource};
     use crate::uninit::as_uninit_mut;
     use crate::{stream_to_stream, DriveError};
-    use crate::{Codec, Drain, DrainCodec, Error, Progress};
+    use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
 
     const INPUT: &[u8] = b"Hello, World! 123";
 
@@ -479,8 +479,8 @@ mod tests {
         loop {
             let mut out = [0u8; 1];
             match chain.finish(as_uninit_mut(&mut out)).unwrap() {
-                Drain::OutputFilled => collected.extend_from_slice(&out),
-                Drain::Done { written } => {
+                DrainProgress::OutputFilled => collected.extend_from_slice(&out),
+                DrainProgress::Done { written } => {
                     collected.extend_from_slice(&out[..written]);
                     break;
                 }
@@ -534,24 +534,24 @@ mod tests {
     }
 
     impl Hoarder {
-        fn emit(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn emit(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             let n = self.buf.len().min(output.len());
             output[..n].write_copy_of_slice(&self.buf[..n]);
             self.buf.drain(..n);
             if self.buf.is_empty() {
-                Ok(Drain::Done { written: n })
+                Ok(DrainProgress::Done { written: n })
             } else {
-                Ok(Drain::OutputFilled)
+                Ok(DrainProgress::OutputFilled)
             }
         }
     }
 
     impl DrainCodec for Hoarder {
-        fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             self.emit(output)
         }
 
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             self.emit(output)
         }
     }
@@ -580,7 +580,7 @@ mod tests {
         let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
             drain,
-            Drain::Done {
+            DrainProgress::Done {
                 written: expected.len()
             }
         );
@@ -599,7 +599,7 @@ mod tests {
         let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
             drain,
-            Drain::Done {
+            DrainProgress::Done {
                 written: expected.len()
             }
         );
@@ -621,8 +621,8 @@ mod tests {
         loop {
             let mut out = [0u8; 1];
             match chain.sync_flush(as_uninit_mut(&mut out)).unwrap() {
-                Drain::OutputFilled => collected.extend_from_slice(&out),
-                Drain::Done { written } => {
+                DrainProgress::OutputFilled => collected.extend_from_slice(&out),
+                DrainProgress::Done { written } => {
                     collected.extend_from_slice(&out[..written]);
                     break;
                 }
@@ -636,7 +636,7 @@ mod tests {
         let drain = chain.sync_flush(as_uninit_mut(&mut big)).unwrap();
         assert_eq!(
             drain,
-            Drain::Done {
+            DrainProgress::Done {
                 written: expected2.len()
             }
         );
@@ -647,8 +647,8 @@ mod tests {
     struct Overclaimer;
 
     impl DrainCodec for Overclaimer {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 
@@ -683,8 +683,8 @@ mod tests {
     }
 
     impl DrainCodec for FirstFailsOnce {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 
@@ -729,8 +729,8 @@ mod tests {
     }
 
     impl DrainCodec for SecondFailsOnce {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 

@@ -71,7 +71,7 @@ mod tests {
     use super::boundary_aware_pump_read;
     use crate::identity::identity;
     use crate::{
-        BoundaryAwareCodec, BoundaryAwareProgress, Codec, Drain, DrainCodec, Error, Progress, Pump,
+        BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, Progress, Pump,
         Source,
     };
 
@@ -133,12 +133,12 @@ mod tests {
     }
 
     impl DrainCodec for CanProgressWithoutOutput {
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             match self.held.take() {
-                None => Ok(Drain::Done { written: 0 }),
+                None => Ok(DrainProgress::Done { written: 0 }),
                 Some(held) => {
                     output[0].write(held);
-                    Ok(Drain::Done { written: 1 })
+                    Ok(DrainProgress::Done { written: 1 })
                 }
             }
         }
@@ -219,15 +219,15 @@ mod tests {
     }
 
     impl DrainCodec for EmitsTrailerOnFinish {
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             const TRAILER: &[u8] = b"final";
             let n = (TRAILER.len() - self.position).min(output.len());
             output[..n].write_copy_of_slice(&TRAILER[self.position..self.position + n]);
             self.position += n;
             if self.position == TRAILER.len() {
-                Ok(Drain::Done { written: n })
+                Ok(DrainProgress::Done { written: n })
             } else {
-                Ok(Drain::OutputFilled)
+                Ok(DrainProgress::OutputFilled)
             }
         }
     }
@@ -275,8 +275,8 @@ mod tests {
     }
 
     impl DrainCodec for EarlyEnd {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 

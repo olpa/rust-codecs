@@ -11,7 +11,7 @@ use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
 use super::base64_shared::{self, PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
-use crate::{Codec, Drain, DrainCodec, Error, ErrorKind, Progress};
+use crate::{Codec, DrainProgress, DrainCodec, Error, ErrorKind, Progress};
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it decodes with.
@@ -63,11 +63,11 @@ impl<E: Engine> Base64Dec<E> {
 }
 
 impl<E: Engine> DrainCodec for Base64Dec<E> {
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
             debug_assert_eq!(out_pos, output.len());
-            return Ok(Drain::OutputFilled);
+            return Ok(DrainProgress::OutputFilled);
         }
         if !self.pending_input.is_empty() {
             // A short trailing group is only valid at true
@@ -80,10 +80,10 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
                 debug_assert_eq!(out_pos, output.len());
-                return Ok(Drain::OutputFilled);
+                return Ok(DrainProgress::OutputFilled);
             }
         }
-        Ok(Drain::Done { written: out_pos })
+        Ok(DrainProgress::Done { written: out_pos })
     }
 }
 
@@ -221,7 +221,7 @@ mod tests {
     use super::{base64_dec, Base64Dec};
     use crate::codecs::base64_enc::{base64_enc, Base64Enc};
     use crate::sources_and_sinks::vec::encode_string;
-    use crate::{Codec, Drain, DrainCodec, ErrorKind, Progress};
+    use crate::{Codec, DrainProgress, DrainCodec, ErrorKind, Progress};
 
     const INPUT: &str = "Hello, World! 123";
     const ENCODED: &str = "SGVsbG8sIFdvcmxkISAxMjM=";
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(outcome, Progress::InputConsumed { written: 1 });
         assert_eq!(&out[..1], b"A");
         let drain = dec.finish(as_uninit_mut(&mut out)).unwrap();
-        assert_eq!(drain, Drain::Done { written: 0 });
+        assert_eq!(drain, DrainProgress::Done { written: 0 });
     }
 
     #[test]

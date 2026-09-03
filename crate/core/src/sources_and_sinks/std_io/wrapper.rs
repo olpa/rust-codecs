@@ -199,7 +199,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     }
 
     /// Drain the codec by calling its `finish` repeatedly until
-    /// `Drain::Done` (delivering any trailer/checksum/padding bytes it
+    /// `DrainProgress::Done` (delivering any trailer/checksum/padding bytes it
     /// was still holding), finalize the sink itself ([`Sink::finish`](crate::Sink::finish),
     /// e.g. flushing the wrapped writer), and hand back ownership of it.
     ///
@@ -242,7 +242,7 @@ mod tests {
     use core::mem::MaybeUninit;
     use std::io::Write;
 
-    use crate::{Codec, Drain, DrainCodec, Error, Progress};
+    use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
 
     use super::CodecWriter;
 
@@ -251,20 +251,20 @@ mod tests {
     }
 
     impl DrainCodec for SyncMarker {
-        fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+        fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             if self.synced {
-                return Ok(Drain::Done { written: 0 });
+                return Ok(DrainProgress::Done { written: 0 });
             }
             if output.is_empty() {
-                return Ok(Drain::OutputFilled);
+                return Ok(DrainProgress::OutputFilled);
             }
             output[0].write(b'!');
             self.synced = true;
-            Ok(Drain::Done { written: 1 })
+            Ok(DrainProgress::Done { written: 1 })
         }
 
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-            Ok(Drain::Done { written: 0 })
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
         }
     }
 

@@ -2,15 +2,15 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{Codec, Drain, DrainCodec, Error, Progress};
+use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
 
 /// Output is identical to input.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Identity;
 
 impl DrainCodec for Identity {
-    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
     }
 }
 

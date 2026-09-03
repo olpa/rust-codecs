@@ -72,8 +72,8 @@ pub trait DrainCodec {
     /// Deflate, zlib, and similar codecs support this: they write
     /// buffered output and a sync marker. Most codecs do not need
     /// `sync_flush`.
-    fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
+    fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
     }
 
     /// Tell the codec that no more input will come. The codec flushes
@@ -81,10 +81,10 @@ pub trait DrainCodec {
     /// the codec writes it now.
     ///
     /// One call may not be enough. If `output` is too small to hold
-    /// all pending output, `finish` returns [`Drain::OutputFilled`]
-    /// instead of [`Drain::Done`]. Call `finish` repeatedly until it
-    /// returns [`Drain::Done`].
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error>;
+    /// all pending output, `finish` returns [`DrainProgress::OutputFilled`]
+    /// instead of [`DrainProgress::Done`]. Call `finish` repeatedly until it
+    /// returns [`DrainProgress::Done`].
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>;
 }
 
 /// A stateful transform for a complete chunked stream.
@@ -147,7 +147,7 @@ pub trait BoundaryAwareCodec: DrainCodec {
     /// means. If the format requires an in-band terminator, `finish` may
     /// report [`ErrorKind::UnexpectedEnd`]. If the format treats EOF
     /// itself as a valid end, `finish` may instead return
-    /// [`Done`](Drain::Done).
+    /// [`Done`](DrainProgress::Done).
     fn process(
         &mut self,
         input: &[u8],
@@ -169,37 +169,35 @@ impl<C: Codec> BoundaryAwareCodec for C {
 // Progress
 // ----
 
-/// Progress of one [`Codec::process`] call. Each variant states what
-/// the call did, so a driver never needs to inspect byte counts to
-/// know its next move.
+/// Progress of one [`Codec::process`] call.
+///
+/// A call may satisfy both conditions at once: it consumes all of
+/// `input` and fills all of `output` on the same call. The choice
+/// between the two variants is then not defined. The caller must
+/// accept either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
-    /// All of `input` was consumed; `written` bytes were produced
-    /// (possibly zero, when everything went into internal buffering).
-    /// The driver's move: supply more input, or `finish`.
+    /// The call consumed all of `input` and produced `written` bytes.
+    /// `written` may be zero.
     InputConsumed { written: usize },
-    /// All of `output` was filled; `consumed` bytes of input were
-    /// taken (possibly zero, when output pending from an earlier call
-    /// filled the buffer by itself). The driver's move: drain the
-    /// output and call again.
+    /// The call filled all of `output` and took `consumed` bytes of
+    /// input. `consumed` may be zero.
     OutputFilled { consumed: usize },
 }
 
 /// Progress of one [`BoundaryAwareCodec::process`] call: everything
-/// [`Progress`] can report, plus an in-band end.
+/// [`Progress`] can report, plus [`Boundary`](BoundaryAwareProgress::Boundary),
+/// an in-band signal that the logical stream ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundaryAwareProgress {
-    /// All of `input` was consumed; `written` bytes were produced
-    /// (possibly zero, when everything went into internal buffering).
-    /// The driver's move: supply more input, or `finish`.
+    /// The call consumed all of `input` and produced `written` bytes.
+    /// `written` may be zero.
     InputConsumed { written: usize },
-    /// All of `output` was filled; `consumed` bytes of input were
-    /// taken (possibly zero, when output pending from an earlier call
-    /// filled the buffer by itself). The driver's move: drain the
-    /// output and call again.
+    /// The call filled all of `output` and took `consumed` bytes of
+    /// input. `consumed` may be zero.
     OutputFilled { consumed: usize },
-    /// The current logical stream ended in-band. Input past its end
-    /// was left unconsumed, and neither side is necessarily "full".
+    /// The current logical stream ended in-band. `consumed` and
+    /// `written` need not reach the buffer lengths.
     Boundary { consumed: usize, written: usize },
 }
 
@@ -215,22 +213,17 @@ impl From<Progress> for BoundaryAwareProgress {
 /// Progress of one [`DrainCodec::finish`] or [`DrainCodec::sync_flush`]
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Drain {
-    /// All of `output` was filled and there is more to come — call
-    /// again with a fresh (or drained) buffer.
+pub enum DrainProgress {
+    /// The call filled all of `output`. More output is pending.
     OutputFilled,
-    /// Everything owed was delivered; the final `written` bytes (at
-    /// most the output's length) landed in this call. For `finish`
-    /// this is the end of the stream; for `sync_flush`, the sync
-    /// point.
+    /// The call delivered the last `written` bytes.
     Done { written: usize },
 }
 
 impl Progress {
     /// Check the reported byte counts against the buffer sizes the
-    /// call was given, so a lying codec yields
-    /// [`ErrorKind::ContractViolation`] instead of corrupting driver
-    /// state. Apply this at every codec trust boundary.
+    /// call was given. This turns a lying codec into
+    /// [`ErrorKind::ContractViolation`].
     pub fn validated(self, input_len: usize, output_len: usize) -> Result<Progress, Error> {
         let honest = match self {
             Progress::InputConsumed { written } => written <= output_len,
@@ -267,11 +260,11 @@ impl BoundaryAwareProgress {
     }
 }
 
-impl Drain {
+impl DrainProgress {
     /// The [`Progress::validated`] counterpart for `finish`/`flush`.
-    pub fn validated(self, output_len: usize) -> Result<Drain, Error> {
+    pub fn validated(self, output_len: usize) -> Result<DrainProgress, Error> {
         match self {
-            Drain::Done { written } if written > output_len => {
+            DrainProgress::Done { written } if written > output_len => {
                 Err(Error::new(ErrorKind::ContractViolation, 0, 0))
             }
             honest => Ok(honest),
@@ -289,11 +282,11 @@ use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
-    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         (**self).sync_flush(output)
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         (**self).finish(output)
     }
 }
@@ -324,7 +317,7 @@ pub enum ErrorKind {
     BufferOverrun,
     /// The codec reported byte counts exceeding the buffers it was
     /// given. Caught at the driver's trust boundary (see
-    /// [`Progress::validated`]/[`Drain::validated`]). The error's
+    /// [`Progress::validated`]/[`DrainProgress::validated`]). The error's
     /// `consumed`/`written` are zero, since the reported counts can't
     /// be trusted.
     ContractViolation,
@@ -368,7 +361,7 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundaryAwareProgress, Drain, Error, ErrorKind, Progress};
+    use super::{BoundaryAwareProgress, DrainProgress, Error, ErrorKind, Progress};
 
     const CV: Error = Error {
         kind: ErrorKind::ContractViolation,
@@ -390,8 +383,8 @@ mod tests {
         }
         .validated(0, 0)
         .is_ok());
-        assert!(Drain::OutputFilled.validated(0).is_ok());
-        assert!(Drain::Done { written: 4 }.validated(4).is_ok());
+        assert!(DrainProgress::OutputFilled.validated(0).is_ok());
+        assert!(DrainProgress::Done { written: 4 }.validated(4).is_ok());
     }
 
     #[test]
@@ -420,6 +413,6 @@ mod tests {
             .validated(10, 4),
             Err(CV)
         );
-        assert_eq!(Drain::Done { written: 5 }.validated(4), Err(CV));
+        assert_eq!(DrainProgress::Done { written: 5 }.validated(4), Err(CV));
     }
 }
