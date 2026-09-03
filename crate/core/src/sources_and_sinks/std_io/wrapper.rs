@@ -3,10 +3,10 @@ use std::io::{self, BufRead, Read, Write};
 use core::convert::Infallible;
 
 use crate::sources_and_sinks::shared_io::{
-    end_signalling_pump_read, pump_finish, pump_flush, pump_sync_flush, pump_write,
+    boundary_aware_pump_read, pump_finish, pump_flush, pump_sync_flush, pump_write,
 };
 use crate::stream::Pump;
-use crate::{Codec, DriveError, EndSignallingCodec, Error, ErrorKind};
+use crate::{BoundaryAwareCodec, Codec, DriveError, Error, ErrorKind};
 
 use super::adapter::{BufReadSource, StdSink, StdSource};
 
@@ -48,16 +48,16 @@ fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error
 ///
 /// - `finish` is not called: a codec that ends its own stream
 ///   is assumed to have already taken care of its own finalization
-///   before reporting [`EndSignallingProgress::End`](crate::EndSignallingProgress::End).
+///   before reporting [`BoundaryAwareProgress::Boundary`](crate::BoundaryAwareProgress::Boundary).
 /// - Trailing input bytes already pulled from the wrapped reader are
 ///   not yielded as output; retrieve them with [`CodecReader::pending`]
 ///   before dropping the reader.
-pub struct CodecReader<R, C: EndSignallingCodec, S> {
+pub struct CodecReader<R, C: BoundaryAwareCodec, S> {
     input: StdSource<R, S>,
     pump: Pump<C>,
 }
 
-impl<R: Read, C: EndSignallingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Build a `CodecReader`.
     ///
     /// # Panics
@@ -102,9 +102,9 @@ impl<R: Read, C: EndSignallingCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     }
 }
 
-impl<R: Read, C: EndSignallingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
+impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        end_signalling_pump_read(&mut self.pump, &mut self.input, buf)
+        boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
             .map_err(reader_error_to_io_error)
     }
 }
@@ -113,12 +113,12 @@ impl<R: Read, C: EndSignallingCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, 
 /// `BufRead`'s buffer directly instead of a caller-provided scratch
 /// buffer. Same end-of-stream and end-of-codec behavior as
 /// `CodecReader`.
-pub struct BufReadCodecReader<R, C: EndSignallingCodec> {
+pub struct BufReadCodecReader<R, C: BoundaryAwareCodec> {
     input: BufReadSource<R>,
     pump: Pump<C>,
 }
 
-impl<R: BufRead, C: EndSignallingCodec> BufReadCodecReader<R, C> {
+impl<R: BufRead, C: BoundaryAwareCodec> BufReadCodecReader<R, C> {
     /// Build a `BufReadCodecReader`.
     pub fn new(inner: R, codec: C) -> Self {
         Self {
@@ -152,9 +152,9 @@ impl<R: BufRead, C: EndSignallingCodec> BufReadCodecReader<R, C> {
     }
 }
 
-impl<R: BufRead, C: EndSignallingCodec> Read for BufReadCodecReader<R, C> {
+impl<R: BufRead, C: BoundaryAwareCodec> Read for BufReadCodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        end_signalling_pump_read(&mut self.pump, &mut self.input, buf)
+        boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
             .map_err(reader_error_to_io_error)
     }
 }

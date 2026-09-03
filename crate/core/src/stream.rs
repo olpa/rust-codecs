@@ -6,10 +6,10 @@
 //! frontends lend both current windows. [`Pump`] owns only codec
 //! lifecycle, so using it never introduces a byte copy.
 //!
-//! [`EndSignallingCodec::process`](crate::EndSignallingCodec::process)
+//! [`BoundaryAwareCodec::process`](crate::BoundaryAwareCodec::process)
 //! reports only the counts not already implied by its outcome: all
 //! input was consumed, all output was filled, or the stream ended.
-//! [`crate::step::end_signalling_step`] validates that report and
+//! [`crate::step::boundary_aware_step`] validates that report and
 //! normalizes it into exact progress on both sides — the trust
 //! boundary every `Pump::latched_step` call and [`stream_to_stream`] call
 //! goes through.
@@ -17,9 +17,9 @@
 use core::mem::MaybeUninit;
 
 use crate::step::{
-    end_signalling_step, DrainOp, DrainStop, EndSignallingStep, EndSignallingStepEnd,
+    boundary_aware_step, BoundaryAwareStep, BoundaryAwareStepEnd, DrainOp, DrainStop,
 };
-use crate::{EndSignallingCodec, Error, Sink, Source};
+use crate::{BoundaryAwareCodec, Error, Sink, Source};
 
 /// How much moved through [`stream_to_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub fn stream_to_stream<I, O, C>(
 where
     I: Source,
     O: Sink,
-    C: EndSignallingCodec,
+    C: BoundaryAwareCodec,
 {
     let mut pump = Pump::new(codec);
     let mut totals = Totals {
@@ -168,12 +168,12 @@ pub(crate) struct PumpDrainStep {
 /// crate's own `std_io`/`embedded_io` backends do: hold a `Pump<C>`
 /// alongside your adapter, and drive it with
 /// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io)'s
-/// `end_signalling_pump_read`/`pump_write`/`pump_finish`/`pump_flush` rather than
+/// `boundary_aware_pump_read`/`pump_write`/`pump_finish`/`pump_flush` rather than
 /// calling its own methods directly — those stay crate-private.
 ///
-/// `C` is generic, not fixed to `EndSignallingCodec` itself, because a
+/// `C` is generic, not fixed to `BoundaryAwareCodec` itself, because a
 /// trait isn't a sized type a field can hold directly. The obvious
-/// fix, `Box<dyn EndSignallingCodec>`, would require `alloc`
+/// fix, `Box<dyn BoundaryAwareCodec>`, would require `alloc`
 /// unconditionally, breaking this crate's `no_std`-without-`alloc`
 /// support. Callers who want that trade-off can still get it without
 /// any change here, via `Pump<Box<dyn Codec>>`.
@@ -182,12 +182,12 @@ pub struct Pump<C> {
     done: bool,
 }
 
-impl<C: EndSignallingCodec> Pump<C> {
+impl<C: BoundaryAwareCodec> Pump<C> {
     pub fn new(codec: C) -> Self {
         Self { codec, done: false }
     }
 
-    /// Reach the wrapped codec, e.g. to read state an `EndSignallingCodec`
+    /// Reach the wrapped codec, e.g. to read state a `BoundaryAwareCodec`
     /// call doesn't expose (a checksum, a digest) once the stream has
     /// ended.
     pub fn get_ref(&self) -> &C {
@@ -204,7 +204,7 @@ impl<C: EndSignallingCodec> Pump<C> {
         self.codec
     }
 
-    /// Lets a caller like `shared_io::end_signalling_pump_read` short-circuit to a
+    /// Lets a caller like `shared_io::boundary_aware_pump_read` short-circuit to a
     /// no-op once the stream has ended, instead of re-entering
     /// `transfer_from`/`finish_to` on every repeated call past EOF.
     pub(crate) fn is_done(&self) -> bool {
@@ -215,16 +215,16 @@ impl<C: EndSignallingCodec> Pump<C> {
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
-    ) -> Result<EndSignallingStep, Error> {
+    ) -> Result<BoundaryAwareStep, Error> {
         if self.done {
-            return Ok(EndSignallingStep {
+            return Ok(BoundaryAwareStep {
                 consumed: 0,
                 written: 0,
-                end: EndSignallingStepEnd::End,
+                end: BoundaryAwareStepEnd::Boundary,
             });
         }
-        let moved = end_signalling_step(&mut self.codec, input, output)?;
-        if moved.end == EndSignallingStepEnd::End {
+        let moved = boundary_aware_step(&mut self.codec, input, output)?;
+        if moved.end == BoundaryAwareStepEnd::Boundary {
             self.done = true;
         }
         Ok(moved)
@@ -287,7 +287,7 @@ impl<C: EndSignallingCodec> Pump<C> {
     ///
     /// This is the single-step primitive `transfer_from` loops on, and
     /// is also driven directly by
-    /// [`crate::sources_and_sinks::shared_io::end_signalling_pump_read`], so a
+    /// [`crate::sources_and_sinks::shared_io::boundary_aware_pump_read`], so a
     /// `Read::read` call returns as soon as the wrapped source's own
     /// read produced anything, instead of coalescing multiple source
     /// reads into one call. That's the interactive-application case
@@ -329,7 +329,7 @@ impl<C: EndSignallingCodec> Pump<C> {
             Ok(moved)
                 if moved.consumed > 0
                     || moved.written > 0
-                    || moved.end == EndSignallingStepEnd::End =>
+                    || moved.end == BoundaryAwareStepEnd::Boundary =>
             {
                 moved
             }
@@ -360,7 +360,7 @@ impl<C: EndSignallingCodec> Pump<C> {
         Ok(PumpStep {
             consumed: moved.consumed,
             written: moved.written,
-            end: if moved.end == EndSignallingStepEnd::End {
+            end: if moved.end == BoundaryAwareStepEnd::Boundary {
                 PumpStepEnd::End
             } else {
                 PumpStepEnd::Progressed
@@ -472,7 +472,7 @@ impl<C: EndSignallingCodec> Pump<C> {
     /// `DrainCodec::finish`/`DrainCodec::sync_flush`, one layer up.
     ///
     /// `self.done` is only ever set by [`Pump::latched_step`] reaching
-    /// a genuine `EndSignallingProgress::End`. `Pump` then pins that
+    /// a genuine `BoundaryAwareProgress::Boundary`. `Pump` then pins that
     /// signal forever across every method, without calling the raw
     /// codec again. Reaching `Drain::Done` here is governed by point 3
     /// instead: this call is idempotent against repeats of itself, but
@@ -505,15 +505,15 @@ impl<C: EndSignallingCodec> Pump<C> {
 mod tests {
     use core::mem::MaybeUninit;
 
-    use super::{EndSignallingStep, EndSignallingStepEnd, Pump, PumpDrainEnd, PumpEnd};
-    use crate::step::{end_signalling_step, DrainOp};
+    use super::{BoundaryAwareStep, BoundaryAwareStepEnd, Pump, PumpDrainEnd, PumpEnd};
+    use crate::step::{boundary_aware_step, DrainOp};
     use crate::{
-        Codec, Drain, DrainCodec, DriveError, EndSignallingCodec, EndSignallingProgress, Error,
+        BoundaryAwareCodec, BoundaryAwareProgress, Codec, Drain, DrainCodec, DriveError, Error,
         ErrorKind, Progress, Sink, Source,
     };
 
     struct Scripted {
-        process: EndSignallingProgress,
+        process: BoundaryAwareProgress,
         drain: Drain,
     }
 
@@ -527,12 +527,12 @@ mod tests {
         }
     }
 
-    impl EndSignallingCodec for Scripted {
+    impl BoundaryAwareCodec for Scripted {
         fn process(
             &mut self,
             _input: &[u8],
             _output: &mut [MaybeUninit<u8>],
-        ) -> Result<EndSignallingProgress, Error> {
+        ) -> Result<BoundaryAwareProgress, Error> {
             Ok(self.process)
         }
     }
@@ -720,7 +720,7 @@ mod tests {
         };
         let mut output = NullSink;
         let mut pump = Pump::new(Scripted {
-            process: EndSignallingProgress::OutputFilled { consumed: 0 },
+            process: BoundaryAwareProgress::OutputFilled { consumed: 0 },
             drain: Drain::Done { written: 0 },
         });
         let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
@@ -730,7 +730,7 @@ mod tests {
     #[test]
     fn process_uses_the_shared_step() {
         let mut pump = Pump::new(Scripted {
-            process: EndSignallingProgress::OutputFilled { consumed: 2 },
+            process: BoundaryAwareProgress::OutputFilled { consumed: 2 },
             drain: Drain::Done { written: 0 },
         });
         let moved = pump
@@ -738,13 +738,13 @@ mod tests {
             .unwrap();
         assert_eq!(moved.consumed, 2);
         assert_eq!(moved.written, 4);
-        assert_eq!(moved.end, EndSignallingStepEnd::OutputExhausted);
+        assert_eq!(moved.end, BoundaryAwareStepEnd::OutputExhausted);
     }
 
     #[test]
     fn in_band_end_latches_completion() {
         let mut pump = Pump::new(Scripted {
-            process: EndSignallingProgress::End {
+            process: BoundaryAwareProgress::Boundary {
                 consumed: 1,
                 written: 2,
             },
@@ -764,13 +764,13 @@ mod tests {
             .unwrap();
         assert_eq!(repeated.consumed, 0);
         assert_eq!(repeated.written, 0);
-        assert_eq!(repeated.end, EndSignallingStepEnd::End);
+        assert_eq!(repeated.end, BoundaryAwareStepEnd::Boundary);
     }
 
     #[test]
     fn finish_normalizes_output_progress_without_latching_done() {
         let mut filled = Pump::new(Scripted {
-            process: EndSignallingProgress::InputConsumed { written: 0 },
+            process: BoundaryAwareProgress::InputConsumed { written: 0 },
             drain: Drain::OutputFilled,
         });
         let moved = filled
@@ -787,7 +787,7 @@ mod tests {
         // the codec, not a synthetic `End`, answers the next
         // `latched_step` call.
         let mut done = Pump::new(Scripted {
-            process: EndSignallingProgress::InputConsumed { written: 5 },
+            process: BoundaryAwareProgress::InputConsumed { written: 5 },
             drain: Drain::Done { written: 2 },
         });
         let moved = done
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn flush_does_not_end_the_stream() {
         let mut pump = Pump::new(Scripted {
-            process: EndSignallingProgress::InputConsumed { written: 0 },
+            process: BoundaryAwareProgress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 2 },
         });
         let moved = pump
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn drain_overclaims_are_contract_violations() {
         let mut pump = Pump::new(Scripted {
-            process: EndSignallingProgress::InputConsumed { written: 0 },
+            process: BoundaryAwareProgress::InputConsumed { written: 0 },
             drain: Drain::Done { written: 4 },
         });
         assert_eq!(
@@ -828,7 +828,7 @@ mod tests {
         );
     }
 
-    struct Reports(EndSignallingProgress);
+    struct Reports(BoundaryAwareProgress);
 
     impl DrainCodec for Reports {
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<Drain, Error> {
@@ -836,83 +836,83 @@ mod tests {
         }
     }
 
-    impl EndSignallingCodec for Reports {
+    impl BoundaryAwareCodec for Reports {
         fn process(
             &mut self,
             _input: &[u8],
             _output: &mut [MaybeUninit<u8>],
-        ) -> Result<EndSignallingProgress, Error> {
+        ) -> Result<BoundaryAwareProgress, Error> {
             Ok(self.0)
         }
     }
 
     #[test]
     fn input_exhaustion_implies_all_input_was_consumed() {
-        let mut codec = Reports(EndSignallingProgress::InputConsumed { written: 2 });
+        let mut codec = Reports(BoundaryAwareProgress::InputConsumed { written: 2 });
         let mut output = [MaybeUninit::uninit(); 5];
 
         assert_eq!(
-            end_signalling_step(&mut codec, b"abc", &mut output),
-            Ok(EndSignallingStep {
+            boundary_aware_step(&mut codec, b"abc", &mut output),
+            Ok(BoundaryAwareStep {
                 consumed: 3,
                 written: 2,
-                end: EndSignallingStepEnd::InputExhausted,
+                end: BoundaryAwareStepEnd::InputExhausted,
             })
         );
     }
 
     #[test]
     fn output_exhaustion_implies_all_output_was_written() {
-        let mut codec = Reports(EndSignallingProgress::OutputFilled { consumed: 2 });
+        let mut codec = Reports(BoundaryAwareProgress::OutputFilled { consumed: 2 });
         let mut output = [MaybeUninit::uninit(); 5];
 
         assert_eq!(
-            end_signalling_step(&mut codec, b"abc", &mut output),
-            Ok(EndSignallingStep {
+            boundary_aware_step(&mut codec, b"abc", &mut output),
+            Ok(BoundaryAwareStep {
                 consumed: 2,
                 written: 5,
-                end: EndSignallingStepEnd::OutputExhausted,
+                end: BoundaryAwareStepEnd::OutputExhausted,
             })
         );
     }
 
     #[test]
     fn stream_end_preserves_both_explicit_counts() {
-        let mut codec = Reports(EndSignallingProgress::End {
+        let mut codec = Reports(BoundaryAwareProgress::Boundary {
             consumed: 2,
             written: 4,
         });
         let mut output = [MaybeUninit::uninit(); 5];
 
         assert_eq!(
-            end_signalling_step(&mut codec, b"abc", &mut output),
-            Ok(EndSignallingStep {
+            boundary_aware_step(&mut codec, b"abc", &mut output),
+            Ok(BoundaryAwareStep {
                 consumed: 2,
                 written: 4,
-                end: EndSignallingStepEnd::End
+                end: BoundaryAwareStepEnd::Boundary
             })
         );
     }
 
     #[test]
     fn degenerate_windows_remain_well_defined() {
-        let mut input_done = Reports(EndSignallingProgress::InputConsumed { written: 0 });
+        let mut input_done = Reports(BoundaryAwareProgress::InputConsumed { written: 0 });
         assert_eq!(
-            end_signalling_step(&mut input_done, b"", &mut []),
-            Ok(EndSignallingStep {
+            boundary_aware_step(&mut input_done, b"", &mut []),
+            Ok(BoundaryAwareStep {
                 consumed: 0,
                 written: 0,
-                end: EndSignallingStepEnd::InputExhausted,
+                end: BoundaryAwareStepEnd::InputExhausted,
             })
         );
 
-        let mut output_done = Reports(EndSignallingProgress::OutputFilled { consumed: 0 });
+        let mut output_done = Reports(BoundaryAwareProgress::OutputFilled { consumed: 0 });
         assert_eq!(
-            end_signalling_step(&mut output_done, b"abc", &mut []),
-            Ok(EndSignallingStep {
+            boundary_aware_step(&mut output_done, b"abc", &mut []),
+            Ok(BoundaryAwareStep {
                 consumed: 0,
                 written: 0,
-                end: EndSignallingStepEnd::OutputExhausted,
+                end: BoundaryAwareStepEnd::OutputExhausted,
             })
         );
     }
@@ -921,24 +921,24 @@ mod tests {
     fn overclaims_are_rejected_at_the_shared_boundary() {
         let violation = Error::new(ErrorKind::ContractViolation, 0, 0);
 
-        let mut input_done = Reports(EndSignallingProgress::InputConsumed { written: 6 });
+        let mut input_done = Reports(BoundaryAwareProgress::InputConsumed { written: 6 });
         assert_eq!(
-            end_signalling_step(&mut input_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
+            boundary_aware_step(&mut input_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(violation)
         );
 
-        let mut output_done = Reports(EndSignallingProgress::OutputFilled { consumed: 4 });
+        let mut output_done = Reports(BoundaryAwareProgress::OutputFilled { consumed: 4 });
         assert_eq!(
-            end_signalling_step(&mut output_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
+            boundary_aware_step(&mut output_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(violation)
         );
 
-        let mut ended = Reports(EndSignallingProgress::End {
+        let mut ended = Reports(BoundaryAwareProgress::Boundary {
             consumed: 4,
             written: 6,
         });
         assert_eq!(
-            end_signalling_step(&mut ended, b"abc", &mut [MaybeUninit::uninit(); 5]),
+            boundary_aware_step(&mut ended, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(violation)
         );
     }
@@ -964,7 +964,7 @@ mod tests {
     #[test]
     fn codec_errors_are_preserved() {
         assert_eq!(
-            end_signalling_step(&mut Fails, b"abc", &mut [MaybeUninit::uninit(); 5]),
+            boundary_aware_step(&mut Fails, b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(Error::new(ErrorKind::Corrupt, 1, 2))
         );
     }

@@ -10,19 +10,19 @@
 use core::convert::Infallible;
 
 use rust_codecs_core::rot13::rot13;
-use rust_codecs_core::sources_and_sinks::shared_io::end_signalling_pump_read;
+use rust_codecs_core::sources_and_sinks::shared_io::boundary_aware_pump_read;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
-use rust_codecs_core::{DriveError, EndSignallingCodec, Pump, Source};
+use rust_codecs_core::{BoundaryAwareCodec, DriveError, Pump, Source};
 
 /// A minimal incremental reader, built the same way
 /// `std_io`/`embedded_io`'s `CodecReader` is: a `Source` plus a
-/// `Pump`, driven one bounded call at a time by `end_signalling_pump_read`.
-struct MinimalReader<I: Source, C: EndSignallingCodec> {
+/// `Pump`, driven one bounded call at a time by `boundary_aware_pump_read`.
+struct MinimalReader<I: Source, C: BoundaryAwareCodec> {
     input: I,
     pump: Pump<C>,
 }
 
-impl<I: Source, C: EndSignallingCodec> MinimalReader<I, C> {
+impl<I: Source, C: BoundaryAwareCodec> MinimalReader<I, C> {
     fn new(input: I, codec: C) -> Self {
         Self {
             input,
@@ -31,7 +31,7 @@ impl<I: Source, C: EndSignallingCodec> MinimalReader<I, C> {
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, DriveError<I::Error, Infallible>> {
-        end_signalling_pump_read(&mut self.pump, &mut self.input, buf)
+        boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
     }
 }
 

@@ -2,7 +2,7 @@ use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSink;
 use crate::stream::{Pump, PumpDrainEnd, PumpStepEnd};
-use crate::{DriveError, EndSignallingCodec, Source};
+use crate::{BoundaryAwareCodec, DriveError, Source};
 
 /// Drive `pump` against `input`, filling `buf` with transformed bytes —
 /// the transport-independent core of a `Read::read` impl.
@@ -18,7 +18,7 @@ use crate::{DriveError, EndSignallingCodec, Source};
 /// - Ends the codec's stream (running `finish`) once `input` reports
 ///   exhaustion. It's an extra responsibility, but there is no good
 ///   way to let the caller do so.
-pub fn end_signalling_pump_read<I: Source, C: EndSignallingCodec>(
+pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     pump: &mut Pump<C>,
     input: &mut I,
     buf: &mut [u8],
@@ -51,7 +51,7 @@ pub fn end_signalling_pump_read<I: Source, C: EndSignallingCodec>(
 
 /// `finish_to`'s error is `DriveError<Infallible, Infallible>` (its
 /// input side never runs and its output side is the same `SliceSink`
-/// as `transfer_from`'s); widen it to line up with `end_signalling_pump_read`'s
+/// as `transfer_from`'s); widen it to line up with `boundary_aware_pump_read`'s
 /// return type so both calls share one `?`-friendly error type.
 fn widen<T>(error: DriveError<Infallible, Infallible>) -> DriveError<T, Infallible> {
     match error {
@@ -68,10 +68,10 @@ mod tests {
 
     use core::convert::Infallible;
 
-    use super::end_signalling_pump_read;
+    use super::boundary_aware_pump_read;
     use crate::identity::identity;
     use crate::{
-        Codec, Drain, DrainCodec, EndSignallingCodec, EndSignallingProgress, Error, Progress, Pump,
+        BoundaryAwareCodec, BoundaryAwareProgress, Codec, Drain, DrainCodec, Error, Progress, Pump,
         Source,
     };
 
@@ -109,7 +109,7 @@ mod tests {
         let mut buf = [0u8; 8];
 
         let mut read = || {
-            let n = end_signalling_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
             buf[..n].to_vec()
         };
 
@@ -176,12 +176,12 @@ mod tests {
         let mut buf = [0u8; 8];
 
         let mut read = || {
-            let n = end_signalling_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
             buf[..n].to_vec()
         };
 
         // The first pull only consumes 'o' and writes nothing — a
-        // buggy `end_signalling_pump_read` that stopped there would
+        // buggy `boundary_aware_pump_read` that stopped there would
         // return `b""` here instead of looping to the next pull.
         assert_eq!(read(), b"ok");
         assert_eq!(read(), b"");
@@ -199,7 +199,7 @@ mod tests {
         let mut buf = [0u8; 8];
 
         let mut read = || {
-            let n = end_signalling_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
             buf[..n].to_vec()
         };
 
@@ -251,7 +251,7 @@ mod tests {
         let mut buf = [0u8; 2];
 
         let mut read = || {
-            let n = end_signalling_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+            let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
             buf[..n].to_vec()
         };
 
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(read(), b"");
     }
 
-    /// An `EndSignallingCodec` that copies bytes 1:1 but ends its stream
+    /// A `BoundaryAwareCodec` that copies bytes 1:1 but ends its stream
     /// after `limit` bytes, like a self-describing format with an
     /// in-band terminator.
     struct EarlyEnd {
@@ -280,25 +280,25 @@ mod tests {
         }
     }
 
-    impl EndSignallingCodec for EarlyEnd {
+    impl BoundaryAwareCodec for EarlyEnd {
         fn process(
             &mut self,
             input: &[u8],
             output: &mut [MaybeUninit<u8>],
-        ) -> Result<EndSignallingProgress, Error> {
+        ) -> Result<BoundaryAwareProgress, Error> {
             let remaining = self.limit - self.done;
             let n = input.len().min(output.len()).min(remaining);
             output[..n].write_copy_of_slice(&input[..n]);
             self.done += n;
             if self.done >= self.limit {
-                Ok(EndSignallingProgress::End {
+                Ok(BoundaryAwareProgress::Boundary {
                     consumed: n,
                     written: n,
                 })
             } else if n == input.len() {
-                Ok(EndSignallingProgress::InputConsumed { written: n })
+                Ok(BoundaryAwareProgress::InputConsumed { written: n })
             } else {
-                Ok(EndSignallingProgress::OutputFilled { consumed: n })
+                Ok(BoundaryAwareProgress::OutputFilled { consumed: n })
             }
         }
     }
@@ -311,13 +311,13 @@ mod tests {
         let mut pump = Pump::new(EarlyEnd { limit: 3, done: 0 });
         let mut buf = [0u8; 8];
 
-        let n = end_signalling_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"Hel");
 
         // `pump.is_done()` must short-circuit before ever calling
         // `source.chunk()` again — if it didn't, `source.consumed()`
         // would advance past 3.
-        let n = end_signalling_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
         assert_eq!(n, 0);
         assert_eq!(source.consumed(), 3);
     }

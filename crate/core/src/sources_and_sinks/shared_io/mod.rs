@@ -2,7 +2,7 @@
 //! Public so a third-party `Source`/`Sink` backend can reuse it.
 
 mod read;
-pub use read::end_signalling_pump_read;
+pub use read::boundary_aware_pump_read;
 
 mod write;
 pub use write::{pump_finish, pump_flush, pump_sync_flush, pump_write};

@@ -42,7 +42,7 @@ impl Codec for Rot13 {
 ```
 
 `finish`/`flush` live on [`DrainCodec`], a supertrait shared by
-`Codec` and `EndSignallingCodec` (see below) — implement it first, then
+`Codec` and `BoundaryAwareCodec` (see below) — implement it first, then
 `Codec` for `process`.
 
 ## The contract
@@ -68,27 +68,27 @@ makes any other outcome unrepresentable:
 If your format is self-terminating — it can recognize its own end
 inside an input slice, with bytes past that end belonging to whatever
 follows (a delimiter, a length-prefixed frame) — implement
-[`EndSignallingCodec`] instead of `Codec`. It's the same shape, except
-`process` returns a [`EndSignallingProgress`] that adds a third outcome,
-`End { consumed, written }`. Every `Codec` already gets a
-`EndSignallingCodec` impl for free (it just never returns `End`), so
+[`BoundaryAwareCodec`] instead of `Codec`. It's the same shape, except
+`process` returns a [`BoundaryAwareProgress`] that adds a third outcome,
+`Boundary { consumed, written }`. Every `Codec` already gets a
+`BoundaryAwareCodec` impl for free (it just never returns `Boundary`), so
 input-side drivers (`CodecReader`, `stream_to_stream`) accept either
-kind interchangeably; only implement `EndSignallingCodec` directly when
+kind interchangeably; only implement `BoundaryAwareCodec` directly when
 your format actually has an in-band end to report.
 `CodecWriter` accepts only `Codec` — `Write` has no way to represent a
 permanent short write, so a genuinely terminating codec can't be
 wrapped as one.
 
-`End` completes the current logical driving operation. Drivers must
+`Boundary` completes the current logical driving operation. Drivers must
 latch that signal: later calls for the same stream return terminal
 zero-progress results without re-entering the codec. The trait does
-not specify raw codec calls after `End`; a concrete codec may document
+not specify raw codec calls after `Boundary`; a concrete codec may document
 that its instance can be reused for another logical stream, but generic
 code cannot assume that.
 
 The drivers do not take your word for it: every reported count is
 checked against the buffer sizes the call was given
-(`Progress::validated`/`EndSignallingProgress::validated`/`Drain::validated`),
+(`Progress::validated`/`BoundaryAwareProgress::validated`/`Drain::validated`),
 and an overclaimed count surfaces as an `ErrorKind::ContractViolation`
 error rather than corrupting driver state. If you build your own
 driver, apply the same check at your codec boundary.
@@ -189,16 +189,16 @@ At minimum, exercise:
   prove the carry spans buffers correctly.
 - `finish()` reaching `Drain::Done`.
 
-If you implemented `EndSignallingCodec`, additionally exercise:
+If you implemented `BoundaryAwareCodec`, additionally exercise:
 
-- `End` reporting exact consumed/written counts, with the delimiter
+- `Boundary` reporting exact consumed/written counts, with the delimiter
   handled the way you documented (consumed or left for the caller).
-- Input after `End` staying unconsumed when driven through a `Source`.
-- Driver calls after `End` returning permanent zero-progress terminal
+- Input after `Boundary` staying unconsumed when driven through a `Source`.
+- Driver calls after `Boundary` returning permanent zero-progress terminal
   results without re-entering the codec.
 - EOF arriving before the in-band boundary, per whatever policy you
   documented for that case.
 
-That's the whole surface: implement `Codec` or `EndSignallingCodec`,
+That's the whole surface: implement `Codec` or `BoundaryAwareCodec`,
 expose constructor function(s), and the rest of RustCodecs (stream
 adapters, `Vec<u8>` helper) works with your codec for free.

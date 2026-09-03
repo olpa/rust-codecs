@@ -5,9 +5,9 @@
 //! `Chain` owns this — both depend on it, which is why it lives in its
 //! own module rather than inside `pump`.
 //!
-//! [`codec_step`]/[`end_signalling_step`] are the `process`-side halves:
+//! [`codec_step`]/[`boundary_aware_step`] are the `process`-side halves:
 //! two entry points, not one generic function, because `Chain` accepts
-//! only [`Codec`] members. A single `EndSignallingCodec`-bound `step`
+//! only [`Codec`] members. A single `BoundaryAwareCodec`-bound `step`
 //! would still work for `Chain` — every `Codec` is one via the blanket
 //! implementation — but its result type could represent an in-band
 //! `End` that `Chain`'s members can never actually produce. Keeping
@@ -20,11 +20,11 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{Codec, Drain, DrainCodec, EndSignallingCodec, EndSignallingProgress, Error, Progress};
+use crate::{BoundaryAwareCodec, BoundaryAwareProgress, Codec, Drain, DrainCodec, Error, Progress};
 
 /// Why one step of an ordinary [`Codec::process`] call stopped. No
-/// in-band end is possible — see [`EndSignallingStepEnd`] for the
-/// [`EndSignallingCodec`] counterpart that has one.
+/// in-band end is possible — see [`BoundaryAwareStepEnd`] for the
+/// [`BoundaryAwareCodec`] counterpart that has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodecStepEnd {
     /// The complete input window was consumed.
@@ -68,33 +68,33 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
     })
 }
 
-/// Why one step of an [`EndSignallingCodec::process`] call stopped.
+/// Why one step of a [`BoundaryAwareCodec::process`] call stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EndSignallingStepEnd {
+pub(crate) enum BoundaryAwareStepEnd {
     /// The complete input window was consumed.
     InputExhausted,
     /// The complete output window was filled.
     OutputExhausted,
     /// The codec ended its stream in-band.
-    End,
+    Boundary,
 }
 
-/// Exact progress made by one validated [`EndSignallingCodec::process`]
+/// Exact progress made by one validated [`BoundaryAwareCodec::process`]
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EndSignallingStep {
+pub(crate) struct BoundaryAwareStep {
     pub(crate) consumed: usize,
     pub(crate) written: usize,
-    pub(crate) end: EndSignallingStepEnd,
+    pub(crate) end: BoundaryAwareStepEnd,
 }
 
-/// Run one step of an [`EndSignallingCodec`], validated against the
+/// Run one step of a [`BoundaryAwareCodec`], validated against the
 /// buffers it was given.
-pub(crate) fn end_signalling_step<C: EndSignallingCodec + ?Sized>(
+pub(crate) fn boundary_aware_step<C: BoundaryAwareCodec + ?Sized>(
     codec: &mut C,
     input: &[u8],
     output: &mut [MaybeUninit<u8>],
-) -> Result<EndSignallingStep, Error> {
+) -> Result<BoundaryAwareStep, Error> {
     let input_len = input.len();
     let output_len = output.len();
     let outcome = codec
@@ -102,20 +102,20 @@ pub(crate) fn end_signalling_step<C: EndSignallingCodec + ?Sized>(
         .validated(input_len, output_len)?;
 
     Ok(match outcome {
-        EndSignallingProgress::InputConsumed { written } => EndSignallingStep {
+        BoundaryAwareProgress::InputConsumed { written } => BoundaryAwareStep {
             consumed: input_len,
             written,
-            end: EndSignallingStepEnd::InputExhausted,
+            end: BoundaryAwareStepEnd::InputExhausted,
         },
-        EndSignallingProgress::OutputFilled { consumed } => EndSignallingStep {
+        BoundaryAwareProgress::OutputFilled { consumed } => BoundaryAwareStep {
             consumed,
             written: output_len,
-            end: EndSignallingStepEnd::OutputExhausted,
+            end: BoundaryAwareStepEnd::OutputExhausted,
         },
-        EndSignallingProgress::End { consumed, written } => EndSignallingStep {
+        BoundaryAwareProgress::Boundary { consumed, written } => BoundaryAwareStep {
             consumed,
             written,
-            end: EndSignallingStepEnd::End,
+            end: BoundaryAwareStepEnd::Boundary,
         },
     })
 }

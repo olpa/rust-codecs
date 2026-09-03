@@ -71,7 +71,7 @@ pub trait Sink {
 /// Shared supertrait with [`Self::sync_flush`] and [`Self::finish`].
 ///
 /// This trait is a technical artifact, not a standalone abstraction.
-/// Write code against [`Codec`] or [`EndSignallingCodec`] instead.
+/// Write code against [`Codec`] or [`BoundaryAwareCodec`] instead.
 pub trait DrainCodec {
     /// Deflate, zlib, and similar codecs support this: they write
     /// buffered output and a sync marker. Most codecs do not need
@@ -126,28 +126,28 @@ pub trait Codec: DrainCodec {
 ///
 /// It leaves the rest of the source available to whatever comes next.
 ///
-/// Every [`Codec`] is automatically an `EndSignallingCodec` that never
-/// returns [`End`](EndSignallingProgress::End); see the blanket
-/// implementation.
-pub trait EndSignallingCodec: DrainCodec {
+/// Every [`Codec`] is automatically a `BoundaryAwareCodec` that never
+/// returns [`Boundary`](BoundaryAwareProgress::Boundary); see the
+/// blanket implementation.
+pub trait BoundaryAwareCodec: DrainCodec {
     /// This trait follows [`Codec::process`]'s contract, with one addition:
     /// a successful `process` call may also resolve to
-    /// [`EndSignallingProgress::End`].
+    /// [`BoundaryAwareProgress::Boundary`].
     ///
-    /// Once `process` reaches [`End`](EndSignallingProgress::End), a
+    /// Once `process` reaches [`Boundary`](BoundaryAwareProgress::Boundary), a
     /// driver must stop driving the current logical stream. Lifecycle
     /// wrappers such as [`Pump`](crate::stream::Pump) latch the signal
     /// and answer later calls themselves with zero-progress terminal
     /// results.
     ///
     /// This trait does not define what direct codec calls do after
-    /// [`End`](EndSignallingProgress::End). A concrete codec may
+    /// [`Boundary`](BoundaryAwareProgress::Boundary). A concrete codec may
     /// document that its instance can be reused for another logical
     /// stream; another may have entered a permanently terminal internal
     /// state.
     ///
     /// If EOF arrives before `process` reports
-    /// [`End`](EndSignallingProgress::End), `finish` decides what that
+    /// [`Boundary`](BoundaryAwareProgress::Boundary), `finish` decides what that
     /// means. If the format requires an in-band terminator, `finish` may
     /// report [`ErrorKind::UnexpectedEnd`]. If the format treats EOF
     /// itself as a valid end, `finish` may instead return
@@ -156,15 +156,15 @@ pub trait EndSignallingCodec: DrainCodec {
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
-    ) -> Result<EndSignallingProgress, Error>;
+    ) -> Result<BoundaryAwareProgress, Error>;
 }
 
-impl<C: Codec> EndSignallingCodec for C {
+impl<C: Codec> BoundaryAwareCodec for C {
     fn process(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
-    ) -> Result<EndSignallingProgress, Error> {
+    ) -> Result<BoundaryAwareProgress, Error> {
         Codec::process(self, input, output).map(Into::into)
     }
 }
@@ -189,10 +189,10 @@ pub enum Progress {
     OutputFilled { consumed: usize },
 }
 
-/// Progress of one [`EndSignallingCodec::process`] call: everything
+/// Progress of one [`BoundaryAwareCodec::process`] call: everything
 /// [`Progress`] can report, plus an in-band end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndSignallingProgress {
+pub enum BoundaryAwareProgress {
     /// All of `input` was consumed; `written` bytes were produced
     /// (possibly zero, when everything went into internal buffering).
     /// The driver's move: supply more input, or `finish`.
@@ -204,10 +204,10 @@ pub enum EndSignallingProgress {
     OutputFilled { consumed: usize },
     /// The current logical stream ended in-band. Input past its end
     /// was left unconsumed, and neither side is necessarily "full".
-    End { consumed: usize, written: usize },
+    Boundary { consumed: usize, written: usize },
 }
 
-impl From<Progress> for EndSignallingProgress {
+impl From<Progress> for BoundaryAwareProgress {
     fn from(progress: Progress) -> Self {
         match progress {
             Progress::InputConsumed { written } => Self::InputConsumed { written },
@@ -250,18 +250,18 @@ impl Progress {
     }
 }
 
-impl EndSignallingProgress {
+impl BoundaryAwareProgress {
     /// The [`Progress::validated`] counterpart for
-    /// [`EndSignallingCodec::process`].
+    /// [`BoundaryAwareCodec::process`].
     pub fn validated(
         self,
         input_len: usize,
         output_len: usize,
-    ) -> Result<EndSignallingProgress, Error> {
+    ) -> Result<BoundaryAwareProgress, Error> {
         let honest = match self {
-            EndSignallingProgress::InputConsumed { written } => written <= output_len,
-            EndSignallingProgress::OutputFilled { consumed } => consumed <= input_len,
-            EndSignallingProgress::End { consumed, written } => {
+            BoundaryAwareProgress::InputConsumed { written } => written <= output_len,
+            BoundaryAwareProgress::OutputFilled { consumed } => consumed <= input_len,
+            BoundaryAwareProgress::Boundary { consumed, written } => {
                 consumed <= input_len && written <= output_len
             }
         };
@@ -387,7 +387,7 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drain, EndSignallingProgress, Error, ErrorKind, Progress};
+    use super::{BoundaryAwareProgress, Drain, Error, ErrorKind, Progress};
 
     const CV: Error = Error {
         kind: ErrorKind::ContractViolation,
@@ -403,7 +403,7 @@ mod tests {
         assert!(Progress::OutputFilled { consumed: 10 }
             .validated(10, 4)
             .is_ok());
-        assert!(EndSignallingProgress::End {
+        assert!(BoundaryAwareProgress::Boundary {
             consumed: 0,
             written: 0
         }
@@ -424,7 +424,7 @@ mod tests {
             Err(CV)
         );
         assert_eq!(
-            EndSignallingProgress::End {
+            BoundaryAwareProgress::Boundary {
                 consumed: 11,
                 written: 0
             }
@@ -432,7 +432,7 @@ mod tests {
             Err(CV)
         );
         assert_eq!(
-            EndSignallingProgress::End {
+            BoundaryAwareProgress::Boundary {
                 consumed: 0,
                 written: 5
             }
