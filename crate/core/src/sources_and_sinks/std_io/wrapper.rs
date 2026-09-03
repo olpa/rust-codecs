@@ -15,7 +15,7 @@ fn to_io_error(err: Error) -> io::Error {
 }
 
 fn adapter_contract_violation() -> io::Error {
-    to_io_error(Error::new(ErrorKind::ContractViolation, 0, 0))
+    to_io_error(Error::new(ErrorKind::ByteCountClaim, 0, 0))
 }
 
 fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error {

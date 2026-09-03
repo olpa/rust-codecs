@@ -38,7 +38,7 @@ impl<E: Engine> Base64Enc<E> {
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
             engine
                 .encode_slice(group, buffer)
-                .map_err(|_| ErrorKind::Corrupt)
+                .map_err(|_| ErrorKind::CorruptStream)
         })
     }
 }
@@ -117,7 +117,7 @@ impl<E: Engine> Codec for Base64Enc<E> {
             out_pos += self
                 .engine
                 .encode_slice(&input[in_pos..in_pos + in_bytes], dst)
-                .map_err(|_| Error::new(ErrorKind::Corrupt, in_pos, out_pos))?;
+                .map_err(|_| Error::new(ErrorKind::CorruptStream, in_pos, out_pos))?;
             in_pos += in_bytes;
         }
 

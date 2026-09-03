@@ -149,7 +149,7 @@ pub(crate) struct DrainStep {
 impl DrainOp {
     /// Run this operation once against `codec`, validated
     /// (`DrainProgress::validated`, which rejects a `Done { written }` that
-    /// overclaims past `output.len()` as `ErrorKind::ContractViolation`)
+    /// overclaims past `output.len()` as `ErrorKind::ByteCountClaim`)
     /// and normalized: `DrainProgress` only tells you *how* the call stopped —
     /// it doesn't carry the amount written for the filled case, since
     /// by contract that must be the whole buffer. This fills that in,

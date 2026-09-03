@@ -19,7 +19,7 @@ pub enum EmbeddedError<E> {
 }
 
 fn adapter_contract_violation<E>() -> EmbeddedError<E> {
-    EmbeddedError::Codec(Error::new(ErrorKind::ContractViolation, 0, 0))
+    EmbeddedError::Codec(Error::new(ErrorKind::ByteCountClaim, 0, 0))
 }
 
 fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> EmbeddedError<E> {

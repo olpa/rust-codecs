@@ -222,11 +222,11 @@ pub(super) fn stage_group<const N: usize>(
 ) -> Result<(), Error> {
     let buffer = pending_output
         .buffer()
-        .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))?;
+        .map_err(|_| Error::new(ErrorKind::CodecBufferTooSmall, consumed, written))?;
     let n = render(buffer).map_err(|kind| Error::new(kind, consumed, written))?;
     pending_output
         .set_len(n)
-        .map_err(|_| Error::new(ErrorKind::BufferOverrun, consumed, written))
+        .map_err(|_| Error::new(ErrorKind::CodecBufferTooSmall, consumed, written))
 }
 
 #[cfg(test)]

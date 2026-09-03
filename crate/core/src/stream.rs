@@ -632,7 +632,7 @@ mod tests {
     impl DrainCodec for FailsAfterProgress {
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             output[0].write(b'!');
-            Err(Error::new(ErrorKind::Corrupt, 0, 1))
+            Err(Error::new(ErrorKind::CorruptStream, 0, 1))
         }
     }
 
@@ -643,7 +643,7 @@ mod tests {
             output: &mut [MaybeUninit<u8>],
         ) -> Result<Progress, Error> {
             output[..2].write_copy_of_slice(b"ok");
-            Err(Error::new(ErrorKind::Corrupt, 1, 2))
+            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
         }
     }
 
@@ -667,7 +667,7 @@ mod tests {
         assert!(matches!(
             error,
             DriveError::Codec(Error {
-                kind: ErrorKind::Corrupt,
+                kind: ErrorKind::CorruptStream,
                 consumed: 1,
                 written: 2
             })
@@ -689,7 +689,7 @@ mod tests {
         assert!(matches!(
             error,
             DriveError::Codec(Error {
-                kind: ErrorKind::Corrupt,
+                kind: ErrorKind::CorruptStream,
                 consumed: 0,
                 written: 1
             })
@@ -824,7 +824,7 @@ mod tests {
         });
         assert_eq!(
             pump.finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish),
-            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
         );
     }
 
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn overclaims_are_rejected_at_the_shared_boundary() {
-        let violation = Error::new(ErrorKind::ContractViolation, 0, 0);
+        let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
 
         let mut input_done = Reports(BoundaryAwareProgress::InputConsumed { written: 6 });
         assert_eq!(
@@ -957,7 +957,7 @@ mod tests {
             _input: &[u8],
             _output: &mut [MaybeUninit<u8>],
         ) -> Result<Progress, Error> {
-            Err(Error::new(ErrorKind::Corrupt, 1, 2))
+            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
         }
     }
 
@@ -965,7 +965,7 @@ mod tests {
     fn codec_errors_are_preserved() {
         assert_eq!(
             boundary_aware_step(&mut Fails, b"abc", &mut [MaybeUninit::uninit(); 5]),
-            Err(Error::new(ErrorKind::Corrupt, 1, 2))
+            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
         );
     }
 }

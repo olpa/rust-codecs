@@ -223,7 +223,7 @@ pub enum DrainProgress {
 impl Progress {
     /// Check the reported byte counts against the buffer sizes the
     /// call was given. This turns a lying codec into
-    /// [`ErrorKind::ContractViolation`].
+    /// [`ErrorKind::ByteCountClaim`].
     pub fn validated(self, input_len: usize, output_len: usize) -> Result<Progress, Error> {
         let honest = match self {
             Progress::InputConsumed { written } => written <= output_len,
@@ -232,7 +232,7 @@ impl Progress {
         if honest {
             Ok(self)
         } else {
-            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
         }
     }
 }
@@ -255,7 +255,7 @@ impl BoundaryAwareProgress {
         if honest {
             Ok(self)
         } else {
-            Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
         }
     }
 }
@@ -265,7 +265,7 @@ impl DrainProgress {
     pub fn validated(self, output_len: usize) -> Result<DrainProgress, Error> {
         match self {
             DrainProgress::Done { written } if written > output_len => {
-                Err(Error::new(ErrorKind::ContractViolation, 0, 0))
+                Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
             }
             honest => Ok(honest),
         }
@@ -306,25 +306,18 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The encoded stream is malformed.
-    Corrupt,
-    /// The stream ended where it should not have: `finish` was called
-    /// while the codec still needed more input, or a downstream codec
-    /// ended its stream while unconsumed bytes from upstream remained.
+    CorruptStream,
+    /// The stream ended where it should not have.
     UnexpectedEnd,
-    /// The codec's internal carry buffer couldn't hold an atomic
-    /// output unit — a codec bug (the carry is sized statically to the
-    /// codec's largest unit), or a format whose units are unbounded.
-    BufferOverrun,
+    /// The codec's internal carry buffer couldn't hold an atomic data unit.
+    CodecBufferTooSmall,
     /// The codec reported byte counts exceeding the buffers it was
-    /// given. Caught at the driver's trust boundary (see
-    /// [`Progress::validated`]/[`DrainProgress::validated`]). The error's
-    /// `consumed`/`written` are zero, since the reported counts can't
-    /// be trusted.
-    ContractViolation,
+    /// given. The error's `consumed`/`written` can't be trusted, so
+    /// validation (such as [`Progress::validated`]) zeroes them.
+    ByteCountClaim,
 }
 
-/// A codec failure, carrying how far the call got before failing so
-/// the caller knows which bytes were already accounted for.
+/// A codec failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
@@ -343,76 +336,12 @@ impl Error {
         }
     }
 
-    /// Check the progress carried by an error against the buffers used
-    /// by the failing call. Error progress crosses the same trust
-    /// boundary as successful progress.
+    /// The [`Progress::validated`] counterpart for a failing call.
     pub fn validated(self, input_len: usize, output_len: usize) -> Result<Self, Self> {
         if self.consumed <= input_len && self.written <= output_len {
             Ok(self)
         } else {
-            Err(Self::new(ErrorKind::ContractViolation, 0, 0))
+            Err(Self::new(ErrorKind::ByteCountClaim, 0, 0))
         }
-    }
-}
-
-// ----
-// Tests
-// ----
-
-#[cfg(test)]
-mod tests {
-    use super::{BoundaryAwareProgress, DrainProgress, Error, ErrorKind, Progress};
-
-    const CV: Error = Error {
-        kind: ErrorKind::ContractViolation,
-        consumed: 0,
-        written: 0,
-    };
-
-    #[test]
-    fn validated_accepts_honest_counts() {
-        assert!(Progress::InputConsumed { written: 4 }
-            .validated(10, 4)
-            .is_ok());
-        assert!(Progress::OutputFilled { consumed: 10 }
-            .validated(10, 4)
-            .is_ok());
-        assert!(BoundaryAwareProgress::Boundary {
-            consumed: 0,
-            written: 0
-        }
-        .validated(0, 0)
-        .is_ok());
-        assert!(DrainProgress::OutputFilled.validated(0).is_ok());
-        assert!(DrainProgress::Done { written: 4 }.validated(4).is_ok());
-    }
-
-    #[test]
-    fn validated_rejects_overclaimed_counts() {
-        assert_eq!(
-            Progress::InputConsumed { written: 5 }.validated(10, 4),
-            Err(CV)
-        );
-        assert_eq!(
-            Progress::OutputFilled { consumed: 11 }.validated(10, 4),
-            Err(CV)
-        );
-        assert_eq!(
-            BoundaryAwareProgress::Boundary {
-                consumed: 11,
-                written: 0
-            }
-            .validated(10, 4),
-            Err(CV)
-        );
-        assert_eq!(
-            BoundaryAwareProgress::Boundary {
-                consumed: 0,
-                written: 5
-            }
-            .validated(10, 4),
-            Err(CV)
-        );
-        assert_eq!(DrainProgress::Done { written: 5 }.validated(4), Err(CV));
     }
 }

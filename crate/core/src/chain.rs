@@ -60,7 +60,7 @@ use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
 ///
 /// **Misbehaving codecs.** The byte counts reported by both inner
 /// codecs are checked on every call; an overclaimed count surfaces as
-/// [`ErrorKind::ContractViolation`](crate::ErrorKind::ContractViolation)
+/// [`ErrorKind::ByteCountClaim`](crate::ErrorKind::ByteCountClaim)
 /// instead of corrupting the staging indices. Error counts are always
 /// chain-level — bytes consumed from *your* input and written to
 /// *your* output in this call — never the inner codec's own numbers.
@@ -669,12 +669,12 @@ mod tests {
         // Unchecked, the overclaimed consumed-count would push
         // `drained` past `filled` and corrupt the staging indices
         // (panicking on a later slice at best). The trust-boundary
-        // validation turns it into a ContractViolation error.
+        // validation turns it into a ByteCountClaim error.
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
         let result = collect(chain, INPUT);
         assert_eq!(
             result.unwrap_err().kind,
-            crate::ErrorKind::ContractViolation
+            crate::ErrorKind::ByteCountClaim
         );
     }
 
@@ -697,7 +697,7 @@ mod tests {
             if !self.failed {
                 self.failed = true;
                 output[..2].write_copy_of_slice(b"xy");
-                return Err(Error::new(crate::ErrorKind::Corrupt, 1, 2));
+                return Err(Error::new(crate::ErrorKind::CorruptStream, 1, 2));
             }
             let n = input.len().min(output.len());
             output[..n].write_copy_of_slice(&input[..n]);
@@ -717,7 +717,7 @@ mod tests {
         let error = chain
             .process(b"abc", as_uninit_mut(&mut output))
             .unwrap_err();
-        assert_eq!(error, Error::new(crate::ErrorKind::Corrupt, 1, 0));
+        assert_eq!(error, Error::new(crate::ErrorKind::CorruptStream, 1, 0));
 
         let progress = chain.process(b"bc", as_uninit_mut(&mut output)).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 4 });
@@ -743,7 +743,7 @@ mod tests {
             if !self.failed {
                 self.failed = true;
                 output[..1].write_copy_of_slice(&input[..1]);
-                return Err(Error::new(crate::ErrorKind::Corrupt, 1, 1));
+                return Err(Error::new(crate::ErrorKind::CorruptStream, 1, 1));
             }
             let n = input.len().min(output.len());
             output[..n].write_copy_of_slice(&input[..n]);
@@ -763,7 +763,7 @@ mod tests {
         let error = chain
             .process(b"abc", as_uninit_mut(&mut output))
             .unwrap_err();
-        assert_eq!(error, Error::new(crate::ErrorKind::Corrupt, 3, 1));
+        assert_eq!(error, Error::new(crate::ErrorKind::CorruptStream, 3, 1));
         assert_eq!(&output[..1], b"a");
 
         let progress = chain.process(b"", as_uninit_mut(&mut output)).unwrap();

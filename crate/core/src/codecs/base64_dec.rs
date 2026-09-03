@@ -53,7 +53,7 @@ impl<E: Engine> Base64Dec<E> {
         let kind = if group.len() < ENCODED_GROUP {
             ErrorKind::UnexpectedEnd
         } else {
-            ErrorKind::Corrupt
+            ErrorKind::CorruptStream
         };
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
             engine.decode_slice(group, buffer).map_err(|_| kind)
@@ -103,7 +103,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
 
         if self.done {
             if !input.is_empty() {
-                return Err(Error::new(ErrorKind::Corrupt, 0, out_pos));
+                return Err(Error::new(ErrorKind::CorruptStream, 0, out_pos));
             }
             return Ok(Progress::InputConsumed { written: out_pos });
         }
@@ -123,7 +123,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
             if produced < GROUP {
                 self.done = true;
                 if in_pos < input.len() {
-                    return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
+                    return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
                 }
             }
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
@@ -154,13 +154,13 @@ impl<E: Engine> Codec for Base64Dec<E> {
             let written = self
                 .engine
                 .decode_slice(&input[in_pos..in_pos + in_bytes], dst)
-                .map_err(|_| Error::new(ErrorKind::Corrupt, in_pos, out_pos))?;
+                .map_err(|_| Error::new(ErrorKind::CorruptStream, in_pos, out_pos))?;
             out_pos += written;
             in_pos += in_bytes;
             if written < out_bytes {
                 self.done = true;
                 if in_pos < input.len() {
-                    return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
+                    return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
                 }
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
@@ -182,7 +182,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
             if produced < GROUP {
                 self.done = true;
                 if in_pos < input.len() {
-                    return Err(Error::new(ErrorKind::Corrupt, in_pos, out_pos));
+                    return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
                 }
             }
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
@@ -252,7 +252,7 @@ mod tests {
         // but STANDARD requires padding and must still reject a
         // stream cut off mid-symbol. That's the stream ending too
         // early, not malformed data, so it must be UnexpectedEnd
-        // rather than Corrupt.
+        // rather than CorruptStream.
         let truncated = &ENCODED[..ENCODED.len() - 2];
         let mut dec = base64_dec();
         let mut out = [0u8; 32];
@@ -269,7 +269,7 @@ mod tests {
         let mut dec = base64_dec();
         let mut out = [0u8; 32];
         let error = dec.process(b"A=BC", as_uninit_mut(&mut out)).unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Corrupt);
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
     }
 
     #[test]
