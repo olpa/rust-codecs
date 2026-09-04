@@ -1,12 +1,6 @@
-//! A bufferless codec lifecycle and the lending stream driver
-//! ([`stream_to_stream`]) that connects a codec to a pair of
-//! endpoints.
-//!
-//! Endpoint adapters own the buffers: readers own input, writers own
-//! output. [`Pump`] owns only the codec's lifecycle, so it never
-//! copies a byte. [`Pump::latched_step`] validates the codec's
-//! progress report; [`Pump::transfer_step`] turns it into exact
-//! counts on both sides.
+//! [`stream_to_stream`] drives a codec from an input source to an
+//! output sink. [`Pump`], the helper behind it, is also used directly
+//! by `std_io`/`embedded_io` wrappers.
 
 use core::mem::MaybeUninit;
 
@@ -21,6 +15,8 @@ pub enum DriveError<EI, EO> {
     Source(EI),
     Sink(EO),
     Codec(crate::Error),
+    /// The sink had no more room (`Sink::spare` returned `None`)
+    /// before the codec reached the end of its stream.
     SinkExhausted,
     /// The call moved zero bytes on both sides without ending the
     /// stream. The pump does not spin forever on a stalled codec or
@@ -28,7 +24,7 @@ pub enum DriveError<EI, EO> {
     NoProgress,
 }
 
-/// Drive one codec between any pair of lending stream adapters.
+/// Drive the codec from the input source to the output sink.
 pub fn stream_to_stream<I, O, C>(
     input: &mut I,
     codec: C,
@@ -764,10 +760,7 @@ mod tests {
         let resumed = done
             .latched_step(b"abc", &mut [MaybeUninit::uninit(); 8])
             .unwrap();
-        assert_eq!(
-            resumed,
-            BoundaryAwareProgress::InputConsumed { written: 5 }
-        );
+        assert_eq!(resumed, BoundaryAwareProgress::InputConsumed { written: 5 });
     }
 
     #[test]
