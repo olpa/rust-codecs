@@ -1,35 +1,17 @@
-//! Codec-call normalization shared by [`Pump`](crate::stream::Pump) and
-//! [`Chain`](crate::Chain): validates a codec's reported progress
-//! against the buffers it was actually given, and turns it into exact
-//! counts callers can use without re-deriving them. Neither `Pump` nor
-//! `Chain` owns this — both depend on it, which is why it lives in its
-//! own module rather than inside `pump`.
-//!
-//! [`codec_step`]/[`boundary_aware_step`] are the `process`-side halves:
-//! two entry points, not one generic function, because `Chain` accepts
-//! only [`Codec`] members. A single `BoundaryAwareCodec`-bound `step`
-//! would still work for `Chain` — every `Codec` is one via the blanket
-//! implementation — but its result type could represent an in-band
-//! `End` that `Chain`'s members can never actually produce. Keeping
-//! [`CodecStep`] end-less makes that impossibility a type-level fact
-//! instead of a runtime one.
-//!
-//! [`DrainOp`] is the `finish`/`sync_flush`-side half, shared as-is:
-//! neither caller needs a narrower type here, since `DrainProgress` has no
-//! in-band-end counterpart to begin with.
+//! Checks a codec's reported progress against the buffers it received.
+//! Converts the result into exact counts. [`Pump`](crate::stream::Pump)
+//! and [`Chain`](crate::Chain) share this module.
 
 use core::mem::MaybeUninit;
 
 use crate::{BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, Progress};
 
-/// Why one step of an ordinary [`Codec::process`] call stopped. No
-/// in-band end is possible — see [`BoundaryAwareStepEnd`] for the
-/// [`BoundaryAwareCodec`] counterpart that has one.
+/// Why one step of an ordinary [`Codec::process`] call stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodecStepEnd {
-    /// The complete input window was consumed.
+    /// The call consumed the complete input window.
     InputExhausted,
-    /// The complete output window was filled.
+    /// The call filled the complete output window.
     OutputExhausted,
 }
 
@@ -41,8 +23,8 @@ pub(crate) struct CodecStep {
     pub(crate) end: CodecStepEnd,
 }
 
-/// Run one step of an ordinary [`Codec`], validated against the
-/// buffers it was given.
+/// Run one step of an ordinary [`Codec`]. Validate the result against
+/// the buffers it received.
 pub(crate) fn codec_step<C: Codec + ?Sized>(
     codec: &mut C,
     input: &[u8],
@@ -71,9 +53,9 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
 /// Why one step of a [`BoundaryAwareCodec::process`] call stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoundaryAwareStepEnd {
-    /// The complete input window was consumed.
+    /// The call consumed the complete input window.
     InputExhausted,
-    /// The complete output window was filled.
+    /// The call filled the complete output window.
     OutputExhausted,
     /// The codec ended its stream in-band.
     Boundary,
@@ -88,8 +70,8 @@ pub(crate) struct BoundaryAwareStep {
     pub(crate) end: BoundaryAwareStepEnd,
 }
 
-/// Run one step of a [`BoundaryAwareCodec`], validated against the
-/// buffers it was given.
+/// Run one step of a [`BoundaryAwareCodec`]. Validate the result
+/// against the buffers it received.
 pub(crate) fn boundary_aware_step<C: BoundaryAwareCodec + ?Sized>(
     codec: &mut C,
     input: &[u8],
@@ -120,8 +102,8 @@ pub(crate) fn boundary_aware_step<C: BoundaryAwareCodec + ?Sized>(
     })
 }
 
-/// Which of a [`DrainCodec`]'s two draining operations [`DrainOp::step`]
-/// should run.
+/// Selects which of [`DrainCodec`]'s two draining operations
+/// [`DrainOp::step`] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrainOp {
     Finish,
@@ -131,10 +113,10 @@ pub(crate) enum DrainOp {
 /// Why one [`DrainOp::step`] call stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrainStop {
-    /// All of `output` was filled and there is more to come.
+    /// The call filled all of `output`. More output remains.
     OutputFilled,
-    /// Everything owed was delivered; `written` (in the enclosing
-    /// [`DrainStep`]) is the final count, at most `output.len()`.
+    /// The call delivered everything owed. `written` in the enclosing
+    /// [`DrainStep`] holds the final count, at most `output.len()`.
     Done,
 }
 
@@ -147,14 +129,8 @@ pub(crate) struct DrainStep {
 }
 
 impl DrainOp {
-    /// Run this operation once against `codec`, validated
-    /// (`DrainProgress::validated`, which rejects a `Done { written }` that
-    /// overclaims past `output.len()` as `ErrorKind::ByteCountClaim`)
-    /// and normalized: `DrainProgress` only tells you *how* the call stopped —
-    /// it doesn't carry the amount written for the filled case, since
-    /// by contract that must be the whole buffer. This fills that in,
-    /// so both variants collapse into the uniform `{ written, stop }`
-    /// shape callers work with.
+    /// Run this operation once against `codec`. Validate the result
+    /// and normalize it into the uniform `{ written, stop }` shape.
     pub(crate) fn step<C: DrainCodec + ?Sized>(
         self,
         codec: &mut C,
