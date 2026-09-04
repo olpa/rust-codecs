@@ -13,7 +13,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::step::{codec_step, DrainOp, DrainStop};
+use crate::step::{codec_step, DrainOp};
 use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
 
@@ -242,9 +242,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                         });
                     }
                 };
-                self.stage_pos += moved.written;
-                if moved.stop == DrainStop::Done {
-                    nothing_more_from_first = true;
+                match moved {
+                    DrainProgress::OutputFilled => self.stage_pos += available,
+                    DrainProgress::Done { written } => {
+                        self.stage_pos += written;
+                        nothing_more_from_first = true;
+                    }
                 }
             }
 
@@ -267,10 +270,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                         });
                     }
                 };
-                return Ok(match moved.stop {
-                    DrainStop::OutputFilled => DrainProgress::OutputFilled,
-                    DrainStop::Done => DrainProgress::Done {
-                        written: out_pos + moved.written,
+                return Ok(match moved {
+                    DrainProgress::OutputFilled => DrainProgress::OutputFilled,
+                    DrainProgress::Done { written } => DrainProgress::Done {
+                        written: out_pos + written,
                     },
                 });
             }

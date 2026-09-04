@@ -15,8 +15,10 @@
 
 use core::mem::MaybeUninit;
 
-use crate::step::{DrainOp, DrainStop};
-use crate::{BoundaryAwareCodec, BoundaryAwareProgress, Error, Sink, Source, TransferCounts};
+use crate::step::DrainOp;
+use crate::{
+    BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, Error, Sink, Source, TransferCounts,
+};
 
 /// Why [`stream_to_stream`] stopped before the codec finished its stream.
 #[derive(Debug)]
@@ -138,10 +140,9 @@ pub(crate) struct PumpDrainTransfer {
 /// `sync_flush` call, as reported by
 /// [`Pump::finish_or_sync_flush_step`] — the single-call counterpart
 /// to [`PumpDrainTransfer`], which covers a
-/// whole `drain_to` run. Renames [`DrainStop`] to
-/// `SinkExhausted`/`Done`, since at this layer `output` is always
-/// exactly one [`Sink::spare`] slice, so "the buffer filled" and "the
-/// sink ran out of room this round" coincide.
+/// whole `drain_to` run. At this layer `output` is always exactly one
+/// [`Sink::spare`] slice, so "the buffer filled" and "the sink ran out
+/// of room this round" coincide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PumpDrainStep {
     pub(crate) written: usize,
@@ -494,12 +495,14 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 end: PumpDrainEnd::Done,
             });
         }
-        let step = op.step(&mut self.codec, output)?;
-        Ok(PumpDrainStep {
-            written: step.written,
-            end: match step.stop {
-                DrainStop::OutputFilled => PumpDrainEnd::SinkExhausted,
-                DrainStop::Done => PumpDrainEnd::Done,
+        Ok(match op.step(&mut self.codec, output)? {
+            DrainProgress::OutputFilled => PumpDrainStep {
+                written: output.len(),
+                end: PumpDrainEnd::SinkExhausted,
+            },
+            DrainProgress::Done { written } => PumpDrainStep {
+                written,
+                end: PumpDrainEnd::Done,
             },
         })
     }

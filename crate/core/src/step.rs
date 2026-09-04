@@ -39,46 +39,17 @@ pub(crate) enum DrainOp {
     SyncFlush,
 }
 
-/// Why one [`DrainOp::step`] call stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DrainStop {
-    /// The call filled all of `output`. More output remains.
-    OutputFilled,
-    /// The call delivered everything owed. `written` in the enclosing
-    /// [`DrainStep`] holds the final count, at most `output.len()`.
-    Done,
-}
-
-/// Exact progress and boundary of one validated `finish`/`sync_flush`
-/// call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DrainStep {
-    pub(crate) written: usize,
-    pub(crate) stop: DrainStop,
-}
-
 impl DrainOp {
-    /// Run this operation once against `codec`. Validate the result
-    /// and normalize it into the uniform `{ written, stop }` shape.
+    /// Run this operation once against `codec` and validate the result.
     pub(crate) fn step<C: DrainCodec + ?Sized>(
         self,
         codec: &mut C,
         output: &mut [MaybeUninit<u8>],
-    ) -> Result<DrainStep, Error> {
-        let output_len = output.len();
+    ) -> Result<DrainProgress, Error> {
         let result = match self {
             DrainOp::Finish => codec.finish(output),
             DrainOp::SyncFlush => codec.sync_flush(output),
         };
-        Ok(match result?.validated(output_len)? {
-            DrainProgress::OutputFilled => DrainStep {
-                written: output_len,
-                stop: DrainStop::OutputFilled,
-            },
-            DrainProgress::Done { written } => DrainStep {
-                written,
-                stop: DrainStop::Done,
-            },
-        })
+        result?.validated(output.len())
     }
 }
