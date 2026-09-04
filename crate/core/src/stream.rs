@@ -1,17 +1,12 @@
-//! Bufferless codec lifecycle and the lending stream driver
-//! ([`stream_to_stream`]) that ties a codec to a pair of endpoints.
+//! A bufferless codec lifecycle and the lending stream driver
+//! ([`stream_to_stream`]) that connects a codec to a pair of
+//! endpoints.
 //!
-//! Endpoint adapters retain the buffers dictated by their direction:
-//! readers own input storage, writers own output storage, and chunked
-//! frontends lend both current windows. [`Pump`] owns only codec
-//! lifecycle, so using it never introduces a byte copy.
-//!
-//! [`BoundaryAwareCodec::process`](crate::BoundaryAwareCodec::process)
-//! reports only the counts not already implied by its outcome: all
-//! input was consumed, all output was filled, or the stream ended.
-//! [`Pump::latched_step`] validates that report, and
-//! [`Pump::transfer_step`] normalizes it into exact progress on both
-//! sides.
+//! Endpoint adapters own the buffers: readers own input, writers own
+//! output. [`Pump`] owns only the codec's lifecycle, so it never
+//! copies a byte. [`Pump::latched_step`] validates the codec's
+//! progress report; [`Pump::transfer_step`] turns it into exact
+//! counts on both sides.
 
 use core::mem::MaybeUninit;
 
@@ -27,9 +22,9 @@ pub enum DriveError<EI, EO> {
     Sink(EO),
     Codec(crate::Error),
     SinkExhausted,
-    /// A call moved zero bytes on both sides without ending the
-    /// stream — the pump refuses to spin forever on a stalled
-    /// codec/endpoint pair.
+    /// The call moved zero bytes on both sides without ending the
+    /// stream. The pump does not spin forever on a stalled codec or
+    /// endpoint.
     NoProgress,
 }
 
@@ -76,9 +71,8 @@ where
     }
 }
 
-/// Result of one whole [`Pump::transfer_from`] run: accumulated
-/// `consumed`/`written` totals and which of the three ways it
-/// stopped.
+/// Result of one whole [`Pump::transfer_from`] run: the accumulated
+/// `consumed`/`written` totals, and how it stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PumpTransfer {
     pub(crate) consumed: usize,
@@ -93,13 +87,11 @@ pub(crate) enum PumpEnd {
     End,
 }
 
-/// Result of one [`Pump::transfer_step`] call — the single-step
-/// counterpart to [`PumpTransfer`]/[`PumpEnd`], which cover a whole
-/// [`Pump::transfer_from`] run. Distinct from `PumpTransfer` because
-/// [`PumpStepEnd`] has a fourth case, [`PumpStepEnd::Progressed`], that
-/// `PumpEnd` deliberately has no room for: `transfer_from`'s loop
-/// consumes it internally (keep looping) and never lets it escape as
-/// its own `PumpEnd::End`/`SourceExhausted`/`SinkExhausted` result.
+/// Result of one [`Pump::transfer_step`] call, the single-step
+/// counterpart to [`PumpTransfer`]. Its [`PumpStepEnd`] has one more
+/// case than [`PumpEnd`]: [`PumpStepEnd::Progressed`], which
+/// `transfer_from` consumes internally and never returns as a
+/// [`PumpEnd`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PumpStep {
     pub(crate) consumed: usize,
@@ -111,10 +103,8 @@ pub(crate) struct PumpStep {
 pub(crate) enum PumpStepEnd {
     SourceExhausted,
     SinkExhausted,
-    /// The step completed normally (the codec fully consumed its
-    /// input window or fully filled its output window) without
-    /// exhausting `input` or `output` themselves — more may still be
-    /// available from either on the next step.
+    /// The step completed normally, without exhausting `input` or
+    /// `output`. More may be available from either on the next step.
     Progressed,
     End,
 }
@@ -126,23 +116,20 @@ pub(crate) enum PumpDrainEnd {
 }
 
 /// Result of one whole `drain_to` run (behind [`Pump::finish_to`]/
-/// [`Pump::sync_flush_to`]) — the [`PumpTransfer`] counterpart for the
-/// drain side: `written` accumulates across every call `drain_to`
-/// made, not one call's contribution, kept as a distinct type so the
-/// two can't be mixed up at a call site.
+/// [`Pump::sync_flush_to`]), the [`PumpTransfer`] counterpart for the
+/// drain side. `written` accumulates across every call `drain_to`
+/// made, not just the last one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PumpDrainTransfer {
     pub(crate) written: usize,
     pub(crate) end: PumpDrainEnd,
 }
 
-/// Exact progress and boundary of one validated `finish` or
-/// `sync_flush` call, as reported by
-/// [`Pump::finish_or_sync_flush_step`] — the single-call counterpart
-/// to [`PumpDrainTransfer`], which covers a
-/// whole `drain_to` run. At this layer `output` is always exactly one
-/// [`Sink::spare`] slice, so "the buffer filled" and "the sink ran out
-/// of room this round" coincide.
+/// Exact progress of one validated `finish`/`sync_flush` call, as
+/// reported by [`Pump::finish_or_sync_flush_step`] — the single-call
+/// counterpart to [`PumpDrainTransfer`]. Here `output` is always one
+/// [`Sink::spare`] slice, so a filled buffer and an exhausted sink
+/// are the same event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PumpDrainStep {
     pub(crate) written: usize,
@@ -152,19 +139,15 @@ pub(crate) struct PumpDrainStep {
 /// A bufferless lifecycle wrapper around a codec.
 ///
 /// Public so a third-party `Source`/`Sink` backend can build its own
-/// `Read`/`Write`-style wrapper on top of it, the same way this
-/// crate's own `std_io`/`embedded_io` backends do: hold a `Pump<C>`
-/// alongside your adapter, and drive it with
-/// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io)'s
-/// `boundary_aware_pump_read`/`pump_write`/`pump_finish`/`pump_flush` rather than
-/// calling its own methods directly — those stay crate-private.
+/// `Read`/`Write`-style wrapper on top of it, the way this crate's
+/// own `std_io`/`embedded_io` backends do. Drive it through
+/// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io);
+/// its own methods stay crate-private.
 ///
-/// `C` is generic, not fixed to `BoundaryAwareCodec` itself, because a
-/// trait isn't a sized type a field can hold directly. The obvious
-/// fix, `Box<dyn BoundaryAwareCodec>`, would require `alloc`
-/// unconditionally, breaking this crate's `no_std`-without-`alloc`
-/// support. Callers who want that trade-off can still get it without
-/// any change here, via `Pump<Box<dyn Codec>>`.
+/// `C` is generic rather than fixed to `BoundaryAwareCodec`, since a
+/// trait is not a sized type a field can hold. A caller who wants a
+/// boxed codec can still use `Pump<Box<dyn Codec>>`, without forcing
+/// `alloc` on everyone else.
 pub struct Pump<C> {
     codec: C,
     done: bool,
@@ -175,9 +158,9 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         Self { codec, done: false }
     }
 
-    /// Reach the wrapped codec, e.g. to read state a `BoundaryAwareCodec`
-    /// call doesn't expose (a checksum, a digest) once the stream has
-    /// ended.
+    /// Access the wrapped codec, for example to read state it does
+    /// not expose through `BoundaryAwareCodec`, such as a checksum,
+    /// once the stream has ended.
     pub fn get_ref(&self) -> &C {
         &self.codec
     }
@@ -187,14 +170,14 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self.codec
     }
 
-    /// Unwrap the codec back out, discarding `Pump`'s lifecycle state.
+    /// Unwrap the codec, discarding `Pump`'s lifecycle state.
     pub fn into_inner(self) -> C {
         self.codec
     }
 
-    /// Lets a caller like `shared_io::boundary_aware_pump_read` short-circuit to a
-    /// no-op once the stream has ended, instead of re-entering
-    /// `transfer_from`/`finish_to` on every repeated call past EOF.
+    /// Tell a caller such as `shared_io::boundary_aware_pump_read`
+    /// that the stream has ended, so it can skip
+    /// `transfer_from`/`finish_to` on repeated calls past EOF.
     pub(crate) fn is_done(&self) -> bool {
         self.done
     }
@@ -222,24 +205,17 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 
     /// Drive the codec by repeatedly pulling chunks from `input` and
     /// pushing processed bytes into `output`, until the codec reaches
-    /// its stream end or either endpoint has no more room/data to
-    /// offer.
+    /// its stream end or either endpoint runs out of room or data.
     ///
-    /// Each loop iteration is one [`Pump::transfer_step`] call; this
-    /// just accumulates its `consumed`/`written` counts and keeps
-    /// looping past [`PumpStepEnd::Progressed`].
+    /// Each loop iteration runs one [`Pump::transfer_step`] call and
+    /// accumulates its counts.
     ///
-    /// Returns once one of three things happens: the source is
-    /// exhausted (`PumpEnd::SourceExhausted`), the sink has no more
-    /// spare space (`PumpEnd::SinkExhausted`), or the codec itself
-    /// signals the end of the stream (`PumpEnd::End`). A call
-    /// that moves zero bytes on both sides without ending the stream
-    /// is a stall — the sink offered an empty (but `Some`) slice and
-    /// the codec couldn't do anything with it — and is reported as
-    /// `DriveError::NoProgress`, the same as a codec error, both of
-    /// which abort the loop without committing anything to the sink;
-    /// its uncommitted `spare` is simply left for the next caller to
-    /// re-request.
+    /// Returns when one of three things happens: the source is
+    /// exhausted, the sink has no more spare space, or the codec
+    /// signals the end of the stream. A call that moves zero bytes on
+    /// both sides without ending the stream is a stall, reported as
+    /// `DriveError::NoProgress`. Like a codec error, it aborts the
+    /// loop without committing anything to the sink.
     pub(crate) fn transfer_from<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
@@ -248,9 +224,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         let mut consumed = 0;
         let mut written = 0;
         loop {
-            // Invariant at top of loop: `consumed`/`written` are the
-            // committed totals from prior iterations only (this
-            // iteration hasn't moved anything yet).
+            // `consumed`/`written` hold only totals from prior
+            // iterations here.
             let step = self.transfer_step(input, output)?;
             consumed += step.consumed;
             written += step.written;
@@ -268,27 +243,24 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
-    /// Attempt exactly one [`Pump::latched_step`] between `input` and
+    /// Run exactly one [`Pump::latched_step`] between `input` and
     /// `output`: pull at most one chunk from `input`, hand it to the
-    /// codec along with one spare slice from `output`, and feed the
-    /// result back (`input.consume`, `output.commit`) — then return,
-    /// without looping back for more input the way
-    /// [`Pump::transfer_from`] does.
+    /// codec with one spare slice from `output`, and commit the
+    /// result. Unlike [`Pump::transfer_from`], it does not loop back
+    /// for more input.
     ///
-    /// This is the single-step primitive `transfer_from` loops on, and
-    /// is also driven directly by
-    /// [`crate::sources_and_sinks::shared_io::boundary_aware_pump_read`], so a
-    /// `Read::read` call returns as soon as the wrapped source's own
-    /// read produced anything, instead of coalescing multiple source
-    /// reads into one call. That's the interactive-application case
-    /// this exists for: a handler downstream of the `Read` should see
-    /// each unit of input as soon as it arrives, not only once enough
-    /// of them have piled up to fill some buffer it can't see into.
+    /// `transfer_from` loops on this primitive. It is also driven
+    /// directly by
+    /// [`crate::sources_and_sinks::shared_io::boundary_aware_pump_read`],
+    /// so a `Read::read` call returns as soon as the source produced
+    /// anything, instead of coalescing several source reads into one
+    /// call — useful for an interactive caller that wants to see each
+    /// unit of input as soon as it arrives.
     ///
-    /// Same stall/error handling as `transfer_from`'s loop body: a call
-    /// that moves zero bytes on both sides without ending the stream is
-    /// `DriveError::NoProgress`; a codec error still commits whatever
-    /// progress it validly reported before returning it.
+    /// Same stall and error handling as `transfer_from`: a call that
+    /// moves zero bytes on both sides without ending the stream is
+    /// `DriveError::NoProgress`. A codec error still commits whatever
+    /// progress it validly reported.
     pub(crate) fn transfer_step<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
@@ -308,13 +280,10 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 end: PumpStepEnd::SinkExhausted,
             });
         };
-        // A call may make progress with an empty `spare` (e.g. a
-        // codec that only ever consumes input, never writing
-        // anything), so instead of rejecting an empty slice up
-        // front, progress is judged as part of the call's own
-        // result, right alongside the error case: zero bytes moved
-        // on both sides, without ending the stream, means this
-        // pair genuinely can't advance.
+        // A call may still progress with an empty `spare` (e.g. a
+        // codec that only consumes input). So an empty slice is not
+        // rejected up front — zero bytes moved on both sides without
+        // ending the stream is what marks a genuine stall.
         let progress = match self.latched_step(chunk, spare) {
             Ok(progress) => progress,
             Err(error) => {
@@ -352,10 +321,9 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         if moved.consumed == 0 && moved.written == 0 && !boundary {
             return Err(DriveError::NoProgress);
         }
-        // `moved.consumed` may be less than `chunk.len()` (output ran
-        // out first); the unconsumed remainder isn't lost — it
-        // reappears (overlapping this chunk) on the next
-        // `input.chunk()` call.
+        // `moved.consumed` may be less than `chunk.len()` if output
+        // ran out first. The unconsumed remainder is not lost: it
+        // reappears on the next `input.chunk()` call.
         if moved.consumed > 0 {
             input.consume(moved.consumed);
         }
@@ -374,16 +342,14 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     }
 
     /// Drain the codec's trailing output by repeatedly calling
-    /// [`Pump::finish_or_sync_flush_step`] against spare space taken
-    /// from `output`, until the codec reports `Done`.
+    /// [`Pump::finish_or_sync_flush_step`] against spare space from
+    /// `output`, until the codec reports `Done`.
     ///
-    /// This is the finalizing counterpart to `transfer_from`: it is
-    /// called once the source is exhausted, to flush whatever bytes
-    /// the codec still owes (e.g. block padding, trailers) with no
-    /// further input. It shares its loop with `sync_flush_to` via
+    /// Call this once the source is exhausted, to flush whatever
+    /// bytes the codec still owes (e.g. padding, a trailer). It
+    /// shares its loop with `sync_flush_to` via
     /// `drain_to(output, DrainOp::Finish)`, which selects `finish`
-    /// (permanently ends the stream) over `sync_flush` (may be called
-    /// again later).
+    /// (ends the stream for good) over `sync_flush` (resumable).
     pub(crate) fn finish_to<O: Sink>(
         &mut self,
         output: &mut O,
@@ -398,30 +364,23 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         self.drain_to(output, DrainOp::SyncFlush)
     }
 
-    /// Shared loop behind `finish_to`/`sync_flush_to`: repeatedly
-    /// obtain spare space from `output` and hand it to
+    /// Shared loop behind `finish_to`/`sync_flush_to`: repeatedly get
+    /// spare space from `output` and hand it to
     /// [`Pump::finish_or_sync_flush_step`], committing what was
     /// written, until the codec reports `Done`.
     ///
-    /// When `output.spare()` returns `None`, the sink has no room —
-    /// but rather than immediately reporting `SinkExhausted`, one more
-    /// `finish`/`flush` call is made against an empty slice (`&mut
-    /// []`) to ask the codec whether it was actually done regardless
-    /// (e.g. nothing left to write, or it errors/rejects the empty
-    /// buffer). If that call reports `Done`, the drain is genuinely
-    /// complete; otherwise it really is blocked on sink space, and
-    /// `SinkExhausted` is returned. This avoids conflating "sink is
-    /// full but the codec had nothing left anyway" with "sink is full
-    /// and blocking real progress".
+    /// When `output.spare()` returns `None`, the sink has no room.
+    /// One more call is made against an empty slice, to check whether
+    /// the codec was actually done regardless. If that reports
+    /// `Done`, the drain is complete; otherwise it really is blocked
+    /// on sink space, and `SinkExhausted` is returned. This tells "the
+    /// sink is full but the codec had nothing left" apart from "the
+    /// sink is full and blocking real progress".
     ///
-    /// A call that writes nothing and doesn't reach `Done` is a stall
-    /// (`DriveError::NoProgress`), judged as part of the call's own
-    /// result right alongside the error case, not by rejecting an
-    /// empty spare slice up front — so a codec that happens to have
-    /// nothing left to write against an empty buffer still completes
-    /// normally. Neither case commits anything to the sink before
-    /// propagating; the uncommitted `spare` is simply left for the
-    /// next caller to re-request.
+    /// A call that writes nothing and does not reach `Done` is a
+    /// stall (`DriveError::NoProgress`). Neither case commits
+    /// anything to the sink before propagating; the uncommitted
+    /// `spare` stays available for the next caller.
     fn drain_to<O: Sink>(
         &mut self,
         output: &mut O,
@@ -471,19 +430,15 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
-    /// Run one `finish`/`sync_flush` call against `output`, selecting
-    /// which by `op` — the `drain_to` loop's counterpart to
-    /// [`DrainOp::step`] dispatching to
-    /// `DrainCodec::finish`/`DrainCodec::sync_flush`, one layer up.
+    /// Run one `finish`/`sync_flush` call against `output`, chosen by
+    /// `op` — the `drain_to` loop's counterpart to [`DrainOp::step`].
     ///
-    /// `self.done` is only ever set by [`Pump::latched_step`] reaching
-    /// a genuine `BoundaryAwareProgress::Boundary`. `Pump` then pins that
-    /// signal forever across every method, without calling the raw
-    /// codec again. Reaching `DrainProgress::Done` here is governed by point 3
-    /// instead: this call is idempotent against repeats of itself, but
-    /// that doesn't license skipping `latched_step` or a call with the
-    /// other `op` afterward (point 5), so a `Done` from `self.codec` is
-    /// never latched into `self.done` — only reported.
+    /// `self.done` is set only by [`Pump::latched_step`] reaching a
+    /// genuine `BoundaryAwareProgress::Boundary`; once set, `Pump`
+    /// treats it as permanent. `DrainProgress::Done` from `self.codec`
+    /// is different: `finish`/`sync_flush` may still be called again
+    /// later, so `Done` is reported here but never latched into
+    /// `self.done`.
     fn finish_or_sync_flush_step(
         &mut self,
         output: &mut [MaybeUninit<u8>],
@@ -563,8 +518,8 @@ mod tests {
     }
 
     /// A `Sink` that always offers a zero-length slice and never
-    /// reports exhaustion — stands in for an endpoint a codec doesn't
-    /// actually need output room from.
+    /// reports exhaustion. Stands in for an endpoint that needs no
+    /// output room.
     struct NullSink;
 
     impl Sink for NullSink {
@@ -600,8 +555,8 @@ mod tests {
         }
     }
 
-    /// Consumes everything, writes nothing — e.g. a hash/checksum
-    /// pass with no output stream at all.
+    /// Consumes everything, writes nothing, like a checksum pass
+    /// with no output stream.
     struct DropEverything;
 
     impl DrainCodec for DropEverything {
@@ -792,12 +747,10 @@ mod tests {
         assert_eq!(moved.end, PumpDrainEnd::SinkExhausted);
         assert!(!filled.is_done());
 
-        // `finish_or_sync_flush_step` reaching `Done` is only point-3 self-idempotency,
-        // not the permanent pin caused by an in-band `End` — `latched_step`
-        // must still be free to run normally afterward (point 5), so
-        // `is_done()` stays false and
-        // the codec, not a synthetic `End`, answers the next
-        // `latched_step` call.
+        // Reaching `Done` here does not latch `self.done`; only an
+        // in-band `End` from `latched_step` does that. So
+        // `is_done()` stays false, and the codec — not a synthetic
+        // `End` — answers the next `latched_step` call.
         let mut done = Pump::new(Scripted {
             process: BoundaryAwareProgress::InputConsumed { written: 5 },
             drain: DrainProgress::Done { written: 2 },
