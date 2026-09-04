@@ -1,6 +1,7 @@
-//! Checks a codec's reported progress against the buffers it received.
-//! Converts the result into exact counts. [`Pump`](crate::stream::Pump)
-//! and [`Chain`](crate::Chain) share this module.
+//! Validates a codec's reported progress against the buffers it
+//! received. [`codec_step`] also converts the result into exact
+//! counts. [`Pump`](crate::stream::Pump) and [`Chain`](crate::Chain)
+//! share this module.
 
 use core::mem::MaybeUninit;
 
