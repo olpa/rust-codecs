@@ -88,18 +88,19 @@ pub(crate) enum PumpDrain {
     Done { written: usize },
 }
 
-/// A bufferless lifecycle wrapper around a codec.
+/// A bufferless lifecycle wrapper around a codec: processes input
+/// until the stream ends, then drains what's owed.
 ///
-/// Public so a third-party `Source`/`Sink` backend can build its own
-/// `Read`/`Write`-style wrapper on top of it, the way this crate's
-/// own `std_io`/`embedded_io` backends do. Drive it through
-/// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io);
-/// its own methods stay crate-private.
+/// Used by [`stream_to_stream`] and by I/O backend wrappers.
 ///
-/// `C` is generic rather than fixed to `BoundaryAwareCodec`, since a
+/// `Pump` is public only because third-party I/O backends are built
+/// on top of
+/// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io),
+/// whose functions must name `Pump` in their signatures.
+///
+/// `C` is generic rather than fixed to [`BoundaryAwareCodec`], since a
 /// trait is not a sized type a field can hold. A caller who wants a
-/// boxed codec can still use `Pump<Box<dyn Codec>>`, without forcing
-/// `alloc` on everyone else.
+/// boxed codec can still use `Pump<Box<dyn Codec>>`.
 pub struct Pump<C> {
     codec: C,
     done: bool,
