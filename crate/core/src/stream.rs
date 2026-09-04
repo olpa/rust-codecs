@@ -38,16 +38,19 @@ where
     let mut pump = Pump::new(codec);
     let mut totals = TransferCounts::default();
 
-    let moved = pump.transfer_from(input, output)?;
-    totals.consumed += moved.consumed;
-    totals.written += moved.written;
-    match moved.end {
-        PumpEnd::End => {
+    match pump.transfer_from(input, output)? {
+        PumpTransfer::End(moved) => {
+            totals.consumed += moved.consumed;
+            totals.written += moved.written;
             output.finish().map_err(DriveError::Sink)?;
             return Ok(totals);
         }
-        PumpEnd::SinkExhausted => return Err(DriveError::SinkExhausted),
-        PumpEnd::SourceExhausted => {}
+        PumpTransfer::SinkExhausted(_) => return Err(DriveError::SinkExhausted),
+        PumpTransfer::SourceExhausted(moved) => {
+            totals.consumed += moved.consumed;
+            totals.written += moved.written;
+        }
+        PumpTransfer::Progressed(_) => unreachable!("transfer_from consumes progress internally"),
     }
 
     let drained = pump.finish_to(output).map_err(|error| match error {
@@ -57,79 +60,32 @@ where
         DriveError::SinkExhausted => DriveError::SinkExhausted,
         DriveError::NoProgress => DriveError::NoProgress,
     })?;
-    totals.written += drained.written;
-    match drained.end {
-        PumpDrainEnd::Done => {
+    match drained {
+        PumpDrain::Done { written } => {
+            totals.written += written;
             output.finish().map_err(DriveError::Sink)?;
             Ok(totals)
         }
-        PumpDrainEnd::SinkExhausted => Err(DriveError::SinkExhausted),
+        PumpDrain::SinkExhausted { .. } => Err(DriveError::SinkExhausted),
     }
 }
 
-/// Result of one whole [`Pump::transfer_from`] run: the accumulated
-/// `consumed`/`written` totals, and how it stopped.
+/// Result of one pump transfer, with the counts moved before it stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PumpTransfer {
-    pub(crate) consumed: usize,
-    pub(crate) written: usize,
-    pub(crate) end: PumpEnd,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PumpEnd {
-    SourceExhausted,
-    SinkExhausted,
-    End,
-}
-
-/// Result of one [`Pump::transfer_step`] call, the single-step
-/// counterpart to [`PumpTransfer`]. Its [`PumpStepEnd`] has one more
-/// case than [`PumpEnd`]: [`PumpStepEnd::Progressed`], which
-/// `transfer_from` consumes internally and never returns as a
-/// [`PumpEnd`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PumpStep {
-    pub(crate) consumed: usize,
-    pub(crate) written: usize,
-    pub(crate) end: PumpStepEnd,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PumpStepEnd {
-    SourceExhausted,
-    SinkExhausted,
+pub(crate) enum PumpTransfer {
+    SourceExhausted(TransferCounts),
+    SinkExhausted(TransferCounts),
     /// The step completed normally, without exhausting `input` or
     /// `output`. More may be available from either on the next step.
-    Progressed,
-    End,
+    Progressed(TransferCounts),
+    End(TransferCounts),
 }
 
+/// Result of one pump drain, with the bytes written before it stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PumpDrainEnd {
-    SinkExhausted,
-    Done,
-}
-
-/// Result of one whole `drain_to` run (behind [`Pump::finish_to`]/
-/// [`Pump::sync_flush_to`]), the [`PumpTransfer`] counterpart for the
-/// drain side. `written` accumulates across every call `drain_to`
-/// made, not just the last one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PumpDrainTransfer {
-    pub(crate) written: usize,
-    pub(crate) end: PumpDrainEnd,
-}
-
-/// Exact progress of one validated `finish`/`sync_flush` call, as
-/// reported by [`Pump::finish_or_sync_flush_step`] — the single-call
-/// counterpart to [`PumpDrainTransfer`]. Here `output` is always one
-/// [`Sink::spare`] slice, so a filled buffer and an exhausted sink
-/// are the same event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PumpDrainStep {
-    pub(crate) written: usize,
-    pub(crate) end: PumpDrainEnd,
+pub(crate) enum PumpDrain {
+    SinkExhausted { written: usize },
+    Done { written: usize },
 }
 
 /// A bufferless lifecycle wrapper around a codec.
@@ -223,19 +179,23 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             // `consumed`/`written` hold only totals from prior
             // iterations here.
             let step = self.transfer_step(input, output)?;
-            consumed += step.consumed;
-            written += step.written;
-            let end = match step.end {
-                PumpStepEnd::SourceExhausted => PumpEnd::SourceExhausted,
-                PumpStepEnd::SinkExhausted => PumpEnd::SinkExhausted,
-                PumpStepEnd::End => PumpEnd::End,
-                PumpStepEnd::Progressed => continue,
+            let total = |moved: TransferCounts| TransferCounts {
+                consumed: consumed + moved.consumed,
+                written: written + moved.written,
             };
-            return Ok(PumpTransfer {
-                consumed,
-                written,
-                end,
-            });
+            match step {
+                PumpTransfer::Progressed(moved) => {
+                    consumed += moved.consumed;
+                    written += moved.written;
+                }
+                PumpTransfer::SourceExhausted(moved) => {
+                    return Ok(PumpTransfer::SourceExhausted(total(moved)));
+                }
+                PumpTransfer::SinkExhausted(moved) => {
+                    return Ok(PumpTransfer::SinkExhausted(total(moved)));
+                }
+                PumpTransfer::End(moved) => return Ok(PumpTransfer::End(total(moved))),
+            }
         }
     }
 
@@ -261,20 +221,12 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self,
         input: &mut I,
         output: &mut O,
-    ) -> Result<PumpStep, DriveError<I::Error, O::Error>> {
+    ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
         let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
-            return Ok(PumpStep {
-                consumed: 0,
-                written: 0,
-                end: PumpStepEnd::SourceExhausted,
-            });
+            return Ok(PumpTransfer::SourceExhausted(TransferCounts::default()));
         };
         let Some(spare) = output.spare().map_err(DriveError::Sink)? else {
-            return Ok(PumpStep {
-                consumed: 0,
-                written: 0,
-                end: PumpStepEnd::SinkExhausted,
-            });
+            return Ok(PumpTransfer::SinkExhausted(TransferCounts::default()));
         };
         // A call may still progress with an empty `spare` (e.g. a
         // codec that only consumes input). So an empty slice is not
@@ -326,14 +278,10 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         if moved.written > 0 {
             output.commit(moved.written).map_err(DriveError::Sink)?;
         }
-        Ok(PumpStep {
-            consumed: moved.consumed,
-            written: moved.written,
-            end: if boundary {
-                PumpStepEnd::End
-            } else {
-                PumpStepEnd::Progressed
-            },
+        Ok(if boundary {
+            PumpTransfer::End(moved)
+        } else {
+            PumpTransfer::Progressed(moved)
         })
     }
 
@@ -349,14 +297,14 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     pub(crate) fn finish_to<O: Sink>(
         &mut self,
         output: &mut O,
-    ) -> Result<PumpDrainTransfer, DriveError<core::convert::Infallible, O::Error>> {
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         self.drain_to(output, DrainOp::Finish)
     }
 
     pub(crate) fn sync_flush_to<O: Sink>(
         &mut self,
         output: &mut O,
-    ) -> Result<PumpDrainTransfer, DriveError<core::convert::Infallible, O::Error>> {
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         self.drain_to(output, DrainOp::SyncFlush)
     }
 
@@ -381,13 +329,16 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self,
         output: &mut O,
         op: DrainOp,
-    ) -> Result<PumpDrainTransfer, DriveError<core::convert::Infallible, O::Error>> {
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         let mut written = 0;
         loop {
             let moved = match output.spare().map_err(DriveError::Sink)? {
                 Some(spare) => match self.finish_or_sync_flush_step(spare, op) {
-                    Ok(moved) if moved.written > 0 || moved.end == PumpDrainEnd::Done => Ok(moved),
-                    Ok(_) => return Err(DriveError::NoProgress),
+                    Ok(PumpDrain::Done { written }) => Ok(PumpDrain::Done { written }),
+                    Ok(PumpDrain::SinkExhausted { written }) if written > 0 => {
+                        Ok(PumpDrain::SinkExhausted { written })
+                    }
+                    Ok(PumpDrain::SinkExhausted { .. }) => return Err(DriveError::NoProgress),
                     Err(error) => {
                         let error = error
                             .validated(0, spare.len())
@@ -402,26 +353,23 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                     let moved = self
                         .finish_or_sync_flush_step(&mut [], op)
                         .map_err(DriveError::Codec)?;
-                    return Ok(PumpDrainTransfer {
-                        written,
-                        end: if moved.end == PumpDrainEnd::Done {
-                            PumpDrainEnd::Done
-                        } else {
-                            PumpDrainEnd::SinkExhausted
-                        },
+                    return Ok(match moved {
+                        PumpDrain::Done { .. } => PumpDrain::Done { written },
+                        PumpDrain::SinkExhausted { .. } => PumpDrain::SinkExhausted { written },
                     });
                 }
             }
             .map_err(DriveError::Codec)?;
-            if moved.written > 0 {
-                output.commit(moved.written).map_err(DriveError::Sink)?;
+            let (step_written, done) = match moved {
+                PumpDrain::SinkExhausted { written } => (written, false),
+                PumpDrain::Done { written } => (written, true),
+            };
+            if step_written > 0 {
+                output.commit(step_written).map_err(DriveError::Sink)?;
             }
-            written += moved.written;
-            if moved.end == PumpDrainEnd::Done {
-                return Ok(PumpDrainTransfer {
-                    written,
-                    end: PumpDrainEnd::Done,
-                });
+            written += step_written;
+            if done {
+                return Ok(PumpDrain::Done { written });
             }
         }
     }
@@ -439,22 +387,15 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self,
         output: &mut [MaybeUninit<u8>],
         op: DrainOp,
-    ) -> Result<PumpDrainStep, Error> {
+    ) -> Result<PumpDrain, Error> {
         if self.done {
-            return Ok(PumpDrainStep {
-                written: 0,
-                end: PumpDrainEnd::Done,
-            });
+            return Ok(PumpDrain::Done { written: 0 });
         }
         Ok(match op.step(&mut self.codec, output)? {
-            DrainProgress::OutputFilled => PumpDrainStep {
+            DrainProgress::OutputFilled => PumpDrain::SinkExhausted {
                 written: output.len(),
-                end: PumpDrainEnd::SinkExhausted,
             },
-            DrainProgress::Done { written } => PumpDrainStep {
-                written,
-                end: PumpDrainEnd::Done,
-            },
+            DrainProgress::Done { written } => PumpDrain::Done { written },
         })
     }
 }
@@ -463,11 +404,11 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 mod tests {
     use core::mem::MaybeUninit;
 
-    use super::{Pump, PumpDrainEnd, PumpEnd};
+    use super::{Pump, PumpDrain, PumpTransfer};
     use crate::step::DrainOp;
     use crate::{
         BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError,
-        Error, ErrorKind, Progress, Sink, Source,
+        Error, ErrorKind, Progress, Sink, Source, TransferCounts,
     };
 
     struct Scripted {
@@ -580,9 +521,13 @@ mod tests {
         let mut output = NullSink;
         let mut pump = Pump::new(DropEverything);
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
-        assert_eq!(moved.consumed, 6);
-        assert_eq!(moved.written, 0);
-        assert_eq!(moved.end, PumpEnd::SourceExhausted);
+        assert_eq!(
+            moved,
+            PumpTransfer::SourceExhausted(TransferCounts {
+                consumed: 6,
+                written: 0,
+            })
+        );
     }
 
     struct FailsAfterProgress;
@@ -665,9 +610,13 @@ mod tests {
         let boxed: alloc::boxed::Box<dyn Codec> = alloc::boxed::Box::new(DropEverything);
         let mut pump: Pump<alloc::boxed::Box<dyn Codec>> = Pump::new(boxed);
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
-        assert_eq!(moved.consumed, 6);
-        assert_eq!(moved.written, 0);
-        assert_eq!(moved.end, PumpEnd::SourceExhausted);
+        assert_eq!(
+            moved,
+            PumpTransfer::SourceExhausted(TransferCounts {
+                consumed: 6,
+                written: 0,
+            })
+        );
     }
 
     #[test]
@@ -713,10 +662,8 @@ mod tests {
             .unwrap();
         assert!(pump.is_done());
         assert_eq!(
-            pump.finish_or_sync_flush_step(&mut [], DrainOp::Finish)
-                .unwrap()
-                .end,
-            PumpDrainEnd::Done
+            pump.finish_or_sync_flush_step(&mut [], DrainOp::Finish),
+            Ok(PumpDrain::Done { written: 0 })
         );
         let repeated = pump
             .latched_step(b"trailing", &mut [MaybeUninit::uninit(); 4])
@@ -739,8 +686,7 @@ mod tests {
         let moved = filled
             .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
             .unwrap();
-        assert_eq!(moved.written, 3);
-        assert_eq!(moved.end, PumpDrainEnd::SinkExhausted);
+        assert_eq!(moved, PumpDrain::SinkExhausted { written: 3 });
         assert!(!filled.is_done());
 
         // Reaching `Done` here does not latch `self.done`; only an
@@ -754,8 +700,7 @@ mod tests {
         let moved = done
             .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
             .unwrap();
-        assert_eq!(moved.written, 2);
-        assert_eq!(moved.end, PumpDrainEnd::Done);
+        assert_eq!(moved, PumpDrain::Done { written: 2 });
         assert!(!done.is_done());
         let resumed = done
             .latched_step(b"abc", &mut [MaybeUninit::uninit(); 8])
@@ -772,8 +717,7 @@ mod tests {
         let moved = pump
             .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::SyncFlush)
             .unwrap();
-        assert_eq!(moved.written, 2);
-        assert_eq!(moved.end, PumpDrainEnd::Done);
+        assert_eq!(moved, PumpDrain::Done { written: 2 });
         assert!(!pump.is_done());
     }
 
@@ -804,9 +748,13 @@ mod tests {
             drain: DrainProgress::Done { written: 0 },
         });
 
-        let moved = pump.transfer_step(&mut input, &mut output).unwrap();
-        assert_eq!(moved.consumed, 3);
-        assert_eq!(moved.written, 2);
+        assert_eq!(
+            pump.transfer_step(&mut input, &mut output).unwrap(),
+            PumpTransfer::Progressed(TransferCounts {
+                consumed: 3,
+                written: 2,
+            })
+        );
     }
 
     #[test]
@@ -824,9 +772,13 @@ mod tests {
             drain: DrainProgress::Done { written: 0 },
         });
 
-        let moved = pump.transfer_step(&mut input, &mut output).unwrap();
-        assert_eq!(moved.consumed, 2);
-        assert_eq!(moved.written, 5);
+        assert_eq!(
+            pump.transfer_step(&mut input, &mut output).unwrap(),
+            PumpTransfer::Progressed(TransferCounts {
+                consumed: 2,
+                written: 5,
+            })
+        );
     }
 
     #[test]
@@ -847,10 +799,13 @@ mod tests {
             drain: DrainProgress::Done { written: 0 },
         });
 
-        let moved = pump.transfer_step(&mut input, &mut output).unwrap();
-        assert_eq!(moved.consumed, 2);
-        assert_eq!(moved.written, 4);
-        assert_eq!(moved.end, super::PumpStepEnd::End);
+        assert_eq!(
+            pump.transfer_step(&mut input, &mut output).unwrap(),
+            PumpTransfer::End(TransferCounts {
+                consumed: 2,
+                written: 4,
+            })
+        );
     }
 
     #[test]

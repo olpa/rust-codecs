@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSink;
-use crate::stream::{Pump, PumpDrainEnd, PumpStepEnd};
+use crate::stream::{Pump, PumpDrain, PumpTransfer};
 use crate::{BoundaryAwareCodec, DriveError, Source};
 
 /// Drive `pump` against `input`, filling `buf` with transformed bytes —
@@ -29,11 +29,12 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     let mut output = SliceSink::new(buf);
     let source_exhausted = loop {
         let step = pump.transfer_step(input, &mut output)?;
-        if step.end == PumpStepEnd::SourceExhausted {
-            break true;
-        }
-        if step.end != PumpStepEnd::Progressed || output.written() > 0 {
-            break false;
+        match step {
+            PumpTransfer::SourceExhausted(_) => break true,
+            PumpTransfer::Progressed(_) if output.written() == 0 => {}
+            PumpTransfer::Progressed(_)
+            | PumpTransfer::SinkExhausted(_)
+            | PumpTransfer::End(_) => break false,
         }
     };
     if source_exhausted {
@@ -42,8 +43,8 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
         debug_assert!(matches!(
-            drained.end,
-            PumpDrainEnd::Done | PumpDrainEnd::SinkExhausted
+            drained,
+            PumpDrain::Done { .. } | PumpDrain::SinkExhausted { .. }
         ));
     }
     Ok(output.written())
