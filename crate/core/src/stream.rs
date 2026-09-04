@@ -19,14 +19,7 @@ use core::mem::MaybeUninit;
 use crate::step::{
     boundary_aware_step, BoundaryAwareStep, BoundaryAwareStepEnd, DrainOp, DrainStop,
 };
-use crate::{BoundaryAwareCodec, Error, Sink, Source};
-
-/// How much moved through [`stream_to_stream`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Totals {
-    pub consumed: usize,
-    pub written: usize,
-}
+use crate::{BoundaryAwareCodec, Error, Sink, Source, TransferCounts};
 
 /// Why [`stream_to_stream`] stopped before the codec finished its stream.
 #[derive(Debug)]
@@ -46,17 +39,14 @@ pub fn stream_to_stream<I, O, C>(
     input: &mut I,
     codec: C,
     output: &mut O,
-) -> Result<Totals, DriveError<I::Error, O::Error>>
+) -> Result<TransferCounts, DriveError<I::Error, O::Error>>
 where
     I: Source,
     O: Sink,
     C: BoundaryAwareCodec,
 {
     let mut pump = Pump::new(codec);
-    let mut totals = Totals {
-        consumed: 0,
-        written: 0,
-    };
+    let mut totals = TransferCounts::default();
 
     let moved = pump.transfer_from(input, output)?;
     totals.consumed += moved.consumed;

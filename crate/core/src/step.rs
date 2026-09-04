@@ -4,24 +4,10 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, Progress};
-
-/// Why one step of an ordinary [`Codec::process`] call stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodecStepEnd {
-    /// The call consumed the complete input window.
-    InputExhausted,
-    /// The call filled the complete output window.
-    OutputExhausted,
-}
-
-/// Exact progress made by one validated [`Codec::process`] call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CodecStep {
-    pub(crate) consumed: usize,
-    pub(crate) written: usize,
-    pub(crate) end: CodecStepEnd,
-}
+use crate::{
+    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, Progress,
+    TransferCounts,
+};
 
 /// Run one step of an ordinary [`Codec`]. Validate the result against
 /// the buffers it received.
@@ -29,7 +15,7 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
     codec: &mut C,
     input: &[u8],
     output: &mut [MaybeUninit<u8>],
-) -> Result<CodecStep, Error> {
+) -> Result<TransferCounts, Error> {
     let input_len = input.len();
     let output_len = output.len();
     let outcome = codec
@@ -37,15 +23,13 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
         .validated(input_len, output_len)?;
 
     Ok(match outcome {
-        Progress::InputConsumed { written } => CodecStep {
+        Progress::InputConsumed { written } => TransferCounts {
             consumed: input_len,
             written,
-            end: CodecStepEnd::InputExhausted,
         },
-        Progress::OutputFilled { consumed } => CodecStep {
+        Progress::OutputFilled { consumed } => TransferCounts {
             consumed,
             written: output_len,
-            end: CodecStepEnd::OutputExhausted,
         },
     })
 }

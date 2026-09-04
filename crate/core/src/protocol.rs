@@ -272,6 +272,13 @@ impl DrainProgress {
     }
 }
 
+/// Byte counts produced by a codec call or accumulated across a transfer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferCounts {
+    pub consumed: usize,
+    pub written: usize,
+}
+
 // ----
 // Boxing support
 // ----

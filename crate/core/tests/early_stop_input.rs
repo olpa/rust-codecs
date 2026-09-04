@@ -158,7 +158,7 @@ fn drives_three_segments_across_two_early_stops() {
 /// as a `"span"` token and the quote itself as a `"quote"` token. Once
 /// inside a quoted span, `QuoteEnd` takes over via `stream_to_stream`,
 /// copying bytes into a `Vec` sink until the closing quote, whose byte
-/// count consumed is read back off `Totals` to advance the outer
+/// count consumed is read back off `TransferCounts` to advance the outer
 /// scan — the closing quote itself is then asserted and pushed the
 /// same way as the opening one.
 #[test]

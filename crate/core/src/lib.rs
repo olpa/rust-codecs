@@ -210,7 +210,7 @@ extern crate alloc;
 mod protocol;
 pub use protocol::{
     BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, ErrorKind,
-    Progress, Sink, Source,
+    Progress, Sink, Source, TransferCounts,
 };
 
 mod uninit;
@@ -218,7 +218,7 @@ mod uninit;
 mod step;
 
 mod stream;
-pub use stream::{stream_to_stream, DriveError, Pump, Totals};
+pub use stream::{stream_to_stream, DriveError, Pump};
 
 mod chain;
 pub use chain::Chain;
