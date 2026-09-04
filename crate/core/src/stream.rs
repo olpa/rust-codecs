@@ -9,17 +9,14 @@
 //! [`BoundaryAwareCodec::process`](crate::BoundaryAwareCodec::process)
 //! reports only the counts not already implied by its outcome: all
 //! input was consumed, all output was filled, or the stream ended.
-//! [`crate::step::boundary_aware_step`] validates that report and
-//! normalizes it into exact progress on both sides — the trust
-//! boundary every `Pump::latched_step` call and [`stream_to_stream`] call
-//! goes through.
+//! [`Pump::latched_step`] validates that report, and
+//! [`Pump::transfer_step`] normalizes it into exact progress on both
+//! sides.
 
 use core::mem::MaybeUninit;
 
-use crate::step::{
-    boundary_aware_step, BoundaryAwareStep, BoundaryAwareStepEnd, DrainOp, DrainStop,
-};
-use crate::{BoundaryAwareCodec, Error, Sink, Source, TransferCounts};
+use crate::step::{DrainOp, DrainStop};
+use crate::{BoundaryAwareCodec, BoundaryAwareProgress, Error, Sink, Source, TransferCounts};
 
 /// Why [`stream_to_stream`] stopped before the codec finished its stream.
 #[derive(Debug)]
@@ -205,19 +202,21 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
-    ) -> Result<BoundaryAwareStep, Error> {
+    ) -> Result<BoundaryAwareProgress, Error> {
         if self.done {
-            return Ok(BoundaryAwareStep {
+            return Ok(BoundaryAwareProgress::Boundary {
                 consumed: 0,
                 written: 0,
-                end: BoundaryAwareStepEnd::Boundary,
             });
         }
-        let moved = boundary_aware_step(&mut self.codec, input, output)?;
-        if moved.end == BoundaryAwareStepEnd::Boundary {
+        let progress = self
+            .codec
+            .process(input, output)?
+            .validated(input.len(), output.len())?;
+        if matches!(progress, BoundaryAwareProgress::Boundary { .. }) {
             self.done = true;
         }
-        Ok(moved)
+        Ok(progress)
     }
 
     /// Drive the codec by repeatedly pulling chunks from `input` and
@@ -315,15 +314,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         // result, right alongside the error case: zero bytes moved
         // on both sides, without ending the stream, means this
         // pair genuinely can't advance.
-        let moved = match self.latched_step(chunk, spare) {
-            Ok(moved)
-                if moved.consumed > 0
-                    || moved.written > 0
-                    || moved.end == BoundaryAwareStepEnd::Boundary =>
-            {
-                moved
-            }
-            Ok(_) => return Err(DriveError::NoProgress),
+        let progress = match self.latched_step(chunk, spare) {
+            Ok(progress) => progress,
             Err(error) => {
                 let error = error
                     .validated(chunk.len(), spare.len())
@@ -337,6 +329,28 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 return Err(DriveError::Codec(error));
             }
         };
+        let (moved, boundary) = match progress {
+            BoundaryAwareProgress::InputConsumed { written } => (
+                TransferCounts {
+                    consumed: chunk.len(),
+                    written,
+                },
+                false,
+            ),
+            BoundaryAwareProgress::OutputFilled { consumed } => (
+                TransferCounts {
+                    consumed,
+                    written: spare.len(),
+                },
+                false,
+            ),
+            BoundaryAwareProgress::Boundary { consumed, written } => {
+                (TransferCounts { consumed, written }, true)
+            }
+        };
+        if moved.consumed == 0 && moved.written == 0 && !boundary {
+            return Err(DriveError::NoProgress);
+        }
         // `moved.consumed` may be less than `chunk.len()` (output ran
         // out first); the unconsumed remainder isn't lost — it
         // reappears (overlapping this chunk) on the next
@@ -350,7 +364,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         Ok(PumpStep {
             consumed: moved.consumed,
             written: moved.written,
-            end: if moved.end == BoundaryAwareStepEnd::Boundary {
+            end: if boundary {
                 PumpStepEnd::End
             } else {
                 PumpStepEnd::Progressed
@@ -495,11 +509,11 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 mod tests {
     use core::mem::MaybeUninit;
 
-    use super::{BoundaryAwareStep, BoundaryAwareStepEnd, Pump, PumpDrainEnd, PumpEnd};
-    use crate::step::{boundary_aware_step, DrainOp};
+    use super::{Pump, PumpDrainEnd, PumpEnd};
+    use crate::step::DrainOp;
     use crate::{
-        BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, DriveError, Error,
-        ErrorKind, Progress, Sink, Source,
+        BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError,
+        Error, ErrorKind, Progress, Sink, Source,
     };
 
     struct Scripted {
@@ -718,17 +732,18 @@ mod tests {
     }
 
     #[test]
-    fn process_uses_the_shared_step() {
+    fn latched_step_validates_progress() {
         let mut pump = Pump::new(Scripted {
             process: BoundaryAwareProgress::OutputFilled { consumed: 2 },
             drain: DrainProgress::Done { written: 0 },
         });
-        let moved = pump
+        let progress = pump
             .latched_step(b"abc", &mut [MaybeUninit::uninit(); 4])
             .unwrap();
-        assert_eq!(moved.consumed, 2);
-        assert_eq!(moved.written, 4);
-        assert_eq!(moved.end, BoundaryAwareStepEnd::OutputExhausted);
+        assert_eq!(
+            progress,
+            BoundaryAwareProgress::OutputFilled { consumed: 2 }
+        );
     }
 
     #[test]
@@ -752,9 +767,13 @@ mod tests {
         let repeated = pump
             .latched_step(b"trailing", &mut [MaybeUninit::uninit(); 4])
             .unwrap();
-        assert_eq!(repeated.consumed, 0);
-        assert_eq!(repeated.written, 0);
-        assert_eq!(repeated.end, BoundaryAwareStepEnd::Boundary);
+        assert_eq!(
+            repeated,
+            BoundaryAwareProgress::Boundary {
+                consumed: 0,
+                written: 0
+            }
+        );
     }
 
     #[test]
@@ -789,7 +808,10 @@ mod tests {
         let resumed = done
             .latched_step(b"abc", &mut [MaybeUninit::uninit(); 8])
             .unwrap();
-        assert_eq!(resumed.written, 5);
+        assert_eq!(
+            resumed,
+            BoundaryAwareProgress::InputConsumed { written: 5 }
+        );
     }
 
     #[test]
@@ -818,92 +840,86 @@ mod tests {
         );
     }
 
-    struct Reports(BoundaryAwareProgress);
-
-    impl DrainCodec for Reports {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
-        }
-    }
-
-    impl BoundaryAwareCodec for Reports {
-        fn process(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<BoundaryAwareProgress, Error> {
-            Ok(self.0)
-        }
-    }
-
     #[test]
     fn input_exhaustion_implies_all_input_was_consumed() {
-        let mut codec = Reports(BoundaryAwareProgress::InputConsumed { written: 2 });
-        let mut output = [MaybeUninit::uninit(); 5];
+        let mut input = SliceSource {
+            bytes: b"abc",
+            pos: 0,
+        };
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(Scripted {
+            process: BoundaryAwareProgress::InputConsumed { written: 2 },
+            drain: DrainProgress::Done { written: 0 },
+        });
 
-        assert_eq!(
-            boundary_aware_step(&mut codec, b"abc", &mut output),
-            Ok(BoundaryAwareStep {
-                consumed: 3,
-                written: 2,
-                end: BoundaryAwareStepEnd::InputExhausted,
-            })
-        );
+        let moved = pump.transfer_step(&mut input, &mut output).unwrap();
+        assert_eq!(moved.consumed, 3);
+        assert_eq!(moved.written, 2);
     }
 
     #[test]
     fn output_exhaustion_implies_all_output_was_written() {
-        let mut codec = Reports(BoundaryAwareProgress::OutputFilled { consumed: 2 });
-        let mut output = [MaybeUninit::uninit(); 5];
+        let mut input = SliceSource {
+            bytes: b"abc",
+            pos: 0,
+        };
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 3,
+        };
+        let mut pump = Pump::new(Scripted {
+            process: BoundaryAwareProgress::OutputFilled { consumed: 2 },
+            drain: DrainProgress::Done { written: 0 },
+        });
 
-        assert_eq!(
-            boundary_aware_step(&mut codec, b"abc", &mut output),
-            Ok(BoundaryAwareStep {
-                consumed: 2,
-                written: 5,
-                end: BoundaryAwareStepEnd::OutputExhausted,
-            })
-        );
+        let moved = pump.transfer_step(&mut input, &mut output).unwrap();
+        assert_eq!(moved.consumed, 2);
+        assert_eq!(moved.written, 5);
     }
 
     #[test]
     fn stream_end_preserves_both_explicit_counts() {
-        let mut codec = Reports(BoundaryAwareProgress::Boundary {
-            consumed: 2,
-            written: 4,
-        });
-        let mut output = [MaybeUninit::uninit(); 5];
-
-        assert_eq!(
-            boundary_aware_step(&mut codec, b"abc", &mut output),
-            Ok(BoundaryAwareStep {
+        let mut input = SliceSource {
+            bytes: b"abc",
+            pos: 0,
+        };
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(Scripted {
+            process: BoundaryAwareProgress::Boundary {
                 consumed: 2,
                 written: 4,
-                end: BoundaryAwareStepEnd::Boundary
-            })
-        );
+            },
+            drain: DrainProgress::Done { written: 0 },
+        });
+
+        let moved = pump.transfer_step(&mut input, &mut output).unwrap();
+        assert_eq!(moved.consumed, 2);
+        assert_eq!(moved.written, 4);
+        assert_eq!(moved.end, super::PumpStepEnd::End);
     }
 
     #[test]
     fn degenerate_windows_remain_well_defined() {
-        let mut input_done = Reports(BoundaryAwareProgress::InputConsumed { written: 0 });
+        let input_done = BoundaryAwareProgress::InputConsumed { written: 0 }
+            .validated(0, 0)
+            .unwrap();
         assert_eq!(
-            boundary_aware_step(&mut input_done, b"", &mut []),
-            Ok(BoundaryAwareStep {
-                consumed: 0,
-                written: 0,
-                end: BoundaryAwareStepEnd::InputExhausted,
-            })
+            input_done,
+            BoundaryAwareProgress::InputConsumed { written: 0 }
         );
 
-        let mut output_done = Reports(BoundaryAwareProgress::OutputFilled { consumed: 0 });
+        let output_done = BoundaryAwareProgress::OutputFilled { consumed: 0 }
+            .validated(3, 0)
+            .unwrap();
         assert_eq!(
-            boundary_aware_step(&mut output_done, b"abc", &mut []),
-            Ok(BoundaryAwareStep {
-                consumed: 0,
-                written: 0,
-                end: BoundaryAwareStepEnd::OutputExhausted,
-            })
+            output_done,
+            BoundaryAwareProgress::OutputFilled { consumed: 0 }
         );
     }
 
@@ -911,24 +927,33 @@ mod tests {
     fn overclaims_are_rejected_at_the_shared_boundary() {
         let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
 
-        let mut input_done = Reports(BoundaryAwareProgress::InputConsumed { written: 6 });
-        assert_eq!(
-            boundary_aware_step(&mut input_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
-            Err(violation)
-        );
-
-        let mut output_done = Reports(BoundaryAwareProgress::OutputFilled { consumed: 4 });
-        assert_eq!(
-            boundary_aware_step(&mut output_done, b"abc", &mut [MaybeUninit::uninit(); 5]),
-            Err(violation)
-        );
-
-        let mut ended = Reports(BoundaryAwareProgress::Boundary {
-            consumed: 4,
-            written: 6,
+        let mut input_done = Pump::new(Scripted {
+            process: BoundaryAwareProgress::InputConsumed { written: 6 },
+            drain: DrainProgress::Done { written: 0 },
         });
         assert_eq!(
-            boundary_aware_step(&mut ended, b"abc", &mut [MaybeUninit::uninit(); 5]),
+            input_done.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Err(violation)
+        );
+
+        let mut output_done = Pump::new(Scripted {
+            process: BoundaryAwareProgress::OutputFilled { consumed: 4 },
+            drain: DrainProgress::Done { written: 0 },
+        });
+        assert_eq!(
+            output_done.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Err(violation)
+        );
+
+        let mut ended = Pump::new(Scripted {
+            process: BoundaryAwareProgress::Boundary {
+                consumed: 4,
+                written: 6,
+            },
+            drain: DrainProgress::Done { written: 0 },
+        });
+        assert_eq!(
+            ended.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(violation)
         );
     }
@@ -954,7 +979,7 @@ mod tests {
     #[test]
     fn codec_errors_are_preserved() {
         assert_eq!(
-            boundary_aware_step(&mut Fails, b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Pump::new(Fails).latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(Error::new(ErrorKind::CorruptStream, 1, 2))
         );
     }

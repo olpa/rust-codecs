@@ -4,10 +4,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{
-    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, Progress,
-    TransferCounts,
-};
+use crate::{Codec, DrainCodec, DrainProgress, Error, Progress, TransferCounts};
 
 /// Run one step of an ordinary [`Codec`]. Validate the result against
 /// the buffers it received.
@@ -30,58 +27,6 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
         Progress::OutputFilled { consumed } => TransferCounts {
             consumed,
             written: output_len,
-        },
-    })
-}
-
-/// Why one step of a [`BoundaryAwareCodec::process`] call stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BoundaryAwareStepEnd {
-    /// The call consumed the complete input window.
-    InputExhausted,
-    /// The call filled the complete output window.
-    OutputExhausted,
-    /// The codec ended its stream in-band.
-    Boundary,
-}
-
-/// Exact progress made by one validated [`BoundaryAwareCodec::process`]
-/// call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BoundaryAwareStep {
-    pub(crate) consumed: usize,
-    pub(crate) written: usize,
-    pub(crate) end: BoundaryAwareStepEnd,
-}
-
-/// Run one step of a [`BoundaryAwareCodec`]. Validate the result
-/// against the buffers it received.
-pub(crate) fn boundary_aware_step<C: BoundaryAwareCodec + ?Sized>(
-    codec: &mut C,
-    input: &[u8],
-    output: &mut [MaybeUninit<u8>],
-) -> Result<BoundaryAwareStep, Error> {
-    let input_len = input.len();
-    let output_len = output.len();
-    let outcome = codec
-        .process(input, output)?
-        .validated(input_len, output_len)?;
-
-    Ok(match outcome {
-        BoundaryAwareProgress::InputConsumed { written } => BoundaryAwareStep {
-            consumed: input_len,
-            written,
-            end: BoundaryAwareStepEnd::InputExhausted,
-        },
-        BoundaryAwareProgress::OutputFilled { consumed } => BoundaryAwareStep {
-            consumed,
-            written: output_len,
-            end: BoundaryAwareStepEnd::OutputExhausted,
-        },
-        BoundaryAwareProgress::Boundary { consumed, written } => BoundaryAwareStep {
-            consumed,
-            written,
-            end: BoundaryAwareStepEnd::Boundary,
         },
     })
 }
