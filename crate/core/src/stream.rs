@@ -507,24 +507,6 @@ mod tests {
         }
     }
 
-    struct Fails;
-
-    impl DrainCodec for Fails {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
-        }
-    }
-
-    impl Codec for Fails {
-        fn process(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
-            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
-        }
-    }
-
     // ----
     // Pump::transfer_from
     // ----
@@ -708,7 +690,7 @@ mod tests {
     #[test]
     fn codec_errors_are_preserved() {
         assert_eq!(
-            Pump::new(Fails).latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Pump::new(FailsAfterProgress).latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(Error::new(ErrorKind::CorruptStream, 1, 2))
         );
     }
