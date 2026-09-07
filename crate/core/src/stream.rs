@@ -185,7 +185,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     ///
     /// `transfer_from` loops on this primitive. It is also driven
     /// directly by
-    /// [`crate::sources_and_sinks::shared_io::boundary_aware_pump_read`],
+    /// [`crate::sources_and_sinks::shared_io::boundary_aware_pump_read`].
     ///
     /// Same stall and error handling as `transfer_from`: a call that
     /// moves zero bytes on both sides without ending the stream is
@@ -303,11 +303,10 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     ///
     /// When `output.spare()` returns `None`, the sink has no room.
     /// One more call is made against an empty slice, to check whether
-    /// the codec was actually done regardless. If that reports
-    /// `Done`, the drain is complete; otherwise it really is blocked
-    /// on sink space, and `SinkExhausted` is returned. This tells "the
-    /// sink is full but the codec had nothing left" apart from "the
-    /// sink is full and blocking real progress".
+    /// the codec was actually done regardless:
+    /// - `Done` means the drain is complete, despite the full sink
+    /// - `OutputFilled` means the sink is genuinely blocking progress,
+    ///   so `SinkExhausted` is returned
     ///
     /// A call that writes nothing and does not reach `Done` is a
     /// stall (`DriveError::NoProgress`). Neither case commits
