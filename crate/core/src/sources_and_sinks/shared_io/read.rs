@@ -38,7 +38,7 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         }
     };
     if source_exhausted {
-        let drained = pump.finish_to(&mut output).map_err(widen)?;
+        let drained = pump.finish_to(&mut output).map_err(DriveError::widen_source)?;
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
@@ -48,19 +48,6 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         ));
     }
     Ok(output.written())
-}
-
-/// `finish_to`'s error is `DriveError<Infallible, Infallible>` (its
-/// input side never runs and its output side is the same `SliceSink`
-/// as `transfer_from`'s); widen it to line up with `boundary_aware_pump_read`'s
-/// return type so both calls share one `?`-friendly error type.
-fn widen<T>(error: DriveError<Infallible, Infallible>) -> DriveError<T, Infallible> {
-    match error {
-        DriveError::Source(never) | DriveError::Sink(never) => match never {},
-        DriveError::Codec(error) => DriveError::Codec(error),
-        DriveError::SinkExhausted => DriveError::SinkExhausted,
-        DriveError::NoProgress => DriveError::NoProgress,
-    }
 }
 
 #[cfg(test)]

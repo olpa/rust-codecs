@@ -24,6 +24,24 @@ pub enum DriveError<EI, EO> {
     NoProgress,
 }
 
+impl<EO> DriveError<core::convert::Infallible, EO> {
+    /// Widen `EI` from `Infallible` to any type.
+    ///
+    /// `finish_to`/`drain_to` never touch a `Source`, so their result
+    /// carries `Infallible` in this slot. A caller with a real
+    /// `Source` error type uses this to line its `DriveError` up with
+    /// its own, so both share one `?`-friendly error type.
+    pub(crate) fn widen_source<EI>(self) -> DriveError<EI, EO> {
+        match self {
+            DriveError::Source(never) => match never {},
+            DriveError::Sink(error) => DriveError::Sink(error),
+            DriveError::Codec(error) => DriveError::Codec(error),
+            DriveError::SinkExhausted => DriveError::SinkExhausted,
+            DriveError::NoProgress => DriveError::NoProgress,
+        }
+    }
+}
+
 /// Drive the codec from the input source to the output sink.
 pub fn stream_to_stream<I, O, C>(
     input: &mut I,
@@ -53,13 +71,7 @@ where
         PumpTransfer::Progressed(_) => unreachable!("transfer_from consumes progress internally"),
     }
 
-    let drained = pump.finish_to(output).map_err(|error| match error {
-        DriveError::Source(never) => match never {},
-        DriveError::Sink(error) => DriveError::Sink(error),
-        DriveError::Codec(error) => DriveError::Codec(error),
-        DriveError::SinkExhausted => DriveError::SinkExhausted,
-        DriveError::NoProgress => DriveError::NoProgress,
-    })?;
+    let drained = pump.finish_to(output).map_err(DriveError::widen_source)?;
     match drained {
         PumpDrain::Done { written } => {
             totals.written += written;
