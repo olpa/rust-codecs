@@ -397,10 +397,11 @@ mod tests {
     use core::mem::MaybeUninit;
 
     use super::{Pump, PumpDrain, PumpTransfer};
+    use crate::sources_and_sinks::slice::SliceSource;
     use crate::step::DrainOp;
     use crate::{
         BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError,
-        Error, ErrorKind, Progress, Sink, Source, TransferCounts,
+        Error, ErrorKind, Progress, Sink, TransferCounts,
     };
 
     struct Scripted {
@@ -425,24 +426,6 @@ mod tests {
             _output: &mut [MaybeUninit<u8>],
         ) -> Result<BoundaryAwareProgress, Error> {
             Ok(self.process)
-        }
-    }
-
-    /// A `Source` over a plain byte slice.
-    struct SliceSource<'a> {
-        bytes: &'a [u8],
-        pos: usize,
-    }
-
-    impl Source for SliceSource<'_> {
-        type Error = core::convert::Infallible;
-
-        fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-            Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
-        }
-
-        fn consume(&mut self, amount: usize) {
-            self.pos += amount;
         }
     }
 
@@ -506,10 +489,7 @@ mod tests {
 
     #[test]
     fn codec_that_only_consumes_input_needs_no_output_room() {
-        let mut input = SliceSource {
-            bytes: b"abcdef",
-            pos: 0,
-        };
+        let mut input = SliceSource::new(b"abcdef");
         let mut output = NullSink;
         let mut pump = Pump::new(DropEverything);
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
@@ -544,10 +524,7 @@ mod tests {
 
     #[test]
     fn process_error_progress_is_applied_to_endpoints() {
-        let mut input = SliceSource {
-            bytes: b"abc",
-            pos: 0,
-        };
+        let mut input = SliceSource::new(b"abc");
         let mut output = RecordingSink {
             bytes: [0; 8],
             written: 0,
@@ -556,7 +533,7 @@ mod tests {
 
         let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
 
-        assert_eq!(input.pos, 1);
+        assert_eq!(input.consumed(), 1);
         assert_eq!(output.written, 2);
         assert_eq!(&output.bytes[..2], b"ok");
         assert!(matches!(
@@ -594,10 +571,7 @@ mod tests {
     #[test]
     #[cfg(feature = "alloc")]
     fn pump_accepts_a_boxed_trait_object_codec() {
-        let mut input = SliceSource {
-            bytes: b"abcdef",
-            pos: 0,
-        };
+        let mut input = SliceSource::new(b"abcdef");
         let mut output = NullSink;
         let boxed: alloc::boxed::Box<dyn Codec> = alloc::boxed::Box::new(DropEverything);
         let mut pump: Pump<alloc::boxed::Box<dyn Codec>> = Pump::new(boxed);
@@ -613,10 +587,7 @@ mod tests {
 
     #[test]
     fn a_pair_that_truly_cannot_progress_reports_no_progress() {
-        let mut input = SliceSource {
-            bytes: b"x",
-            pos: 0,
-        };
+        let mut input = SliceSource::new(b"x");
         let mut output = NullSink;
         let mut pump = Pump::new(Scripted {
             process: BoundaryAwareProgress::OutputFilled { consumed: 0 },
@@ -727,10 +698,7 @@ mod tests {
 
     #[test]
     fn input_exhaustion_implies_all_input_was_consumed() {
-        let mut input = SliceSource {
-            bytes: b"abc",
-            pos: 0,
-        };
+        let mut input = SliceSource::new(b"abc");
         let mut output = RecordingSink {
             bytes: [0; 8],
             written: 0,
@@ -751,10 +719,7 @@ mod tests {
 
     #[test]
     fn output_exhaustion_implies_all_output_was_written() {
-        let mut input = SliceSource {
-            bytes: b"abc",
-            pos: 0,
-        };
+        let mut input = SliceSource::new(b"abc");
         let mut output = RecordingSink {
             bytes: [0; 8],
             written: 3,
@@ -775,10 +740,7 @@ mod tests {
 
     #[test]
     fn stream_end_preserves_both_explicit_counts() {
-        let mut input = SliceSource {
-            bytes: b"abc",
-            pos: 0,
-        };
+        let mut input = SliceSource::new(b"abc");
         let mut output = RecordingSink {
             bytes: [0; 8],
             written: 0,
