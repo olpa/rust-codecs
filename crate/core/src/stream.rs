@@ -132,46 +132,22 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     }
 
     /// Tell a caller such as `shared_io::boundary_aware_pump_read`
-    /// that the stream has ended, so it can skip
-    /// `transfer_from`/`finish_to` on repeated calls past EOF.
+    /// that the stream has ended.
     pub(crate) fn is_done(&self) -> bool {
         self.ended_in_band
-    }
-
-    pub(crate) fn latched_step(
-        &mut self,
-        input: &[u8],
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<BoundaryAwareProgress, Error> {
-        if self.ended_in_band {
-            return Ok(BoundaryAwareProgress::Boundary {
-                consumed: 0,
-                written: 0,
-            });
-        }
-        let progress = self
-            .codec
-            .process(input, output)?
-            .validated(input.len(), output.len())?;
-        if matches!(progress, BoundaryAwareProgress::Boundary { .. }) {
-            self.ended_in_band = true;
-        }
-        Ok(progress)
     }
 
     /// Drive the codec by repeatedly pulling chunks from `input` and
     /// pushing processed bytes into `output`, until the codec reaches
     /// its stream end or either endpoint runs out of room or data.
     ///
-    /// Each loop iteration runs one [`Pump::transfer_step`] call and
-    /// accumulates its counts.
+    /// Returns when one of three things happens:
+    /// - the source is exhausted
+    /// - the sink has no more spare space
+    /// - the codec signals the end of the stream
     ///
-    /// Returns when one of three things happens: the source is
-    /// exhausted, the sink has no more spare space, or the codec
-    /// signals the end of the stream. A call that moves zero bytes on
-    /// both sides without ending the stream is a stall, reported as
-    /// `DriveError::NoProgress`. Like a codec error, it aborts the
-    /// loop without committing anything to the sink.
+    /// A call that moves zero bytes on both sides without ending the
+    /// stream is a stall, reported as `DriveError::NoProgress`.
     pub(crate) fn transfer_from<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
@@ -281,6 +257,27 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         } else {
             PumpTransfer::Progressed(moved)
         })
+    }
+
+    pub(crate) fn latched_step(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        if self.ended_in_band {
+            return Ok(BoundaryAwareProgress::Boundary {
+                consumed: 0,
+                written: 0,
+            });
+        }
+        let progress = self
+            .codec
+            .process(input, output)?
+            .validated(input.len(), output.len())?;
+        if matches!(progress, BoundaryAwareProgress::Boundary { .. }) {
+            self.ended_in_band = true;
+        }
+        Ok(progress)
     }
 
     /// Drain the codec's trailing output.
