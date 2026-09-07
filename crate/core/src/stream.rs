@@ -283,12 +283,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         })
     }
 
-    /// Drain the codec's trailing output by repeatedly calling
-    /// [`Pump::latched_finish_or_sync_flush_step`] against spare space from
-    /// `output`, until the codec reports `Done`.
-    ///
-    /// Call this once the source is exhausted, to flush whatever
-    /// bytes the codec still owes (e.g. padding, a trailer).
+    /// Drain the codec's trailing output.
     pub(crate) fn finish_to<O: Sink>(
         &mut self,
         output: &mut O,
@@ -296,6 +291,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         self.drain_to(output, DrainOp::Finish)
     }
 
+    /// Let deflate/zlib and similar codecs write a sync marker mid-stream.
     pub(crate) fn sync_flush_to<O: Sink>(
         &mut self,
         output: &mut O,
