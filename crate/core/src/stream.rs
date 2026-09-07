@@ -177,8 +177,6 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         let mut consumed = 0;
         let mut written = 0;
         loop {
-            // `consumed`/`written` hold only totals from prior
-            // iterations here.
             let step = self.transfer_step(input, output)?;
             let total = |moved: TransferCounts| TransferCounts {
                 consumed: consumed + moved.consumed,
@@ -209,10 +207,6 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// `transfer_from` loops on this primitive. It is also driven
     /// directly by
     /// [`crate::sources_and_sinks::shared_io::boundary_aware_pump_read`],
-    /// so a `Read::read` call returns as soon as the source produced
-    /// anything, instead of coalescing several source reads into one
-    /// call — useful for an interactive caller that wants to see each
-    /// unit of input as soon as it arrives.
     ///
     /// Same stall and error handling as `transfer_from`: a call that
     /// moves zero bytes on both sides without ending the stream is
@@ -231,7 +225,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         };
         // A call may still progress with an empty `spare` (e.g. a
         // codec that only consumes input). So an empty slice is not
-        // rejected up front — zero bytes moved on both sides without
+        // rejected up front, zero bytes moved on both sides without
         // ending the stream is what marks a genuine stall.
         let progress = match self.latched_step(chunk, spare) {
             Ok(progress) => progress,
@@ -291,10 +285,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// `output`, until the codec reports `Done`.
     ///
     /// Call this once the source is exhausted, to flush whatever
-    /// bytes the codec still owes (e.g. padding, a trailer). It
-    /// shares its loop with `sync_flush_to` via
-    /// `drain_to(output, DrainOp::Finish)`, which selects `finish`
-    /// (ends the stream for good) over `sync_flush` (resumable).
+    /// bytes the codec still owes (e.g. padding, a trailer).
     pub(crate) fn finish_to<O: Sink>(
         &mut self,
         output: &mut O,
