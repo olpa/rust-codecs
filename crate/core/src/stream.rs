@@ -126,14 +126,10 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
-    /// Access the wrapped codec, for example to read state it does
-    /// not expose through `BoundaryAwareCodec`, such as a checksum,
-    /// once the stream has ended.
     pub fn get_ref(&self) -> &C {
         &self.codec
     }
 
-    /// Mutable counterpart to [`Pump::get_ref`].
     pub fn get_mut(&mut self) -> &mut C {
         &mut self.codec
     }
