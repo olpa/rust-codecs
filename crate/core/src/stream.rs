@@ -103,12 +103,15 @@ pub(crate) enum PumpDrain {
 /// boxed codec can still use `Pump<Box<dyn Codec>>`.
 pub struct Pump<C> {
     codec: C,
-    done: bool,
+    ended_in_band: bool,
 }
 
 impl<C: BoundaryAwareCodec> Pump<C> {
     pub fn new(codec: C) -> Self {
-        Self { codec, done: false }
+        Self {
+            codec,
+            ended_in_band: false,
+        }
     }
 
     /// Access the wrapped codec, for example to read state it does
@@ -132,7 +135,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// that the stream has ended, so it can skip
     /// `transfer_from`/`finish_to` on repeated calls past EOF.
     pub(crate) fn is_done(&self) -> bool {
-        self.done
+        self.ended_in_band
     }
 
     pub(crate) fn latched_step(
@@ -140,7 +143,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
     ) -> Result<BoundaryAwareProgress, Error> {
-        if self.done {
+        if self.ended_in_band {
             return Ok(BoundaryAwareProgress::Boundary {
                 consumed: 0,
                 written: 0,
@@ -151,7 +154,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             .process(input, output)?
             .validated(input.len(), output.len())?;
         if matches!(progress, BoundaryAwareProgress::Boundary { .. }) {
-            self.done = true;
+            self.ended_in_band = true;
         }
         Ok(progress)
     }
@@ -369,18 +372,18 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// Run one `finish`/`sync_flush` call against `output`, chosen by
     /// `op` — the `drain_to` loop's counterpart to [`DrainOp::step`].
     ///
-    /// `self.done` is set only by [`Pump::latched_step`] reaching a
-    /// genuine `BoundaryAwareProgress::Boundary`; once set, `Pump`
-    /// treats it as permanent. `DrainProgress::Done` from `self.codec`
-    /// is different: `finish`/`sync_flush` may still be called again
-    /// later, so `Done` is reported here but never latched into
-    /// `self.done`.
+    /// `self.ended_in_band` is set only by [`Pump::latched_step`]
+    /// reaching a genuine `BoundaryAwareProgress::Boundary`; once set,
+    /// `Pump` treats it as permanent. `DrainProgress::Done` from
+    /// `self.codec` is different: `finish`/`sync_flush` may still be
+    /// called again later, so `Done` is reported here but never
+    /// latched into `self.ended_in_band`.
     fn finish_or_sync_flush_step(
         &mut self,
         output: &mut [MaybeUninit<u8>],
         op: DrainOp,
     ) -> Result<PumpDrain, Error> {
-        if self.done {
+        if self.ended_in_band {
             return Ok(PumpDrain::Done { written: 0 });
         }
         Ok(match op.step(&mut self.codec, output)? {
@@ -711,8 +714,8 @@ mod tests {
         assert_eq!(moved, PumpDrain::SinkExhausted { written: 3 });
         assert!(!filled.is_done());
 
-        // Reaching `Done` here does not latch `self.done`; only an
-        // in-band `End` from `latched_step` does that. So
+        // Reaching `Done` here does not latch `self.ended_in_band`;
+        // only an in-band `End` from `latched_step` does that. So
         // `is_done()` stays false, and the codec — not a synthetic
         // `End` — answers the next `latched_step` call.
         let mut done = Pump::new(Scripted {
