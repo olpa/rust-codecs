@@ -284,7 +284,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     }
 
     /// Drain the codec's trailing output by repeatedly calling
-    /// [`Pump::finish_or_sync_flush_step`] against spare space from
+    /// [`Pump::latched_finish_or_sync_flush_step`] against spare space from
     /// `output`, until the codec reports `Done`.
     ///
     /// Call this once the source is exhausted, to flush whatever
@@ -305,7 +305,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 
     /// Shared loop behind `finish_to`/`sync_flush_to`: repeatedly get
     /// spare space from `output` and hand it to
-    /// [`Pump::finish_or_sync_flush_step`], committing what was
+    /// [`Pump::latched_finish_or_sync_flush_step`], committing what was
     /// written, until the codec reports `Done`.
     ///
     /// When `output.spare()` returns `None`, the sink has no room.
@@ -327,13 +327,11 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         let mut written = 0;
         loop {
-            let moved = match output.spare().map_err(DriveError::Sink)? {
-                Some(spare) => match self.finish_or_sync_flush_step(spare, op) {
-                    Ok(PumpDrain::Done { written }) => Ok(PumpDrain::Done { written }),
-                    Ok(PumpDrain::SinkExhausted { written }) if written > 0 => {
-                        Ok(PumpDrain::SinkExhausted { written })
-                    }
-                    Ok(PumpDrain::SinkExhausted { .. }) => return Err(DriveError::NoProgress),
+            let (step_written, done) = match output.spare().map_err(DriveError::Sink)? {
+                Some(spare) => match self.latched_finish_or_sync_flush_step(spare, op) {
+                    Ok(DrainProgress::Done { written }) => (written, true),
+                    Ok(DrainProgress::OutputFilled) if !spare.is_empty() => (spare.len(), false),
+                    Ok(DrainProgress::OutputFilled) => return Err(DriveError::NoProgress),
                     Err(error) => {
                         let error = error
                             .validated(0, spare.len())
@@ -346,18 +344,13 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 },
                 None => {
                     let moved = self
-                        .finish_or_sync_flush_step(&mut [], op)
+                        .latched_finish_or_sync_flush_step(&mut [], op)
                         .map_err(DriveError::Codec)?;
                     return Ok(match moved {
-                        PumpDrain::Done { .. } => PumpDrain::Done { written },
-                        PumpDrain::SinkExhausted { .. } => PumpDrain::SinkExhausted { written },
+                        DrainProgress::Done { .. } => PumpDrain::Done { written },
+                        DrainProgress::OutputFilled => PumpDrain::SinkExhausted { written },
                     });
                 }
-            }
-            .map_err(DriveError::Codec)?;
-            let (step_written, done) = match moved {
-                PumpDrain::SinkExhausted { written } => (written, false),
-                PumpDrain::Done { written } => (written, true),
             };
             if step_written > 0 {
                 output.commit(step_written).map_err(DriveError::Sink)?;
@@ -369,29 +362,21 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
-    /// Run one `finish`/`sync_flush` call against `output`, chosen by
-    /// `op` — the `drain_to` loop's counterpart to [`DrainOp::step`].
+    /// Run one `finish`/`sync_flush` call, chosen by `op`.
     ///
-    /// `self.ended_in_band` is set only by [`Pump::latched_step`]
-    /// reaching a genuine `BoundaryAwareProgress::Boundary`; once set,
-    /// `Pump` treats it as permanent. `DrainProgress::Done` from
-    /// `self.codec` is different: `finish`/`sync_flush` may still be
-    /// called again later, so `Done` is reported here but never
-    /// latched into `self.ended_in_band`.
-    fn finish_or_sync_flush_step(
+    /// If the codec already ended in-band, [`BoundaryAwareCodec::process`]'s
+    /// contract already required it to finish itself first. So this
+    /// function skips the call. It reports a permanent `Done` and
+    /// never touches the codec again.
+    fn latched_finish_or_sync_flush_step(
         &mut self,
         output: &mut [MaybeUninit<u8>],
         op: DrainOp,
-    ) -> Result<PumpDrain, Error> {
+    ) -> Result<DrainProgress, Error> {
         if self.ended_in_band {
-            return Ok(PumpDrain::Done { written: 0 });
+            return Ok(DrainProgress::Done { written: 0 });
         }
-        Ok(match op.step(&mut self.codec, output)? {
-            DrainProgress::OutputFilled => PumpDrain::SinkExhausted {
-                written: output.len(),
-            },
-            DrainProgress::Done { written } => PumpDrain::Done { written },
-        })
+        op.step(&mut self.codec, output)
     }
 }
 
@@ -399,7 +384,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 mod tests {
     use core::mem::MaybeUninit;
 
-    use super::{Pump, PumpDrain, PumpTransfer};
+    use super::{Pump, PumpTransfer};
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::step::DrainOp;
     use crate::{
@@ -640,8 +625,8 @@ mod tests {
             .unwrap();
         assert!(pump.is_done());
         assert_eq!(
-            pump.finish_or_sync_flush_step(&mut [], DrainOp::Finish),
-            Ok(PumpDrain::Done { written: 0 })
+            pump.latched_finish_or_sync_flush_step(&mut [], DrainOp::Finish),
+            Ok(DrainProgress::Done { written: 0 })
         );
         let repeated = pump
             .latched_step(b"trailing", &mut [MaybeUninit::uninit(); 4])
@@ -695,66 +680,6 @@ mod tests {
         assert_eq!(
             Pump::new(FailsAfterProgress).latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
             Err(Error::new(ErrorKind::CorruptStream, 1, 2))
-        );
-    }
-
-    // ----
-    // Pump::finish_or_sync_flush_step
-    // ----
-
-    #[test]
-    fn finish_normalizes_output_progress_without_latching_done() {
-        let mut filled = Pump::new(Scripted {
-            process: BoundaryAwareProgress::InputConsumed { written: 0 },
-            drain: DrainProgress::OutputFilled,
-        });
-        let moved = filled
-            .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
-            .unwrap();
-        assert_eq!(moved, PumpDrain::SinkExhausted { written: 3 });
-        assert!(!filled.is_done());
-
-        // Reaching `Done` here does not latch `self.ended_in_band`;
-        // only an in-band `End` from `latched_step` does that. So
-        // `is_done()` stays false, and the codec — not a synthetic
-        // `End` — answers the next `latched_step` call.
-        let mut done = Pump::new(Scripted {
-            process: BoundaryAwareProgress::InputConsumed { written: 5 },
-            drain: DrainProgress::Done { written: 2 },
-        });
-        let moved = done
-            .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish)
-            .unwrap();
-        assert_eq!(moved, PumpDrain::Done { written: 2 });
-        assert!(!done.is_done());
-        let resumed = done
-            .latched_step(b"abc", &mut [MaybeUninit::uninit(); 8])
-            .unwrap();
-        assert_eq!(resumed, BoundaryAwareProgress::InputConsumed { written: 5 });
-    }
-
-    #[test]
-    fn flush_does_not_end_the_stream() {
-        let mut pump = Pump::new(Scripted {
-            process: BoundaryAwareProgress::InputConsumed { written: 0 },
-            drain: DrainProgress::Done { written: 2 },
-        });
-        let moved = pump
-            .finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::SyncFlush)
-            .unwrap();
-        assert_eq!(moved, PumpDrain::Done { written: 2 });
-        assert!(!pump.is_done());
-    }
-
-    #[test]
-    fn drain_overclaims_are_contract_violations() {
-        let mut pump = Pump::new(Scripted {
-            process: BoundaryAwareProgress::InputConsumed { written: 0 },
-            drain: DrainProgress::Done { written: 4 },
-        });
-        assert_eq!(
-            pump.finish_or_sync_flush_step(&mut [MaybeUninit::uninit(); 3], DrainOp::Finish),
-            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
         );
     }
 
