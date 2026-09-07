@@ -487,21 +487,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn codec_that_only_consumes_input_needs_no_output_room() {
-        let mut input = SliceSource::new(b"abcdef");
-        let mut output = NullSink;
-        let mut pump = Pump::new(DropEverything);
-        let moved = pump.transfer_from(&mut input, &mut output).unwrap();
-        assert_eq!(
-            moved,
-            PumpTransfer::SourceExhausted(TransferCounts {
-                consumed: 6,
-                written: 0,
-            })
-        );
-    }
-
     struct FailsAfterProgress;
 
     impl DrainCodec for FailsAfterProgress {
@@ -520,6 +505,43 @@ mod tests {
             output[..2].write_copy_of_slice(b"ok");
             Err(Error::new(ErrorKind::CorruptStream, 1, 2))
         }
+    }
+
+    struct Fails;
+
+    impl DrainCodec for Fails {
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
+        }
+    }
+
+    impl Codec for Fails {
+        fn process(
+            &mut self,
+            _input: &[u8],
+            _output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
+        }
+    }
+
+    // ----
+    // Pump::transfer_from
+    // ----
+
+    #[test]
+    fn codec_that_only_consumes_input_needs_no_output_room() {
+        let mut input = SliceSource::new(b"abcdef");
+        let mut output = NullSink;
+        let mut pump = Pump::new(DropEverything);
+        let moved = pump.transfer_from(&mut input, &mut output).unwrap();
+        assert_eq!(
+            moved,
+            PumpTransfer::SourceExhausted(TransferCounts {
+                consumed: 6,
+                written: 0,
+            })
+        );
     }
 
     #[test]
@@ -542,28 +564,6 @@ mod tests {
                 kind: ErrorKind::CorruptStream,
                 consumed: 1,
                 written: 2
-            })
-        ));
-    }
-
-    #[test]
-    fn finish_error_progress_is_committed() {
-        let mut output = RecordingSink {
-            bytes: [0; 8],
-            written: 0,
-        };
-        let mut pump = Pump::new(FailsAfterProgress);
-
-        let error = pump.finish_to(&mut output).unwrap_err();
-
-        assert_eq!(output.written, 1);
-        assert_eq!(output.bytes[0], b'!');
-        assert!(matches!(
-            error,
-            DriveError::Codec(Error {
-                kind: ErrorKind::CorruptStream,
-                consumed: 0,
-                written: 1
             })
         ));
     }
@@ -596,6 +596,36 @@ mod tests {
         let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
         assert!(matches!(error, DriveError::NoProgress));
     }
+
+    // ----
+    // Pump::finish_to
+    // ----
+
+    #[test]
+    fn finish_error_progress_is_committed() {
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsAfterProgress);
+
+        let error = pump.finish_to(&mut output).unwrap_err();
+
+        assert_eq!(output.written, 1);
+        assert_eq!(output.bytes[0], b'!');
+        assert!(matches!(
+            error,
+            DriveError::Codec(Error {
+                kind: ErrorKind::CorruptStream,
+                consumed: 0,
+                written: 1
+            })
+        ));
+    }
+
+    // ----
+    // Pump::latched_step
+    // ----
 
     #[test]
     fn latched_step_validates_progress() {
@@ -639,6 +669,53 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn overclaims_are_rejected_at_the_shared_boundary() {
+        let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
+
+        let mut input_done = Pump::new(Scripted {
+            process: BoundaryAwareProgress::InputConsumed { written: 6 },
+            drain: DrainProgress::Done { written: 0 },
+        });
+        assert_eq!(
+            input_done.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Err(violation)
+        );
+
+        let mut output_done = Pump::new(Scripted {
+            process: BoundaryAwareProgress::OutputFilled { consumed: 4 },
+            drain: DrainProgress::Done { written: 0 },
+        });
+        assert_eq!(
+            output_done.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Err(violation)
+        );
+
+        let mut ended = Pump::new(Scripted {
+            process: BoundaryAwareProgress::Boundary {
+                consumed: 4,
+                written: 6,
+            },
+            drain: DrainProgress::Done { written: 0 },
+        });
+        assert_eq!(
+            ended.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Err(violation)
+        );
+    }
+
+    #[test]
+    fn codec_errors_are_preserved() {
+        assert_eq!(
+            Pump::new(Fails).latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
+            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
+        );
+    }
+
+    // ----
+    // Pump::finish_or_sync_flush_step
+    // ----
 
     #[test]
     fn finish_normalizes_output_progress_without_latching_done() {
@@ -695,6 +772,10 @@ mod tests {
             Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
         );
     }
+
+    // ----
+    // Pump::transfer_step
+    // ----
 
     #[test]
     fn input_exhaustion_implies_all_input_was_consumed() {
@@ -762,6 +843,10 @@ mod tests {
         );
     }
 
+    // ----
+    // The rest
+    // ----
+
     #[test]
     fn degenerate_windows_remain_well_defined() {
         let input_done = BoundaryAwareProgress::InputConsumed { written: 0 }
@@ -778,67 +863,6 @@ mod tests {
         assert_eq!(
             output_done,
             BoundaryAwareProgress::OutputFilled { consumed: 0 }
-        );
-    }
-
-    #[test]
-    fn overclaims_are_rejected_at_the_shared_boundary() {
-        let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
-
-        let mut input_done = Pump::new(Scripted {
-            process: BoundaryAwareProgress::InputConsumed { written: 6 },
-            drain: DrainProgress::Done { written: 0 },
-        });
-        assert_eq!(
-            input_done.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
-            Err(violation)
-        );
-
-        let mut output_done = Pump::new(Scripted {
-            process: BoundaryAwareProgress::OutputFilled { consumed: 4 },
-            drain: DrainProgress::Done { written: 0 },
-        });
-        assert_eq!(
-            output_done.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
-            Err(violation)
-        );
-
-        let mut ended = Pump::new(Scripted {
-            process: BoundaryAwareProgress::Boundary {
-                consumed: 4,
-                written: 6,
-            },
-            drain: DrainProgress::Done { written: 0 },
-        });
-        assert_eq!(
-            ended.latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
-            Err(violation)
-        );
-    }
-
-    struct Fails;
-
-    impl DrainCodec for Fails {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
-        }
-    }
-
-    impl Codec for Fails {
-        fn process(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
-            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
-        }
-    }
-
-    #[test]
-    fn codec_errors_are_preserved() {
-        assert_eq!(
-            Pump::new(Fails).latched_step(b"abc", &mut [MaybeUninit::uninit(); 5]),
-            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
         );
     }
 }
