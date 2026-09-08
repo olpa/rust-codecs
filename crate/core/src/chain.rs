@@ -1,89 +1,63 @@
-//! [`Chain`]: compose two [`Codec`]s into one.
+//! [`Chain`]: compose two [`Codec`]s into one [`Codec`].
 //!
-//! Bytes flow `first` → staging buffer → `second`. Composition happens
-//! at the `Codec` level (`Chain` is itself a `Codec`), so any driver
-//! gets chaining for free without knowing anything about it.
+//! Bytes flow `first` -> staging buffer -> `second`.
 //!
-//! Both members are bound to [`Codec`], not
-//! [`BoundaryAwareCodec`](crate::BoundaryAwareCodec): neither can ever
-//! report an in-band end, so `Chain` needs no policy for propagating
-//! one. A terminating composition would need its own design.
+//! [`BoundaryAwareCodec`](crate::BoundaryAwareCodec) is not
+//! supported. A terminating composition would need its own design.
 
 use core::mem::MaybeUninit;
 
 use crate::step::{codec_step, DrainOp};
 use crate::uninit::as_uninit_mut;
-use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
+use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 /// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
 /// `staging`) into a single [`Codec`].
 ///
-/// `staging` is caller-provided (`S: AsMut<[u8]>`), so it can be a
-/// borrowed `&mut [u8]`, an inline `[u8; N]`, or a `Vec<u8>`. `Chain`
-/// is itself a `Codec`, so chains of chains work.
+/// `staging` is caller-provided (`S: AsMut<[u8]>`): a borrowed `&mut
+/// [u8]`, an inline `[u8; N]`, or a `Vec<u8>`. `Chain` is itself a
+/// `Codec`, so chains of chains work.
 ///
 /// # Corner cases
 ///
 /// **Interrupted `flush`.** A flush that returns `OutputFilled` is
 /// resumed by calling `flush` again with fresh output room. `first`
-/// is asked to flush again; by the `Codec` contract that is a no-op
-/// once it already reached `Done` for this sync point, so no second
-/// sync marker comes out. A `process` call between the two flushes
-/// gives `first` new input, so the next `flush` opens a new sync
-/// boundary.
+/// is flushed again, but by the `Codec` contract that is a no-op once
+/// it already reached `Done` for this sync point. A `process` call
+/// between the two flushes opens a new sync boundary.
 ///
-/// **Return-clean.** When `process` returns, the staging buffer holds
-/// only bytes that `second` refused because output was full. The
-/// chain never withholds bytes it could have delivered. (A codec may
-/// still hold a partial unit inside itself, as its format requires;
-/// `flush` and `finish` drain that.)
+/// **Return-clean.** When `process` returns, `staging` holds only
+/// bytes `second` refused because output was full. The chain never
+/// withholds bytes it could have delivered.
 ///
-/// **Staging size affects performance, not correctness.** Any
-/// non-empty staging buffer works, even one byte, since the `Codec`
-/// contract guarantees progress into any non-empty buffer. An empty
-/// buffer can never work, so `new` panics on it.
+/// **Staging size.** Affects performance, not correctness: any
+/// non-empty buffer works, even one byte. `new` panics on an empty
+/// one, since it could never hold a byte.
 ///
-/// **Empty output buffer.** `process` with zero-length output always
-/// reports `OutputFilled`, since a zero-length window is trivially
-/// full. `first` may still fill staging, but nothing reaches
-/// `output`. Not an error, but a driver looping on it makes no output
-/// progress — give it room instead.
+/// **Empty output buffer.** `process` always reports `OutputFilled`
+/// for a zero-length `output`, since it's trivially full. Not an
+/// error, but a driver looping on it makes no progress.
 ///
-/// **Misbehaving codecs.** Byte counts reported by both inner codecs
-/// are checked on every call; an overclaimed count becomes
+/// **Misbehaving codecs.** Byte counts from both inner codecs are
+/// checked on every call; an overclaim becomes
 /// [`ErrorKind::ByteCountClaim`](crate::ErrorKind::ByteCountClaim)
-/// instead of corrupting the staging indices. Reported error counts
-/// are always chain-level: bytes consumed from your input and written
-/// to your output in this call, never the inner codec's own numbers.
+/// instead of corrupting the staging indices. Reported counts are
+/// always chain-level, never the inner codec's own numbers.
 ///
 /// # `Chain` vs. wrapping input and output separately
 ///
 /// `stream_to_stream(input, Chain::new(a, b, staging), output)` and
 /// `io::copy` between an `a`-wrapped reader and a `b`-wrapped writer
-/// agree only for well-behaved, whole-stream codecs. With
-/// `CodecReader(a)` → `io::copy` → `CodecWriter(b)`:
+/// agree only for well-behaved, whole-stream codecs. `io::copy` gives
+/// `b` no signal that input is exhausted for good (`Write::flush` is
+/// a resumable sync point, not a permanent end), so a stateful
+/// codec's trailer, checksum, or padding never gets written unless
+/// `b` is finalized explicitly.
 ///
-/// - `io::copy` is the intermediate buffer and scheduler.
-/// - EOF finalizes `a`.
-/// - Finalizing `b` needs an explicit call: `Read`/`Write` gives
-///   `io::copy` no signal that input is exhausted for good. Skip it
-///   and a stateful codec's trailer, checksum, or padding never gets
-///   written. `Write::flush()` does not cover this either, since it
-///   is a resumable sync point, not a permanent end.
-/// - Each wrapper drives one codec, in one direction.
-///
-/// `Chain` instead behaves as one correct `Codec` on every call. It
-/// must:
-///
-/// - Track partial consumption on both sides.
-/// - Retain and compact intermediate output.
-/// - Translate two codecs' progress into one `Progress`.
-/// - Report exact chain-level consumed/written counts.
-/// - Support interrupted and repeated `process`, `flush`, and `finish`
-///   calls.
-/// - Preserve the `Codec` lifecycle contract even nested in another
-///   `Chain`.
-/// - Validate both codecs' reported counts.
+/// `Chain` instead behaves as one correct `Codec` on every call: it
+/// tracks partial consumption on both sides, retains and compacts
+/// intermediate output, translates two codecs' progress into one
+/// `Progress`, and validates both codecs' reported counts.
 pub struct Chain<A, B, S> {
     first: A,
     second: B,
@@ -117,11 +91,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     }
 
     /// Reclaim both codecs and the staging buffer, for example to read
-    /// state one holds (a checksum, a digest), or to reuse the
+    /// state one holds (a checksum, a digest) or to reuse the
     /// buffer's allocation. Any bytes `first` produced but `second`
-    /// had not yet drained are still present at the front of the
-    /// buffer, but `stage_pos` is not returned with it — treat them as
-    /// lost.
+    /// had not yet drained are still in the buffer, but `stage_pos` is
+    /// not returned with it — treat them as lost.
     pub fn into_parts(self) -> (A, B, S) {
         (self.first, self.second, self.staging)
     }
@@ -347,7 +320,7 @@ mod tests {
     use crate::sources_and_sinks::vec::{VecSink, VecSource};
     use crate::uninit::as_uninit_mut;
     use crate::{stream_to_stream, DriveError};
-    use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
+    use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
     const INPUT: &[u8] = b"Hello, World! 123";
 
@@ -640,10 +613,7 @@ mod tests {
         // ByteCountClaim error instead.
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
         let result = collect(chain, INPUT);
-        assert_eq!(
-            result.unwrap_err().kind,
-            crate::ErrorKind::ByteCountClaim
-        );
+        assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ByteCountClaim);
     }
 
     struct FirstFailsOnce {
