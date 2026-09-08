@@ -299,6 +299,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
+    use core::convert::Infallible;
     use core::mem::MaybeUninit;
 
     use alloc::{boxed::Box, vec, vec::Vec};
@@ -308,11 +309,14 @@ mod tests {
     use crate::base64_enc::base64_enc;
     use crate::identity::identity;
     use crate::rot13::rot13;
+    use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::as_uninit_mut;
-    use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
+    use crate::{stream_to_stream, Codec, DrainCodec, DrainProgress, Error, Progress, Sink};
 
     const INPUT: &str = "Hello, World! 123";
+    // rot13(base64_enc(INPUT)): $ echo -n "Hello, World! 123" | base64 | rot13
+    const ROT13_OF_BASE64_INPUT: &str = "FTIfoT8fVSqipzkxVFNkZwZ=";
 
     // ----
     // Round-trip basics
@@ -396,46 +400,37 @@ mod tests {
         assert_eq!(&out[..INPUT.len()], INPUT.as_bytes());
     }
 
+    /// A `Sink` that never offers more than one byte of spare room per
+    /// call, unlike `VecSink`, whose growth is capacity-driven and can
+    /// jump to many bytes at once.
+    struct OneByteAtATimeSink {
+        bytes: Vec<u8>,
+    }
+
+    impl Sink for OneByteAtATimeSink {
+        type Error = Infallible;
+
+        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+            self.bytes.reserve_exact(1);
+            Ok(Some(&mut self.bytes.spare_capacity_mut()[..1]))
+        }
+
+        fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
+            let amount = amount.min(1);
+            unsafe { self.bytes.set_len(self.bytes.len() + amount) };
+            Ok(())
+        }
+    }
+
     #[test]
     fn repeated_one_byte_output_calls_drive_to_completion() {
-        // Chain state must survive un-normalized across calls: with
-        // 4-byte staging (one base64 group) and a 1-byte output,
-        // staging often ends up exactly drained, and the next call's
-        // entry logic is what restarts the refill at the top of the
-        // buffer.
-        let input = INPUT.as_bytes();
-        let expected =
-            encode_string(rot13(), &encode_string(base64_enc(), INPUT).unwrap()).unwrap();
-        let mut chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]);
-        let mut collected = Vec::new();
-        let mut in_pos = 0;
-        while in_pos < input.len() {
-            let mut out = [0u8; 1];
-            match chain
-                .process(&input[in_pos..], as_uninit_mut(&mut out))
-                .unwrap()
-            {
-                Progress::InputConsumed { written } => {
-                    collected.extend_from_slice(&out[..written]);
-                    in_pos = input.len();
-                }
-                Progress::OutputFilled { consumed } => {
-                    collected.extend_from_slice(&out);
-                    in_pos += consumed;
-                }
-            }
-        }
-        loop {
-            let mut out = [0u8; 1];
-            match chain.finish(as_uninit_mut(&mut out)).unwrap() {
-                DrainProgress::OutputFilled => collected.extend_from_slice(&out),
-                DrainProgress::Done { written } => {
-                    collected.extend_from_slice(&out[..written]);
-                    break;
-                }
-            }
-        }
-        assert_eq!(collected, expected.as_bytes());
+        // Chain state must survive un-normalized across calls: drive
+        // it through a sink that only ever offers one byte at a time.
+        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]);
+        let mut input = SliceSource::new(INPUT.as_bytes());
+        let mut output = OneByteAtATimeSink { bytes: Vec::new() };
+        stream_to_stream(&mut input, chain, &mut output).unwrap();
+        assert_eq!(output.bytes, ROT13_OF_BASE64_INPUT.as_bytes());
     }
 
     // ----
@@ -488,10 +483,8 @@ mod tests {
     fn finish_drains_first_through_second() {
         // base64_enc's finish() emits padding `=`; chained into rot13,
         // that padding must come out rot13'd too, not appended raw.
-        let expected =
-            encode_string(rot13(), &encode_string(base64_enc(), INPUT).unwrap()).unwrap();
         let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
-        assert_eq!(encode_string(chain, INPUT).unwrap(), expected);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), ROT13_OF_BASE64_INPUT);
     }
 
     #[test]
