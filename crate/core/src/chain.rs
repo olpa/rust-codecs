@@ -304,39 +304,20 @@ mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
 
     use super::Chain;
-    #[cfg(feature = "base64")]
     use crate::base64_dec::base64_dec;
     use crate::base64_enc::base64_enc;
     use crate::identity::identity;
     use crate::rot13::rot13;
-    use crate::sources_and_sinks::vec::{VecSink, VecSource};
+    use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::as_uninit_mut;
-    use crate::{stream_to_stream, DriveError};
     use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
-    const INPUT: &[u8] = b"Hello, World! 123";
-
-    fn collect(codec: impl Codec, bytes: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut input = VecSource::new(bytes.to_vec());
-        let mut output = VecSink::default();
-        stream_to_stream(&mut input, codec, &mut output).map_err(|error| match error {
-            DriveError::Codec(error) => error,
-            _ => unreachable!("infallible Vec adapter"),
-        })?;
-        Ok(output.into_inner())
-    }
+    const INPUT: &str = "Hello, World! 123";
 
     #[test]
     fn rot13_then_rot13_is_identity() {
         let chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
-        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
-    }
-
-    #[cfg(feature = "base64")]
-    #[test]
-    fn base64_enc_then_base64_dec_round_trip() {
-        let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 64]);
-        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -344,16 +325,15 @@ mod tests {
         // A 1-byte staging buffer forces `first` and `second` to
         // hand off one byte at a time internally.
         let chain = Chain::new(rot13(), rot13(), vec![0u8; 1]);
-        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
     }
 
-    #[cfg(feature = "base64")]
     #[test]
     fn base64_round_trip_through_one_byte_staging() {
         // Even base64's 4-byte groups fit through a 1-byte staging
         // buffer, thanks to the carry contract.
         let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 1]);
-        assert_eq!(collect(chain, INPUT).unwrap(), INPUT);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -363,9 +343,11 @@ mod tests {
         // since input remains.
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 8]);
         let mut out = [0u8; 1];
-        let outcome = chain.process(INPUT, as_uninit_mut(&mut out)).unwrap();
+        let outcome = chain
+            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
+            .unwrap();
         assert!(matches!(outcome, Progress::OutputFilled { .. }));
-        assert_eq!(out[0], INPUT[0]);
+        assert_eq!(out[0], INPUT.as_bytes()[0]);
     }
 
     #[test]
@@ -375,17 +357,18 @@ mod tests {
         // later.
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
         let mut out = [0u8; 64];
-        let outcome = chain.process(INPUT, as_uninit_mut(&mut out)).unwrap();
+        let outcome = chain
+            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
+            .unwrap();
         assert_eq!(
             outcome,
             Progress::InputConsumed {
                 written: INPUT.len()
             }
         );
-        assert_eq!(&out[..INPUT.len()], INPUT);
+        assert_eq!(&out[..INPUT.len()], INPUT.as_bytes());
     }
 
-    #[cfg(feature = "base64")]
     #[test]
     fn repeated_one_byte_output_calls_drive_to_completion() {
         // Chain state must survive un-normalized across calls: with
@@ -393,19 +376,21 @@ mod tests {
         // staging often ends up exactly drained, and the next call's
         // entry logic is what restarts the refill at the top of the
         // buffer.
-        let expected = collect(rot13(), &collect(base64_enc(), INPUT).unwrap()).unwrap();
+        let input = INPUT.as_bytes();
+        let expected =
+            encode_string(rot13(), &encode_string(base64_enc(), INPUT).unwrap()).unwrap();
         let mut chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]);
         let mut collected = Vec::new();
         let mut in_pos = 0;
-        while in_pos < INPUT.len() {
+        while in_pos < input.len() {
             let mut out = [0u8; 1];
             match chain
-                .process(&INPUT[in_pos..], as_uninit_mut(&mut out))
+                .process(&input[in_pos..], as_uninit_mut(&mut out))
                 .unwrap()
             {
                 Progress::InputConsumed { written } => {
                     collected.extend_from_slice(&out[..written]);
-                    in_pos = INPUT.len();
+                    in_pos = input.len();
                 }
                 Progress::OutputFilled { consumed } => {
                     collected.extend_from_slice(&out);
@@ -423,17 +408,17 @@ mod tests {
                 }
             }
         }
-        assert_eq!(collected, expected);
+        assert_eq!(collected, expected.as_bytes());
     }
 
-    #[cfg(feature = "base64")]
     #[test]
     fn finish_drains_first_through_second() {
         // base64_enc's finish() emits padding `=`; chained into rot13,
         // that padding must come out rot13'd too, not appended raw.
-        let expected = collect(rot13(), &collect(base64_enc(), INPUT).unwrap()).unwrap();
+        let expected =
+            encode_string(rot13(), &encode_string(base64_enc(), INPUT).unwrap()).unwrap();
         let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
-        assert_eq!(collect(chain, INPUT).unwrap(), expected);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), expected);
     }
 
     #[test]
@@ -444,7 +429,7 @@ mod tests {
         let second: Box<dyn Codec> = Box::new(rot13());
         let chain: Chain<Box<dyn Codec>, Box<dyn Codec>, Vec<u8>> =
             Chain::new(first, second, vec![0u8; 64]);
-        collect(chain, INPUT).unwrap();
+        encode_string(chain, INPUT).unwrap();
     }
 
     #[test]
@@ -452,7 +437,7 @@ mod tests {
         // rot13 ∘ rot13 ∘ identity == identity, stacked three deep.
         let inner = Chain::new(rot13(), identity(), vec![0u8; 32]);
         let outer = Chain::new(rot13(), inner, vec![0u8; 32]);
-        assert_eq!(collect(outer, INPUT).unwrap(), INPUT);
+        assert_eq!(encode_string(outer, INPUT).unwrap(), INPUT);
     }
 
     #[test]
@@ -508,10 +493,12 @@ mod tests {
         // `first` withholds everything until flushed;
         // `Chain::sync_flush` must pull it out through `second` so
         // the bytes arrive transformed, and the stream stays open.
-        let expected = collect(rot13(), INPUT).unwrap();
+        let expected = encode_string(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
         let mut out = [0u8; 64];
-        let outcome = chain.process(INPUT, as_uninit_mut(&mut out)).unwrap();
+        let outcome = chain
+            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
+            .unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
@@ -520,17 +507,19 @@ mod tests {
                 written: expected.len()
             }
         );
-        assert_eq!(&out[..expected.len()], expected.as_slice());
+        assert_eq!(&out[..expected.len()], expected.as_bytes());
     }
 
     #[test]
     fn flush_drains_a_hoarding_second() {
         // `second` withholds; `Chain::sync_flush` must invoke
         // `second`'s own sync_flush after `first`'s.
-        let expected = collect(rot13(), INPUT).unwrap();
+        let expected = encode_string(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]);
         let mut out = [0u8; 64];
-        let outcome = chain.process(INPUT, as_uninit_mut(&mut out)).unwrap();
+        let outcome = chain
+            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
+            .unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
@@ -539,7 +528,7 @@ mod tests {
                 written: expected.len()
             }
         );
-        assert_eq!(&out[..expected.len()], expected.as_slice());
+        assert_eq!(&out[..expected.len()], expected.as_bytes());
     }
 
     #[test]
@@ -550,9 +539,11 @@ mod tests {
         // too.
         let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
         let mut big = [0u8; 64];
-        chain.process(INPUT, as_uninit_mut(&mut big)).unwrap();
+        chain
+            .process(INPUT.as_bytes(), as_uninit_mut(&mut big))
+            .unwrap();
 
-        let expected = collect(rot13(), INPUT).unwrap();
+        let expected = encode_string(rot13(), INPUT).unwrap();
         let mut collected = Vec::new();
         loop {
             let mut out = [0u8; 1];
@@ -564,11 +555,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(collected, expected);
+        assert_eq!(collected, expected.as_bytes());
 
         // Second round: new input after a completed flush.
         chain.process(b"abc", as_uninit_mut(&mut big)).unwrap();
-        let expected2 = collect(rot13(), b"abc").unwrap();
+        let expected2 = encode_string(rot13(), "abc").unwrap();
         let drain = chain.sync_flush(as_uninit_mut(&mut big)).unwrap();
         assert_eq!(
             drain,
@@ -576,7 +567,7 @@ mod tests {
                 written: expected2.len()
             }
         );
-        assert_eq!(&big[..expected2.len()], expected2.as_slice());
+        assert_eq!(&big[..expected2.len()], expected2.as_bytes());
     }
 
     /// Claims to consume more input than it was given.
@@ -606,8 +597,12 @@ mod tests {
         // indices out of bounds. Validation turns it into a
         // ByteCountClaim error instead.
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
-        let result = collect(chain, INPUT);
-        assert_eq!(result.unwrap_err().kind, crate::ErrorKind::ByteCountClaim);
+        match encode_string(chain, INPUT).unwrap_err() {
+            EncodeError::Codec(error) => {
+                assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
+            }
+            other => panic!("expected a codec error, got {other:?}"),
+        }
     }
 
     struct FirstFailsOnce {
