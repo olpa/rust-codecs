@@ -356,6 +356,14 @@ mod tests {
         encode_string(chain, INPUT).unwrap();
     }
 
+    #[test]
+    fn finish_drains_first_through_second() {
+        // base64_enc's finish() emits padding `=`; chained into rot13,
+        // that padding must come out rot13'd too, not appended raw.
+        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), ROT13_OF_BASE64_INPUT);
+    }
+
     // ----
     // Buffer-size edge cases
     // ----
@@ -477,14 +485,6 @@ mod tests {
             self.buf.extend_from_slice(input);
             Ok(Progress::InputConsumed { written: 0 })
         }
-    }
-
-    #[test]
-    fn finish_drains_first_through_second() {
-        // base64_enc's finish() emits padding `=`; chained into rot13,
-        // that padding must come out rot13'd too, not appended raw.
-        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
-        assert_eq!(encode_string(chain, INPUT).unwrap(), ROT13_OF_BASE64_INPUT);
     }
 
     #[test]
