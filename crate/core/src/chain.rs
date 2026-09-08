@@ -314,11 +314,47 @@ mod tests {
 
     const INPUT: &str = "Hello, World! 123";
 
+    // ----
+    // Round-trip basics
+    // ----
+
     #[test]
-    fn rot13_then_rot13_is_identity() {
+    fn smoke_test_using_rot13() {
+        // rot13 then rot13 is identity.
         let chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
         assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
     }
+
+    #[test]
+    fn base64_round_trip_through_one_byte_staging() {
+        // Even base64's 4-byte groups fit through a 1-byte staging
+        // buffer, thanks to the internal buffer of the codec
+        let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 1]);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
+    }
+
+    #[test]
+    fn nested_chain_three_codecs() {
+        // rot13 ∘ rot13 ∘ identity == identity, stacked three deep.
+        let inner = Chain::new(rot13(), identity(), vec![0u8; 32]);
+        let outer = Chain::new(rot13(), inner, vec![0u8; 32]);
+        assert_eq!(encode_string(outer, INPUT).unwrap(), INPUT);
+    }
+
+    #[test]
+    fn dyn_composition_compiles_and_runs() {
+        // Identity logic is already covered by `smoke_test_using_rot13`;
+        // this test exists only to check that `Chain` accepts `Box<dyn Codec>`.
+        let first: Box<dyn Codec> = Box::new(rot13());
+        let second: Box<dyn Codec> = Box::new(rot13());
+        let chain: Chain<Box<dyn Codec>, Box<dyn Codec>, Vec<u8>> =
+            Chain::new(first, second, vec![0u8; 64]);
+        encode_string(chain, INPUT).unwrap();
+    }
+
+    // ----
+    // Buffer-size edge cases
+    // ----
 
     #[test]
     fn tiny_staging_buffer_forces_partial_progress() {
@@ -329,24 +365,15 @@ mod tests {
     }
 
     #[test]
-    fn base64_round_trip_through_one_byte_staging() {
-        // Even base64's 4-byte groups fit through a 1-byte staging
-        // buffer, thanks to the carry contract.
-        let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 1]);
-        assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
-    }
-
-    #[test]
     fn tiny_output_buffer_forces_partial_progress() {
-        // rot13-then-rot13 is the identity, so a 1-byte output buffer
-        // should return one byte of `INPUT` and report `OutputFilled`,
-        // since input remains.
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 8]);
         let mut out = [0u8; 1];
         let outcome = chain
             .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
             .unwrap();
-        assert!(matches!(outcome, Progress::OutputFilled { .. }));
+        // 8-byte staging caps `first` at 8 bytes consumed, even though
+        // `output` only fits 1 of those through `second`.
+        assert_eq!(outcome, Progress::OutputFilled { consumed: 8 });
         assert_eq!(out[0], INPUT.as_bytes()[0]);
     }
 
@@ -411,40 +438,9 @@ mod tests {
         assert_eq!(collected, expected.as_bytes());
     }
 
-    #[test]
-    fn finish_drains_first_through_second() {
-        // base64_enc's finish() emits padding `=`; chained into rot13,
-        // that padding must come out rot13'd too, not appended raw.
-        let expected =
-            encode_string(rot13(), &encode_string(base64_enc(), INPUT).unwrap()).unwrap();
-        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
-        assert_eq!(encode_string(chain, INPUT).unwrap(), expected);
-    }
-
-    #[test]
-    fn dyn_composition_compiles_and_runs() {
-        // Identity logic is already covered by `rot13_then_rot13_is_identity`;
-        // this test exists only to check that `Chain` accepts `Box<dyn Codec>`.
-        let first: Box<dyn Codec> = Box::new(rot13());
-        let second: Box<dyn Codec> = Box::new(rot13());
-        let chain: Chain<Box<dyn Codec>, Box<dyn Codec>, Vec<u8>> =
-            Chain::new(first, second, vec![0u8; 64]);
-        encode_string(chain, INPUT).unwrap();
-    }
-
-    #[test]
-    fn nested_chain_three_codecs() {
-        // rot13 ∘ rot13 ∘ identity == identity, stacked three deep.
-        let inner = Chain::new(rot13(), identity(), vec![0u8; 32]);
-        let outer = Chain::new(rot13(), inner, vec![0u8; 32]);
-        assert_eq!(encode_string(outer, INPUT).unwrap(), INPUT);
-    }
-
-    #[test]
-    #[should_panic(expected = "staging buffer must be non-empty")]
-    fn empty_staging_buffer_panics() {
-        let _ = Chain::new(rot13(), rot13(), Vec::<u8>::new());
-    }
+    // ----
+    // `sync_flush`/`finish` draining
+    // ----
 
     /// A block-buffering codec: hoards all input and emits it only on
     /// `sync_flush`/`finish`, the class `DrainCodec::sync_flush`
@@ -486,6 +482,16 @@ mod tests {
             self.buf.extend_from_slice(input);
             Ok(Progress::InputConsumed { written: 0 })
         }
+    }
+
+    #[test]
+    fn finish_drains_first_through_second() {
+        // base64_enc's finish() emits padding `=`; chained into rot13,
+        // that padding must come out rot13'd too, not appended raw.
+        let expected =
+            encode_string(rot13(), &encode_string(base64_enc(), INPUT).unwrap()).unwrap();
+        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
+        assert_eq!(encode_string(chain, INPUT).unwrap(), expected);
     }
 
     #[test]
@@ -569,6 +575,10 @@ mod tests {
         );
         assert_eq!(&big[..expected2.len()], expected2.as_bytes());
     }
+
+    // ----
+    // Error handling
+    // ----
 
     /// Claims to consume more input than it was given.
     struct Overclaimer;
@@ -696,5 +706,11 @@ mod tests {
         let progress = chain.process(b"", as_uninit_mut(&mut output)).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 2 });
         assert_eq!(&output[..2], b"bc");
+    }
+
+    #[test]
+    #[should_panic(expected = "staging buffer must be non-empty")]
+    fn empty_staging_buffer_panics() {
+        let _ = Chain::new(rot13(), rot13(), Vec::<u8>::new());
     }
 }
