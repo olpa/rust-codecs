@@ -307,7 +307,7 @@ mod tests {
     use super::Chain;
     use crate::base64_dec::base64_dec;
     use crate::base64_enc::base64_enc;
-    use crate::identity::identity;
+    use crate::identity::{identity, Identity};
     use crate::rot13::rot13;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
@@ -634,13 +634,15 @@ mod tests {
         assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
     }
 
+    /// Fails once, then behaves like a plain `Identity`.
     struct FirstFailsOnce {
         failed: bool,
+        inner: Identity,
     }
 
     impl DrainCodec for FirstFailsOnce {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.inner.finish(output)
         }
     }
 
@@ -655,19 +657,20 @@ mod tests {
                 output[..2].write_copy_of_slice(b"xy");
                 return Err(Error::new(crate::ErrorKind::CorruptStream, 1, 2));
             }
-            let n = input.len().min(output.len());
-            output[..n].write_copy_of_slice(&input[..n]);
-            if n == input.len() {
-                Ok(Progress::InputConsumed { written: n })
-            } else {
-                Ok(Progress::OutputFilled { consumed: n })
-            }
+            self.inner.process(input, output)
         }
     }
 
     #[test]
     fn first_codec_error_progress_is_retained_in_staging() {
-        let mut chain = Chain::new(FirstFailsOnce { failed: false }, identity(), vec![0; 8]);
+        let mut chain = Chain::new(
+            FirstFailsOnce {
+                failed: false,
+                inner: identity(),
+            },
+            identity(),
+            vec![0; 8],
+        );
         let mut output = [0; 8];
 
         let error = chain
@@ -680,13 +683,15 @@ mod tests {
         assert_eq!(&output[..4], b"xybc");
     }
 
+    /// Fails once, then behaves like a plain `Identity`.
     struct SecondFailsOnce {
         failed: bool,
+        inner: Identity,
     }
 
     impl DrainCodec for SecondFailsOnce {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.inner.finish(output)
         }
     }
 
@@ -701,19 +706,20 @@ mod tests {
                 output[..1].write_copy_of_slice(&input[..1]);
                 return Err(Error::new(crate::ErrorKind::CorruptStream, 1, 1));
             }
-            let n = input.len().min(output.len());
-            output[..n].write_copy_of_slice(&input[..n]);
-            if n == input.len() {
-                Ok(Progress::InputConsumed { written: n })
-            } else {
-                Ok(Progress::OutputFilled { consumed: n })
-            }
+            self.inner.process(input, output)
         }
     }
 
     #[test]
     fn second_codec_error_progress_compacts_staging() {
-        let mut chain = Chain::new(identity(), SecondFailsOnce { failed: false }, vec![0; 8]);
+        let mut chain = Chain::new(
+            identity(),
+            SecondFailsOnce {
+                failed: false,
+                inner: identity(),
+            },
+            vec![0; 8],
+        );
         let mut output = [0; 8];
 
         let error = chain
