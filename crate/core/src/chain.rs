@@ -11,53 +11,35 @@ use crate::step::{codec_step, DrainOp};
 use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
-/// Composes `A` (encodes/decodes into `staging`) and `B` (reads out of
-/// `staging`) into a single [`Codec`].
+/// Composes `A` (encodes/decodes into `staging`, an internal buffer)
+/// and `B` (reads out of `staging`) into a single [`Codec`].
+/// `Chain` is itself a `Codec`, so chains of chains work.
 ///
-/// `staging` is caller-provided (`S: AsMut<[u8]>`): a borrowed `&mut
-/// [u8]`, an inline `[u8; N]`, or a `Vec<u8>`. `Chain` is itself a
-/// `Codec`, so chains of chains work.
+/// # `Chain` vs. wrapping `a` and `b` separately
 ///
-/// # Corner cases
+/// Prefer `stream_to_stream` in library code.
 ///
-/// **Interrupted `flush`.** A flush that returns `OutputFilled` is
-/// resumed by calling `flush` again with fresh output room. `first`
-/// is flushed again, but by the `Codec` contract that is a no-op once
-/// it already reached `Done` for this sync point. A `process` call
-/// between the two flushes opens a new sync boundary.
+/// ```text
+/// let chain = Chain::new(a, b, staging);
+/// stream_to_stream(input, chain, output);
+/// ```
 ///
-/// **Return-clean.** When `process` returns, `staging` holds only
-/// bytes `second` refused because output was full. The chain never
-/// withholds bytes it could have delivered.
+/// and
 ///
-/// **Staging size.** Affects performance, not correctness: any
-/// non-empty buffer works, even one byte. `new` panics on an empty
-/// one, since it could never hold a byte.
+/// ```text
+/// let mut reader = CodecReader::new(input, a, inbuf);
+/// let mut writer = CodecWriter::new(output, b, outbuf);
+/// io::copy(&mut reader, &mut writer);
+/// // reader.finish(); automatically on eof
+/// writer.finish();
+/// ```
 ///
-/// **Empty output buffer.** `process` always reports `OutputFilled`
-/// for a zero-length `output`, since it's trivially full. Not an
-/// error, but a driver looping on it makes no progress.
+/// do the same work, but `stream_to_stream` calls `finish` automatically.
 ///
-/// **Misbehaving codecs.** Byte counts from both inner codecs are
-/// checked on every call; an overclaim becomes
-/// [`ErrorKind::ByteCountClaim`](crate::ErrorKind::ByteCountClaim)
-/// instead of corrupting the staging indices. Reported counts are
-/// always chain-level, never the inner codec's own numbers.
-///
-/// # `Chain` vs. wrapping input and output separately
-///
-/// `stream_to_stream(input, Chain::new(a, b, staging), output)` and
-/// `io::copy` between an `a`-wrapped reader and a `b`-wrapped writer
-/// agree only for well-behaved, whole-stream codecs. `io::copy` gives
-/// `b` no signal that input is exhausted for good (`Write::flush` is
-/// a resumable sync point, not a permanent end), so a stateful
-/// codec's trailer, checksum, or padding never gets written unless
-/// `b` is finalized explicitly.
-///
-/// `Chain` instead behaves as one correct `Codec` on every call: it
-/// tracks partial consumption on both sides, retains and compacts
-/// intermediate output, translates two codecs' progress into one
-/// `Progress`, and validates both codecs' reported counts.
+/// Also, the first form needs no I/O backend at all. Its parameters
+/// are the `Source` and `Sink` traits, not `std::io` or `embedded_io`.
+/// `CodecReader` and `CodecWriter` exist for those two backends, but a
+/// custom `Source`/`Sink` implementation might not have one.
 pub struct Chain<A, B, S> {
     first: A,
     second: B,
