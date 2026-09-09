@@ -312,11 +312,13 @@ mod tests {
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::as_uninit_mut;
-    use crate::{stream_to_stream, Codec, DrainCodec, DrainProgress, Error, Progress, Sink};
+    use crate::{stream_to_stream, Codec, DrainCodec, DrainProgress, Error, Progress, Pump, Sink};
 
     const INPUT: &str = "Hello, World! 123";
     // rot13(base64_enc(INPUT)): $ echo -n "Hello, World! 123" | base64 | rot13
     const ROT13_OF_BASE64_INPUT: &str = "FTIfoT8fVSqipzkxVFNkZwZ=";
+    // rot13(INPUT): $ echo -n "Hello, World! 123" | rot13
+    const ROT13_OF_INPUT: &str = "Uryyb, Jbeyq! 123";
 
     // ----
     // Round-trip basics
@@ -532,41 +534,32 @@ mod tests {
 
     #[test]
     fn interrupted_flush_resumes_and_the_stream_stays_open() {
-        // Drive a flush through 1-byte outputs: each OutputFilled
-        // must resume where it left off without re-flushing `first`,
-        // and after Done the chain must accept and flush new input
-        // too.
-        let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
+        // The point isn't `sync_flush`'s own return value: it's that
+        // flushing a hoarding `first` through 1-byte outputs doesn't
+        // end the stream. `Pump` must still accept and flush new
+        // input afterward.
+        let chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
+        let mut pump = Pump::new(chain);
         let mut big = [0u8; 64];
-        chain
+        pump.get_mut()
             .process(INPUT.as_bytes(), as_uninit_mut(&mut big))
             .unwrap();
 
-        let expected = encode_string(rot13(), INPUT).unwrap();
-        let mut collected = Vec::new();
-        loop {
-            let mut out = [0u8; 1];
-            match chain.sync_flush(as_uninit_mut(&mut out)).unwrap() {
-                DrainProgress::OutputFilled => collected.extend_from_slice(&out),
-                DrainProgress::Done { written } => {
-                    collected.extend_from_slice(&out[..written]);
-                    break;
-                }
-            }
-        }
-        assert_eq!(collected, expected.as_bytes());
+        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+        pump.sync_flush_to(&mut sink).unwrap();
+        assert_eq!(sink.bytes, ROT13_OF_INPUT.as_bytes());
+        assert!(!pump.is_done());
 
-        // Second round: new input after a completed flush.
-        chain.process(b"abc", as_uninit_mut(&mut big)).unwrap();
-        let expected2 = encode_string(rot13(), "abc").unwrap();
-        let drain = chain.sync_flush(as_uninit_mut(&mut big)).unwrap();
-        assert_eq!(
-            drain,
-            DrainProgress::Done {
-                written: expected2.len()
-            }
-        );
-        assert_eq!(&big[..expected2.len()], expected2.as_bytes());
+        // Second round: same input again, flushed into the same
+        // sink, must land right after the first round's output.
+        pump.get_mut()
+            .process(INPUT.as_bytes(), as_uninit_mut(&mut big))
+            .unwrap();
+        pump.sync_flush_to(&mut sink).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(ROT13_OF_INPUT.as_bytes());
+        expected.extend_from_slice(ROT13_OF_INPUT.as_bytes());
+        assert_eq!(sink.bytes, expected);
     }
 
     // ----
