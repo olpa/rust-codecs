@@ -11,24 +11,24 @@ use crate::step::{codec_step, DrainOp};
 use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
-/// Composes `A` (encodes/decodes into `staging`, an internal buffer)
-/// and `B` (reads out of `staging`) into a single [`Codec`].
+/// Compose two codecs into a single [`Codec`].
+///
 /// `Chain` is itself a `Codec`, so chains of chains work.
 ///
-/// # `Chain` vs. wrapping `a` and `b` separately
+/// # `Chain` vs. wrapping `first` and `second` separately
 ///
-/// Prefer `stream_to_stream` in library code.
+/// Prefer [`stream_to_stream`](crate::stream_to_stream) in library code.
 ///
 /// ```text
-/// let chain = Chain::new(a, b, staging);
+/// let chain = Chain::new(first, second, staging);
 /// stream_to_stream(input, chain, output);
 /// ```
 ///
 /// and
 ///
 /// ```text
-/// let mut reader = CodecReader::new(input, a, inbuf);
-/// let mut writer = CodecWriter::new(output, b, outbuf);
+/// let mut reader = CodecReader::new(input, first, inbuf);
+/// let mut writer = CodecWriter::new(output, second, outbuf);
 /// io::copy(&mut reader, &mut writer);
 /// // reader.finish(); automatically on eof
 /// writer.finish();
@@ -37,7 +37,8 @@ use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 /// do the same work, but `stream_to_stream` calls `finish` automatically.
 ///
 /// Also, the first form needs no I/O backend at all. Its parameters
-/// are the `Source` and `Sink` traits, not `std::io` or `embedded_io`.
+/// are the [`Source`](crate::Source) and [`Sink`](crate::Sink) traits,
+/// not `std::io` or `embedded_io`.
 /// `CodecReader` and `CodecWriter` exist for those two backends, but a
 /// custom `Source`/`Sink` implementation might not have one.
 pub struct Chain<A, B, S> {
