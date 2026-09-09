@@ -601,6 +601,39 @@ mod tests {
         }
     }
 
+    /// Claims to have written more than the buffer it was handed.
+    struct DrainOverclaimer;
+
+    impl DrainCodec for DrainOverclaimer {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done {
+                written: output.len() + 1,
+            })
+        }
+    }
+
+    impl Codec for DrainOverclaimer {
+        fn process(
+            &mut self,
+            _input: &[u8],
+            _output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            Ok(Progress::InputConsumed { written: 0 })
+        }
+    }
+
+    #[test]
+    fn lying_drain_codec_is_an_error_not_index_corruption() {
+        // Same property as `lying_inner_codec_is_an_error_not_index_corruption`,
+        // but for a `finish`/`sync_flush` overclaim instead of a
+        // `process` overclaim: `DrainOp::step` validates the count
+        // before `drain_through` ever uses it to advance `stage_pos`.
+        let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]);
+        let mut output = [0u8; 8];
+        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
+    }
+
     struct FirstFailsOnce {
         failed: bool,
     }
