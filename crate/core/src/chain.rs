@@ -103,6 +103,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// Return the number of bytes written to `output`.
     /// Do nothing if `staging` is empty.
     /// `caller_consumed_so_far` is used for the error position rebasing.
+    ///
+    /// Postcondition: `staging` ends up empty, or `output[out_pos..]`
+    /// ends up completely filled. This follows from
+    /// [`Codec::process`]'s contract.
     fn drain_staging_into(
         &mut self,
         output: &mut [MaybeUninit<u8>],
@@ -210,8 +214,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             if out_pos == output.len() {
                 return Ok(DrainProgress::OutputFilled);
             }
-            // Otherwise staging came up empty but `first` isn't done
-            // yet — run another pass.
+            // `out_pos != output.len()` here, so by
+            // `drain_staging_into`'s postcondition, `staging` is
+            // empty. `first` isn't done yet, therefore run another pass.
         }
     }
 }
@@ -227,19 +232,22 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
+    /// Each pass pushes `input` through `first` into `staging`, then
+    /// drains `staging` into `output`.
+    /// `first` runs only while `input` remains.
+    /// A pass ends the loop once `input` is fully consumed or `output` is fully filled.
+    /// Otherwise the loop runs again.
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
 
-        // Each turn is one pass: `first` appends to staging, then
-        // staging drains into `output`. A pass ends the loop once
-        // input is fully consumed or output is fully filled;
-        // otherwise it runs again.
         loop {
-            // `first` runs only while input remains; once `input` is
-            // exhausted, calling it again would just feed an empty
-            // slice.
+            // Once `input` is exhausted, calling `first` again would
+            // just feed an empty slice.
             if in_pos < input.len() {
+                //
+                // Push `input` through `first` into `staging`.
+                //
                 let staging = self.staging.as_mut();
                 let input_len = input.len() - in_pos;
                 let output_len = staging.len() - self.stage_len;
@@ -261,10 +269,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                 self.stage_len += moved.written;
             }
 
-            // `second` always reads staging from offset 0. A partial
-            // drain is compacted to the front for the next pass.
-            // Skipped when nothing is staged, since an empty-input
-            // call to `second` produces nothing.
+            //
+            // Drain `staging` into `output`.
+            //
             out_pos += self.drain_staging_into(output, out_pos, in_pos)?;
 
             // Case: input fully consumed, and nothing is left waiting
@@ -276,8 +283,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             if out_pos == output.len() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
-            // Otherwise staging came up empty but neither `input` nor
-            // `output` is finished — run another pass.
+            // `out_pos != output.len()` here, so by
+            // `drain_staging_into`'s postcondition, `staging` is
+            // empty. Neither `input` nor `output` is finished. Run
+            // another pass.
         }
     }
 }
