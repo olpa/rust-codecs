@@ -1,7 +1,5 @@
 //! [`Chain`]: compose two [`Codec`]s into one [`Codec`].
 //!
-//! Bytes flow `first` -> staging buffer -> `second`.
-//!
 //! [`BoundaryAwareCodec`](crate::BoundaryAwareCodec) is not
 //! supported. A terminating composition would need its own design.
 
@@ -12,6 +10,8 @@ use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress};
 
 /// Compose two codecs into a single [`Codec`].
+///
+/// Bytes flow `first` -> staging buffer -> `second`.
 ///
 /// `Chain` is itself a `Codec`, so chains of chains work.
 ///
@@ -222,25 +222,29 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
+    /// Sync-flush `first` through `staging` to `second`, then
+    /// sync-flush `second`.
     fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.drain_through(output, DrainOp::SyncFlush)
     }
 
+    /// Finish `first` through `staging` to `second`, then finish
+    /// `second`.
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.drain_through(output, DrainOp::Finish)
     }
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
-    /// Each pass pushes `input` through `first` into `staging`, then
-    /// drains `staging` into `output`.
-    /// `first` runs only while `input` remains.
-    /// A pass ends the loop once `input` is fully consumed or `output` is fully filled.
-    /// Otherwise the loop runs again.
+    /// Push `input` through `first` into `staging`, then drain
+    /// `staging` through `second` into `output`.
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
 
+        // `first` runs only while `input` remains. A pass ends the
+        // loop once `input` is fully consumed or `output` is fully
+        // filled. Otherwise the loop runs again.
         loop {
             // Once `input` is exhausted, calling `first` again would
             // just feed an empty slice.
