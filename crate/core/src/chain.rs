@@ -136,9 +136,15 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         Ok(moved.written)
     }
 
-    /// Shared engine behind `finish` and `sync_flush`: both drive
-    /// `first` through staging into `second`, one pass at a time,
-    /// differing only in which operation `op` runs on each side.
+    /// Shared engine behind `finish` and `sync_flush`.
+    ///
+    /// Finishing the chain means finishing both inner codecs, in
+    /// pipeline order. Each one may still hold buffered bytes after
+    /// the caller stops feeding input. So this flushes `first` into
+    /// `staging`, drains `staging` into `second`, and repeats. Only
+    /// once `first` and `staging` are both empty does it run
+    /// `second`'s own finish or flush. `second` must not finish
+    /// while data is still upstream of it.
     fn drain_through(
         &mut self,
         output: &mut [MaybeUninit<u8>],
@@ -149,8 +155,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 
         loop {
             if !nothing_more_from_first {
+                //
+                // Flush/finish `first` to `staging`.
+                //
                 let staging = self.staging.as_mut();
-                let available = staging.len() - self.stage_len;
                 let moved = match op.step(
                     &mut self.first,
                     as_uninit_mut(&mut staging[self.stage_len..]),
@@ -158,14 +166,14 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     Ok(moved) => moved,
                     Err(error) => {
                         let error = error
-                            .validated(0, available)
+                            .validated(0, staging.len() - self.stage_len)
                             .unwrap_or_else(|violation| violation);
                         self.stage_len += error.written;
                         return Err(Self::rebase_first_failed(error, 0, out_pos));
                     }
                 };
                 match moved {
-                    DrainProgress::OutputFilled => self.stage_len += available,
+                    DrainProgress::OutputFilled => self.stage_len = staging.len(),
                     DrainProgress::Done { written } => {
                         self.stage_len += written;
                         nothing_more_from_first = true;
@@ -173,17 +181,21 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 }
             }
 
+            //
+            // Drain `staging` to `output`
+            //
             out_pos += self.drain_staging_into(output, out_pos, 0)?;
 
             if nothing_more_from_first && self.stage_len == 0 {
-                // `first` is fully drained through `second`; run
-                // `second`'s own step.
-                let available = output.len() - out_pos;
+                //
+                // At this point, `first` is done and `staging` is empty.
+                // Flush/finish `second`.
+                //
                 let moved = match op.step(&mut self.second, &mut output[out_pos..]) {
                     Ok(moved) => moved,
                     Err(error) => {
                         let error = error
-                            .validated(0, available)
+                            .validated(0, output.len() - out_pos)
                             .unwrap_or_else(|violation| violation);
                         return Err(Self::rebase_second_failed(error, 0, out_pos));
                     }
