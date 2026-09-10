@@ -11,7 +11,7 @@ use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
 use super::base64_shared::{self, PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
-use crate::{Codec, DrainProgress, DrainCodec, Error, ErrorKind, Progress};
+use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it encodes with.
@@ -160,7 +160,7 @@ mod tests {
     use crate::uninit::as_uninit_mut;
 
     use super::base64_enc;
-    use crate::{Codec, DrainProgress, DrainCodec, Progress};
+    use crate::{Codec, DrainCodec, DrainProgress, Progress};
     use alloc::vec::Vec;
 
     const INPUT: &str = "Hello, World! 123";

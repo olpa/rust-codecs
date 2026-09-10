@@ -7,7 +7,7 @@ use core::mem::MaybeUninit;
 
 use json_escape::explicit::escape_bytes;
 
-use crate::{Codec, DrainProgress, DrainCodec, Error, ErrorKind, Progress};
+use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// An escape sequence known for the byte right after `pending_literal_len`'s
 /// bytes, tracked through its two possible states so the invalid
@@ -164,7 +164,7 @@ mod tests {
     use super::{escape_bytes, json_enc, JsonEnc, PendingEscape};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{encode_string, VecSink, VecSource};
-    use crate::{Codec, DrainProgress, DrainCodec, DriveError, ErrorKind, Progress};
+    use crate::{Codec, DrainCodec, DrainProgress, DriveError, ErrorKind, Progress};
 
     #[test]
     fn round_trip() {
@@ -253,7 +253,7 @@ mod tests {
         // `escape_transitions_fixture` gets forced to actually happen.
         let (input, expected) = escape_transitions_fixture();
 
-        let mut reader = CodecReader::new(Cursor::new(input), json_enc(), vec![0u8; 6]);
+        let mut reader = CodecReader::new(Cursor::new(input), json_enc(), vec![0u8; 6]).unwrap();
         let mut via_reader = Vec::new();
         let mut buf = [0u8; 6];
         loop {
@@ -270,7 +270,7 @@ mod tests {
     fn writer_matches_one_shot_escape_fed_one_byte_at_a_time() {
         let (input, expected) = escape_transitions_fixture();
 
-        let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 64]);
+        let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 64]).unwrap();
         for chunk in input.chunks(1) {
             writer.write_all(chunk).unwrap();
         }
@@ -284,7 +284,7 @@ mod tests {
         // atomically — `PendingEscape::Started` spreads it across as
         // many calls as needed instead of erroring, the same way base64's carry lets
         // an encoded group span calls smaller than it.
-        let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 1]);
+        let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 1]).unwrap();
         writer.write_all(b"\x01").unwrap();
         let out = writer.finish().unwrap();
         assert_eq!(out, b"\\u0001");
@@ -315,7 +315,7 @@ mod tests {
     fn writer_splits_a_multibyte_character_one_byte_at_a_time() {
         // \xf0\x9f\x98\x80 (😀), fed one byte per write: no stitching is
         // needed, each byte is just an untouched literal.
-        let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 64]);
+        let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 64]).unwrap();
         for &b in b"\xf0\x9f\x98\x80" {
             writer.write_all(&[b]).unwrap();
         }

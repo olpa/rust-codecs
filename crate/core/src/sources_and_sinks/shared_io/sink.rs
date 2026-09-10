@@ -1,7 +1,7 @@
 use core::mem::MaybeUninit;
 
 use crate::uninit::as_uninit_mut;
-use crate::Sink;
+use crate::{EmptyBufferError, Sink};
 
 /// A backend's "write this whole buffer out", already retrying
 /// internally on partial writes and on whatever that backend calls
@@ -25,19 +25,18 @@ pub struct ScratchSink<W, S> {
 impl<W: RetryingWrite, S: AsMut<[u8]>> ScratchSink<W, S> {
     /// Build a `ScratchSink`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `buffer`.
-    pub fn new(inner: W, mut buffer: S) -> Self {
-        assert!(
-            !buffer.as_mut().is_empty(),
-            "ScratchSink buffer must be non-empty"
-        );
-        Self {
+    /// Fails on an empty `buffer`.
+    pub fn new(inner: W, mut buffer: S) -> Result<Self, EmptyBufferError> {
+        if buffer.as_mut().is_empty() {
+            return Err(EmptyBufferError);
+        }
+        Ok(Self {
             inner,
             buffer,
             offered: 0,
-        }
+        })
     }
 
     pub fn get_ref(&self) -> &W {
@@ -150,7 +149,8 @@ mod tests {
                 remaining: &mut bytes,
             },
             [0u8; 6],
-        );
+        )
+        .unwrap();
         assert_eq!(output.spare().unwrap().unwrap().len(), 6);
     }
 
@@ -162,7 +162,8 @@ mod tests {
                 remaining: &mut bytes,
             },
             [0u8; 6],
-        );
+        )
+        .unwrap();
         let first_len = output.spare().unwrap().unwrap().len();
         let second_len = output.spare().unwrap().unwrap().len();
         assert_eq!(first_len, second_len);
@@ -177,7 +178,8 @@ mod tests {
                     remaining: &mut bytes,
                 },
                 [0u8; 8],
-            );
+            )
+            .unwrap();
             let spare = output.spare().unwrap().unwrap();
             spare[..5].write_copy_of_slice(b"abcde");
             output.commit(3).unwrap();
@@ -195,21 +197,22 @@ mod tests {
                 remaining: &mut bytes,
             },
             [0u8; 4],
-        );
+        )
+        .unwrap();
         output.spare().unwrap();
         output.commit(5).unwrap();
     }
 
     #[test]
     fn finish_flushes_the_inner_writer() {
-        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
+        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]).unwrap();
         output.finish().unwrap();
         assert_eq!(output.get_ref().flushes, 1);
     }
 
     #[test]
     fn flush_flushes_the_inner_writer() {
-        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]);
+        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]).unwrap();
         output.flush().unwrap();
         assert_eq!(output.get_ref().flushes, 1);
     }

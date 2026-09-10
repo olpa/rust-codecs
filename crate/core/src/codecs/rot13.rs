@@ -2,7 +2,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
+use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 fn rot13_byte(b: u8) -> u8 {
     match b {

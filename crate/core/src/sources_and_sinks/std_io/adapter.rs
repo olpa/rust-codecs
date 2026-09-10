@@ -31,11 +31,11 @@ pub struct StdSource<R, S>(ScratchSource<StdReader<R>, S>);
 impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
     /// Build a `StdSource`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `buffer`.
-    pub fn new(inner: R, buffer: S) -> Self {
-        Self(ScratchSource::new(StdReader(inner), buffer))
+    /// Fails on an empty `buffer`.
+    pub fn new(inner: R, buffer: S) -> Result<Self, crate::EmptyBufferError> {
+        Ok(Self(ScratchSource::new(StdReader(inner), buffer)?))
     }
 
     pub fn get_ref(&self) -> &R {
@@ -155,11 +155,11 @@ pub struct StdSink<W, S>(ScratchSink<StdWriter<W>, S>);
 impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
     /// Build a `StdSink`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `buffer`.
-    pub fn new(inner: W, buffer: S) -> Self {
-        Self(ScratchSink::new(StdWriter(inner), buffer))
+    /// Fails on an empty `buffer`.
+    pub fn new(inner: W, buffer: S) -> Result<Self, crate::EmptyBufferError> {
+        Ok(Self(ScratchSink::new(StdWriter(inner), buffer)?))
     }
 
     pub fn get_ref(&self) -> &W {
@@ -223,8 +223,8 @@ mod tests {
 
     #[test]
     fn std_source_feeds_std_sink_end_to_end() {
-        let mut input = StdSource::new(Cursor::new(b"std to std".as_slice()), [0u8; 3]);
-        let mut output = StdSink::new(Vec::new(), [0u8; 3]);
+        let mut input = StdSource::new(Cursor::new(b"std to std".as_slice()), [0u8; 3]).unwrap();
+        let mut output = StdSink::new(Vec::new(), [0u8; 3]).unwrap();
         stream_to_stream(&mut input, identity(), &mut output).unwrap();
         assert_eq!(output.into_inner(), b"std to std");
     }

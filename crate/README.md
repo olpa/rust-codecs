@@ -53,7 +53,7 @@ use rust_codecs_rot13::rot13_dec;
 
 fn main() -> std::io::Result<()> {
     let raw = File::open("encoded-hello.txt")?;
-    let mut reader = CodecReader::new(raw, rot13_dec(), vec![0u8; 4096]);
+    let mut reader = CodecReader::new(raw, rot13_dec(), vec![0u8; 4096]).unwrap();
     io::copy(&mut reader, &mut io::stdout())?;
     Ok(())
 }
@@ -74,7 +74,7 @@ use rust_codecs_rot13::rot13_enc;
 
 fn main() -> std::io::Result<()> {
     let plain = std::fs::read("input-hello.txt")?;
-    let mut writer = CodecWriter::new(std::io::stdout().lock(), rot13_enc(), vec![0u8; 4096]);
+    let mut writer = CodecWriter::new(std::io::stdout().lock(), rot13_enc(), vec![0u8; 4096]).unwrap();
     writer.write_all(&plain)?;
     let _stdout = writer.finish()?;
     Ok(())

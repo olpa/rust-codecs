@@ -6,7 +6,7 @@ use crate::sources_and_sinks::shared_io::{
     boundary_aware_pump_read, pump_finish, pump_flush, pump_sync_flush, pump_write,
 };
 use crate::stream::Pump;
-use crate::{BoundaryAwareCodec, Codec, DriveError, Error, ErrorKind};
+use crate::{BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind};
 
 use super::adapter::{BufReadSource, StdSink, StdSource};
 
@@ -60,14 +60,14 @@ pub struct CodecReader<R, C: BoundaryAwareCodec, S> {
 impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Build a `CodecReader`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `inbuf`.
-    pub fn new(inner: R, codec: C, inbuf: S) -> Self {
-        Self {
-            input: StdSource::new(inner, inbuf),
+    /// Fails on an empty `inbuf`.
+    pub fn new(inner: R, codec: C, inbuf: S) -> Result<Self, EmptyBufferError> {
+        Ok(Self {
+            input: StdSource::new(inner, inbuf)?,
             pump: Pump::new(codec),
-        }
+        })
     }
 
     pub fn into_inner(self) -> R {
@@ -172,14 +172,14 @@ pub struct CodecWriter<W, C: Codec, S> {
 impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// Build a `CodecWriter`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `outbuf`, same as [`CodecReader::new`].
-    pub fn new(inner: W, codec: C, outbuf: S) -> Self {
-        Self {
-            output: StdSink::new(inner, outbuf),
+    /// Fails on an empty `outbuf`.
+    pub fn new(inner: W, codec: C, outbuf: S) -> Result<Self, EmptyBufferError> {
+        Ok(Self {
+            output: StdSink::new(inner, outbuf)?,
             pump: Pump::new(codec),
-        }
+        })
     }
 
     pub fn get_ref(&self) -> &W {
@@ -242,7 +242,7 @@ mod tests {
     use core::mem::MaybeUninit;
     use std::io::Write;
 
-    use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
+    use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
     use super::CodecWriter;
 
@@ -289,7 +289,8 @@ mod tests {
 
     #[test]
     fn flush_does_not_emit_a_codec_sync_marker() {
-        let mut writer = CodecWriter::new(Vec::new(), SyncMarker { synced: false }, [0; 8]);
+        let mut writer =
+            CodecWriter::new(Vec::new(), SyncMarker { synced: false }, [0; 8]).unwrap();
         writer.write_all(b"a").unwrap();
 
         writer.flush().unwrap();

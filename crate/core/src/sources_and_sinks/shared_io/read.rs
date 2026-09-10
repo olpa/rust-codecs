@@ -32,13 +32,15 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         match step {
             PumpTransfer::SourceExhausted(_) => break true,
             PumpTransfer::Progressed(_) if output.written() == 0 => {}
-            PumpTransfer::Progressed(_)
-            | PumpTransfer::SinkExhausted(_)
-            | PumpTransfer::End(_) => break false,
+            PumpTransfer::Progressed(_) | PumpTransfer::SinkExhausted(_) | PumpTransfer::End(_) => {
+                break false
+            }
         }
     };
     if source_exhausted {
-        let drained = pump.finish_to(&mut output).map_err(DriveError::widen_source)?;
+        let drained = pump
+            .finish_to(&mut output)
+            .map_err(DriveError::widen_source)?;
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
@@ -59,8 +61,8 @@ mod tests {
     use super::boundary_aware_pump_read;
     use crate::identity::identity;
     use crate::{
-        BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, Progress, Pump,
-        Source,
+        BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error,
+        Progress, Pump, Source,
     };
 
     /// A `Source` over a byte slice, yielding it in fixed-size pulls

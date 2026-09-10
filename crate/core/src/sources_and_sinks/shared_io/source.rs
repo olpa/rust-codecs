@@ -1,5 +1,5 @@
 use super::retry::{retry_fill_buf, retry_on_interrupted};
-use crate::Source;
+use crate::{EmptyBufferError, Source};
 
 /// A backend's raw, unretried `read`, plus how that backend's error
 /// says "interrupted" (`std::io::ErrorKind::Interrupted`,
@@ -23,20 +23,19 @@ pub struct ScratchSource<R, S> {
 impl<R: EintrRead, S: AsMut<[u8]>> ScratchSource<R, S> {
     /// Build a `ScratchSource`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `buffer`.
-    pub fn new(inner: R, mut buffer: S) -> Self {
-        assert!(
-            !buffer.as_mut().is_empty(),
-            "ScratchSource buffer must be non-empty"
-        );
-        Self {
+    /// Fails on an empty `buffer`.
+    pub fn new(inner: R, mut buffer: S) -> Result<Self, EmptyBufferError> {
+        if buffer.as_mut().is_empty() {
+            return Err(EmptyBufferError);
+        }
+        Ok(Self {
             inner,
             buffer,
             pos: 0,
             len: 0,
-        }
+        })
     }
 
     pub fn get_ref(&self) -> &R {
@@ -275,13 +274,13 @@ mod tests {
 
     #[test]
     fn chunk_returns_none_at_genuine_eof() {
-        let mut input = ScratchSource::new(SliceReader(b""), [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b""), [0u8; 4]).unwrap();
         assert_eq!(input.chunk().unwrap(), None);
     }
 
     #[test]
     fn partial_consume_leaves_remainder_visible_on_next_chunk() {
-        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]).unwrap();
 
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
         input.consume(1);
@@ -292,7 +291,7 @@ mod tests {
 
     #[test]
     fn full_consume_triggers_a_refill() {
-        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]).unwrap();
 
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
         input.consume(4);
@@ -301,7 +300,7 @@ mod tests {
 
     #[test]
     fn repeated_chunk_without_consume_is_idempotent() {
-        let mut input = ScratchSource::new(SliceReader(b"abcd"), [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"abcd"), [0u8; 4]).unwrap();
 
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
         assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
@@ -310,7 +309,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn consume_more_than_available_panics() {
-        let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]);
+        let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]).unwrap();
         input.chunk().unwrap();
         input.consume(3);
     }
@@ -321,7 +320,7 @@ mod tests {
             inner: SliceReader(b"retry me"),
             failed: false,
         };
-        let mut input = ScratchSource::new(flaky, [0u8; 8]);
+        let mut input = ScratchSource::new(flaky, [0u8; 8]).unwrap();
         assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
     }
 

@@ -158,7 +158,8 @@ fn compose(names: &[String]) -> Result<Box<dyn Codec>, String> {
     let mut composed: Box<dyn Codec> = Box::new(rust_codecs_core::identity::identity());
     for name in names.iter().rev() {
         let codec = make_codec(name)?;
-        composed = Box::new(Chain::new(codec, composed, vec![0u8; STAGING]));
+        composed =
+            Box::new(Chain::new(codec, composed, vec![0u8; STAGING]).expect("STAGING is non-zero"));
     }
     Ok(composed)
 }
@@ -172,8 +173,10 @@ fn run_io<R: Read, W: Write>(
     let reader_codec = compose(reader_names)?;
     let writer_codec = compose(writer_names)?;
 
-    let mut reader = CodecReader::new(input, reader_codec, vec![0u8; STAGING]);
-    let mut writer = CodecWriter::new(output, writer_codec, vec![0u8; STAGING]);
+    let mut reader =
+        CodecReader::new(input, reader_codec, vec![0u8; STAGING]).expect("STAGING is non-zero");
+    let mut writer =
+        CodecWriter::new(output, writer_codec, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
     writer.finish().map_err(|e| e.to_string())
@@ -193,10 +196,11 @@ fn run_io_stream<R: Read, W: Write>(
 ) -> Result<W, String> {
     let reader_codec = compose(reader_names)?;
     let writer_codec = compose(writer_names)?;
-    let codec = Chain::new(reader_codec, writer_codec, vec![0u8; STAGING]);
+    let codec =
+        Chain::new(reader_codec, writer_codec, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
-    let mut source = StdSource::new(input, vec![0u8; STAGING]);
-    let mut sink = StdSink::new(output, vec![0u8; STAGING]);
+    let mut source = StdSource::new(input, vec![0u8; STAGING]).expect("STAGING is non-zero");
+    let mut sink = StdSink::new(output, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
     stream_to_stream(&mut source, codec, &mut sink).map_err(|e| format!("{e:?}"))?;
     Ok(sink.into_inner())
@@ -374,7 +378,8 @@ mod tests {
             sink.clone(),
             writer_codec,
             vec![0u8; 64],
-        );
+        )
+        .unwrap();
 
         writer.write_all(b"hi\n").unwrap();
         writer.flush().unwrap();

@@ -309,6 +309,10 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 // Errors and validation
 // ----
 
+/// A buffer given to a constructor is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyBufferError;
+
 /// What kind of failure a codec reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {

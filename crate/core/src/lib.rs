@@ -42,7 +42,7 @@
 //! // Act
 //! write!(base_writer, r#"""#).unwrap();
 //!
-//! let mut codec_writer = CodecWriter::new(base_writer, json_codec, scratch_buffer);
+//! let mut codec_writer = CodecWriter::new(base_writer, json_codec, scratch_buffer).unwrap();
 //! write!(codec_writer, r#""\"#).unwrap();
 //!
 //! let mut base_writer = codec_writer.finish().unwrap();
@@ -74,7 +74,7 @@
 //!
 //! // Act
 //! let input: &[u8] = b"8J+mgA==";
-//! let mut codec_reader = CodecReader::new(input, base64_codec, scratch_buffer);
+//! let mut codec_reader = CodecReader::new(input, base64_codec, scratch_buffer).unwrap();
 //! // `read_exact` is `embedded_io::Read`'s, imported above
 //! codec_reader.read_exact(&mut read_buffer).unwrap();
 //!
@@ -140,7 +140,7 @@
 //! use rust_codecs_core::sources_and_sinks::vec::VecSink;
 //! use rust_codecs_core::stream_to_stream;
 //!
-//! let chain = Chain::new(gzip_enc(), base64_enc(), vec![0u8; 64]);
+//! let chain = Chain::new(gzip_enc(), base64_enc(), vec![0u8; 64]).unwrap();
 //! let mut source = SliceSource::new(b"hello");
 //! let mut sink = VecSink::default();
 //! stream_to_stream(&mut source, chain, &mut sink).unwrap();
@@ -209,8 +209,8 @@ extern crate alloc;
 
 mod protocol;
 pub use protocol::{
-    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainProgress, DrainCodec, Error, ErrorKind,
-    Progress, Sink, Source, TransferCounts,
+    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, EmptyBufferError,
+    Error, ErrorKind, Progress, Sink, Source, TransferCounts,
 };
 
 mod uninit;

@@ -32,11 +32,11 @@ pub struct EmbeddedSource<R, S>(ScratchSource<EmbeddedReader<R>, S>);
 impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
     /// Build an `EmbeddedSource`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `buffer`.
-    pub fn new(inner: R, buffer: S) -> Self {
-        Self(ScratchSource::new(EmbeddedReader(inner), buffer))
+    /// Fails on an empty `buffer`.
+    pub fn new(inner: R, buffer: S) -> Result<Self, crate::EmptyBufferError> {
+        Ok(Self(ScratchSource::new(EmbeddedReader(inner), buffer)?))
     }
 
     pub fn get_ref(&self) -> &R {
@@ -194,11 +194,11 @@ pub struct EmbeddedSink<W, S>(ScratchSink<EmbeddedWriter<W>, S>);
 impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {
     /// Build an `EmbeddedSink`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `buffer`.
-    pub fn new(inner: W, buffer: S) -> Self {
-        Self(ScratchSink::new(EmbeddedWriter(inner), buffer))
+    /// Fails on an empty `buffer`.
+    pub fn new(inner: W, buffer: S) -> Result<Self, crate::EmptyBufferError> {
+        Ok(Self(ScratchSink::new(EmbeddedWriter(inner), buffer)?))
     }
 
     pub fn get_ref(&self) -> &W {
@@ -259,10 +259,10 @@ mod tests {
 
     #[test]
     fn embedded_source_feeds_embedded_sink_end_to_end() {
-        let mut input = EmbeddedSource::new(&b"embedded to embedded"[..], [0u8; 3]);
+        let mut input = EmbeddedSource::new(&b"embedded to embedded"[..], [0u8; 3]).unwrap();
         let mut bytes = [0u8; 32];
         let written = {
-            let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 3]);
+            let mut output = EmbeddedSink::new(&mut bytes[..], [0u8; 3]).unwrap();
             stream_to_stream(&mut input, identity(), &mut output).unwrap();
             32 - output.into_inner().len()
         };

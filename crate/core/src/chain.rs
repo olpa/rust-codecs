@@ -9,7 +9,7 @@ use core::mem::MaybeUninit;
 
 use crate::step::{codec_step, DrainOp};
 use crate::uninit::as_uninit_mut;
-use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
+use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress};
 
 /// Compose two codecs into a single [`Codec`].
 ///
@@ -20,7 +20,7 @@ use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 /// Prefer [`stream_to_stream`](crate::stream_to_stream) in library code.
 ///
 /// ```text
-/// let chain = Chain::new(first, second, staging);
+/// let chain = Chain::new(first, second, staging).unwrap();
 /// stream_to_stream(input, chain, output);
 /// ```
 ///
@@ -53,22 +53,19 @@ pub struct Chain<A, B, S> {
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// Build a `Chain`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on an empty `staging` buffer: it could never hold a byte
-    /// for `second` to drain, so the chain could never make progress.
-    /// This is a caller bug, not a runtime condition.
-    pub fn new(first: A, second: B, mut staging: S) -> Self {
-        assert!(
-            !staging.as_mut().is_empty(),
-            "Chain staging buffer must be non-empty"
-        );
-        Self {
+    /// Fails on an empty `staging` buffer.
+    pub fn new(first: A, second: B, mut staging: S) -> Result<Self, EmptyBufferError> {
+        if staging.as_mut().is_empty() {
+            return Err(EmptyBufferError);
+        }
+        Ok(Self {
             first,
             second,
             staging,
             stage_len: 0,
-        }
+        })
     }
 
     /// Reclaim both codecs and the staging buffer, for example to read
@@ -293,7 +290,10 @@ mod tests {
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::as_uninit_mut;
-    use crate::{stream_to_stream, Codec, DrainCodec, DrainProgress, Error, Progress, Pump, Sink};
+    use crate::{
+        stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress,
+        Pump, Sink,
+    };
 
     const INPUT: &str = "Hello, World! 123";
     // rot13(base64_enc(INPUT)): $ echo -n "Hello, World! 123" | base64 | rot13
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn smoke_test_using_rot13() {
         // rot13 then rot13 is identity.
-        let chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
+        let chain = Chain::new(rot13(), rot13(), vec![0u8; 64]).unwrap();
         assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
     }
 
@@ -316,15 +316,15 @@ mod tests {
     fn base64_round_trip_through_one_byte_staging() {
         // Even base64's 4-byte groups fit through a 1-byte staging
         // buffer, thanks to the internal buffer of the codec
-        let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 1]);
+        let chain = Chain::new(base64_enc(), base64_dec(), vec![0u8; 1]).unwrap();
         assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
     fn nested_chain_three_codecs() {
         // rot13 ∘ rot13 ∘ identity == identity, stacked three deep.
-        let inner = Chain::new(rot13(), identity(), vec![0u8; 32]);
-        let outer = Chain::new(rot13(), inner, vec![0u8; 32]);
+        let inner = Chain::new(rot13(), identity(), vec![0u8; 32]).unwrap();
+        let outer = Chain::new(rot13(), inner, vec![0u8; 32]).unwrap();
         assert_eq!(encode_string(outer, INPUT).unwrap(), INPUT);
     }
 
@@ -335,7 +335,7 @@ mod tests {
         let first: Box<dyn Codec> = Box::new(rot13());
         let second: Box<dyn Codec> = Box::new(rot13());
         let chain: Chain<Box<dyn Codec>, Box<dyn Codec>, Vec<u8>> =
-            Chain::new(first, second, vec![0u8; 64]);
+            Chain::new(first, second, vec![0u8; 64]).unwrap();
         encode_string(chain, INPUT).unwrap();
     }
 
@@ -343,7 +343,7 @@ mod tests {
     fn finish_drains_first_through_second() {
         // base64_enc's finish() emits padding `=`; chained into rot13,
         // that padding must come out rot13'd too, not appended raw.
-        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]);
+        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]).unwrap();
         assert_eq!(encode_string(chain, INPUT).unwrap(), ROT13_OF_BASE64_INPUT);
     }
 
@@ -355,13 +355,13 @@ mod tests {
     fn tiny_staging_buffer_forces_partial_progress() {
         // A 1-byte staging buffer forces `first` and `second` to
         // hand off one byte at a time internally.
-        let chain = Chain::new(rot13(), rot13(), vec![0u8; 1]);
+        let chain = Chain::new(rot13(), rot13(), vec![0u8; 1]).unwrap();
         assert_eq!(encode_string(chain, INPUT).unwrap(), INPUT);
     }
 
     #[test]
     fn tiny_output_buffer_forces_partial_progress() {
-        let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 8]);
+        let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 8]).unwrap();
         let mut out = [0u8; 1];
         let outcome = chain
             .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
@@ -377,7 +377,7 @@ mod tests {
         // With generous room on both sides, every byte `second` can
         // produce must come out of this call — nothing held back for
         // later.
-        let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 64]);
+        let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 64]).unwrap();
         let mut out = [0u8; 64];
         let outcome = chain
             .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
@@ -417,7 +417,7 @@ mod tests {
     fn repeated_one_byte_output_calls_drive_to_completion() {
         // Chain state must survive un-normalized across calls: drive
         // it through a sink that only ever offers one byte at a time.
-        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]);
+        let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]).unwrap();
         let mut input = SliceSource::new(INPUT.as_bytes());
         let mut output = OneByteAtATimeSink { bytes: Vec::new() };
         stream_to_stream(&mut input, chain, &mut output).unwrap();
@@ -476,7 +476,7 @@ mod tests {
         // `Chain::sync_flush` must pull it out through `second` so
         // the bytes arrive transformed, and the stream stays open.
         let expected = encode_string(rot13(), INPUT).unwrap();
-        let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
+        let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]).unwrap();
         let mut out = [0u8; 64];
         let outcome = chain
             .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
@@ -497,7 +497,7 @@ mod tests {
         // `second` withholds; `Chain::sync_flush` must invoke
         // `second`'s own sync_flush after `first`'s.
         let expected = encode_string(rot13(), INPUT).unwrap();
-        let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]);
+        let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]).unwrap();
         let mut out = [0u8; 64];
         let outcome = chain
             .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
@@ -519,7 +519,7 @@ mod tests {
         // flushing a hoarding `first` through 1-byte outputs doesn't
         // end the stream. `Pump` must still accept and flush new
         // input afterward.
-        let chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]);
+        let chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]).unwrap();
         let mut pump = Pump::new(chain);
         let mut big = [0u8; 64];
         pump.get_mut()
@@ -573,7 +573,7 @@ mod tests {
         // Unchecked, the overclaimed count would push the staging
         // indices out of bounds. Validation turns it into a
         // ByteCountClaim error instead.
-        let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]);
+        let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]).unwrap();
         match encode_string(chain, INPUT).unwrap_err() {
             EncodeError::Codec(error) => {
                 assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
@@ -609,7 +609,7 @@ mod tests {
         // but for a `finish`/`sync_flush` overclaim instead of a
         // `process` overclaim: `DrainOp::step` validates the count
         // before `drain_through` ever uses it to advance `stage_len`.
-        let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]);
+        let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]).unwrap();
         let mut output = [0u8; 8];
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
         assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
@@ -655,7 +655,8 @@ mod tests {
             },
             identity(),
             vec![0; 8],
-        );
+        )
+        .unwrap();
         let mut output = [0; 8];
 
         let error = chain
@@ -677,7 +678,8 @@ mod tests {
                 inner: identity(),
             },
             vec![0; 8],
-        );
+        )
+        .unwrap();
         let mut output = [0; 8];
 
         let error = chain
@@ -692,8 +694,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "staging buffer must be non-empty")]
-    fn empty_staging_buffer_panics() {
-        let _ = Chain::new(rot13(), rot13(), Vec::<u8>::new());
+    fn empty_staging_buffer_errors() {
+        let result = Chain::new(rot13(), rot13(), Vec::<u8>::new());
+        assert_eq!(result.err(), Some(EmptyBufferError));
     }
 }

@@ -2,7 +2,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{Codec, DrainProgress, DrainCodec, Error, Progress};
+use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 /// Output is identical to input.
 #[derive(Debug, Clone, Copy, Default)]
