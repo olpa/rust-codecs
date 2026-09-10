@@ -87,55 +87,53 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         Error::new(error.kind, consumed, pre_out_pos + error.written)
     }
 
-    /// Offer everything currently staged to `second`, advancing
-    /// `out_pos` by what it wrote and compacting the unconsumed
-    /// remainder to the front of `staging`. `process` passes its own
-    /// `in_pos` as `consumed_on_error`; `drain_through` always passes
-    /// 0, since draining consumes no caller input. A no-op when
-    /// nothing is staged.
+    /// Drop the first `consumed` bytes of `staging` by moving the
+    /// rest to the front, and update `stage_len` to match.
+    fn compact_staging(&mut self, consumed: usize) {
+        let leftover = self.stage_len - consumed;
+        if leftover > 0 {
+            let staging = self.staging.as_mut();
+            staging.copy_within(consumed..self.stage_len, 0);
+        }
+        self.stage_len = leftover;
+    }
+
+    /// Convert as much data as possible from `staging` to `output`.
+    /// Move any leftover bytes to the front of `staging`.
+    /// Return the number of bytes written to `output`.
+    /// Do nothing if `staging` is empty.
+    /// `caller_consumed_so_far` is used for the error position rebasing.
     fn drain_staging_into(
         &mut self,
         output: &mut [MaybeUninit<u8>],
-        out_pos: &mut usize,
-        consumed_on_error: usize,
-    ) -> Result<(), Error> {
+        out_pos: usize,
+        caller_consumed_so_far: usize,
+    ) -> Result<usize, Error> {
         if self.stage_len == 0 {
-            return Ok(());
+            return Ok(0);
         }
         let staging = self.staging.as_mut();
-        let staged = self.stage_len;
-        let output_len = output.len() - *out_pos;
+        let output_len = output.len() - out_pos;
         let moved = match codec_step(
             &mut self.second,
-            &staging[..staged],
-            &mut output[*out_pos..],
+            &staging[..self.stage_len],
+            &mut output[out_pos..],
         ) {
             Ok(moved) => moved,
             Err(error) => {
                 let error = error
-                    .validated(staged, output_len)
+                    .validated(self.stage_len, output_len)
                     .unwrap_or_else(|violation| violation);
-                let leftover = staged - error.consumed;
-                if leftover > 0 {
-                    let staging = self.staging.as_mut();
-                    staging.copy_within(error.consumed..staged, 0);
-                }
-                self.stage_len = leftover;
+                self.compact_staging(error.consumed);
                 return Err(Self::rebase_second_failed(
                     error,
-                    consumed_on_error,
-                    *out_pos,
+                    caller_consumed_so_far,
+                    out_pos,
                 ));
             }
         };
-        *out_pos += moved.written;
-        let leftover = self.stage_len - moved.consumed;
-        if leftover > 0 {
-            let staging = self.staging.as_mut();
-            staging.copy_within(moved.consumed..self.stage_len, 0);
-        }
-        self.stage_len = leftover;
-        Ok(())
+        self.compact_staging(moved.consumed);
+        Ok(moved.written)
     }
 
     /// Shared engine behind `finish` and `sync_flush`: both drive
@@ -175,7 +173,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 }
             }
 
-            self.drain_staging_into(output, &mut out_pos, 0)?;
+            out_pos += self.drain_staging_into(output, out_pos, 0)?;
 
             if nothing_more_from_first && self.stage_len == 0 {
                 // `first` is fully drained through `second`; run
@@ -255,7 +253,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             // drain is compacted to the front for the next pass.
             // Skipped when nothing is staged, since an empty-input
             // call to `second` produces nothing.
-            self.drain_staging_into(output, &mut out_pos, in_pos)?;
+            out_pos += self.drain_staging_into(output, out_pos, in_pos)?;
 
             // Case: input fully consumed, and nothing is left waiting
             // in staging for `second`.
