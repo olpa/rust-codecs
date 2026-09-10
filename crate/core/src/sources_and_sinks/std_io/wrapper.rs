@@ -74,6 +74,8 @@ impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         self.input.into_inner()
     }
 
+    /// Reclaim the reader, the codec, and the scratch buffer. If the
+    /// buffer holds unconsumed bytes, treat them as lost.
     pub fn into_parts(self) -> (R, C, S) {
         let (inner, buffer) = self.input.into_parts();
         (inner, self.pump.into_inner(), buffer)
@@ -131,6 +133,7 @@ impl<R: BufRead, C: BoundaryAwareCodec> BufReadCodecReader<R, C> {
         self.input.into_inner()
     }
 
+    /// Reclaim the reader and the codec.
     pub fn into_parts(self) -> (R, C) {
         (self.input.into_inner(), self.pump.into_inner())
     }
@@ -221,6 +224,8 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         pump_sync_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)
     }
 
+    /// Reclaim the writer, the codec, and the scratch buffer. If the
+    /// buffer holds uncommitted bytes, treat them as lost.
     pub fn into_parts(self) -> (W, C, S) {
         let (inner, buffer) = self.output.into_parts();
         (inner, self.pump.into_inner(), buffer)

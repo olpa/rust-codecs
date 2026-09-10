@@ -54,10 +54,8 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> ScratchSink<W, S> {
         self.inner
     }
 
-    /// Reclaim both the writer and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `ScratchSink`. Any bytes
-    /// staged in the buffer via `spare` but not yet handed to `commit`
-    /// are discarded along with it, and are not written to `inner`.
+    /// Reclaim both the writer and the scratch buffer. If the buffer
+    /// holds uncommitted bytes, treat them as lost.
     pub fn into_parts(self) -> (W, S) {
         (self.inner, self.buffer)
     }

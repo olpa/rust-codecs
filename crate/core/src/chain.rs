@@ -68,11 +68,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         })
     }
 
-    /// Reclaim both codecs and the staging buffer, for example to read
-    /// state one holds (a checksum, a digest) or to reuse the
-    /// buffer's allocation. Any bytes `first` produced but `second`
-    /// had not yet drained are still in the buffer, but `stage_len` is
-    /// not returned with it — treat them as lost.
+    /// Reclaim both codecs and the staging buffer. If the buffer
+    /// holds undrained bytes, treat them as lost.
     pub fn into_parts(self) -> (A, B, S) {
         (self.first, self.second, self.staging)
     }

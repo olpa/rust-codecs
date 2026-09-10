@@ -58,8 +58,8 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
         self.0.pending()
     }
 
-    /// Reclaim both the reader and the scratch buffer; any unconsumed
-    /// bytes still in it are lost.
+    /// Reclaim both the reader and the scratch buffer. If the buffer
+    /// holds unconsumed bytes, treat them as lost.
     pub fn into_parts(self) -> (R, S) {
         let (reader, buffer) = self.0.into_parts();
         (reader.0, buffer)
@@ -176,8 +176,8 @@ impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {
         self.0.into_inner().0
     }
 
-    /// Reclaim both the writer and the scratch buffer; any uncommitted
-    /// staged bytes are lost.
+    /// Reclaim both the writer and the scratch buffer. If the buffer
+    /// holds uncommitted bytes, treat them as lost.
     pub fn into_parts(self) -> (W, S) {
         let (writer, buffer) = self.0.into_parts();
         (writer.0, buffer)

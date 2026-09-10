@@ -53,11 +53,8 @@ impl<R: EintrRead, S: AsMut<[u8]>> ScratchSource<R, S> {
         self.inner
     }
 
-    /// Reclaim both the reader and the scratch buffer, e.g. to reuse
-    /// the buffer's allocation for another `ScratchSource`. Any
-    /// buffered, unconsumed bytes (already read from `inner` into
-    /// the buffer via `chunk`, but not yet passed to `consume`) are
-    /// discarded along with them.
+    /// Reclaim both the reader and the scratch buffer. If the buffer
+    /// holds unconsumed bytes, treat them as lost.
     pub fn into_parts(self) -> (R, S) {
         (self.inner, self.buffer)
     }
