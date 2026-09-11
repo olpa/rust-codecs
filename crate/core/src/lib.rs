@@ -1,14 +1,17 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 //! Provides a stream interface for rewriting input and output byte
-//! streams.
+//! streams. The core is `no_std`-compatible, runs incrementally, and
+//! does not allocate.
 //!
 //! - Introduces [`Source`] and [`Sink`] abstractions for I/O backends,
 //!   and [`Codec`] for byte rewriting.
-//! - The entry point is [`stream_to_stream`], to apply a codec.
-//! - Bundles [`identity`] and [`rot13`] codecs, and, for the
-//!   chicken-and-egg time, [`base64_enc`]/[`base64_dec`] and
-//!   [`json_enc`] escaping.
+//! - The entry points are [`stream_to_stream`] and
+//!   [`encode_str`](sources_and_sinks::vec::encode_str)/
+//!   [`encode_string`](sources_and_sinks::vec::encode_string).
+//! - Bundles [`identity`] and [`rot13`] codecs, and, until they get
+//!   their own crates, [`base64_enc`]/[`base64_dec`] and [`json_enc`]
+//!   escaping.
 //! - Bundled I/O backends for `std::io` and `embedded_io` provide
 //!   [`CodecReader`](sources_and_sinks::std_io::CodecReader),
 //!   [`BufReadCodecReader`](sources_and_sinks::std_io::BufReadCodecReader),
