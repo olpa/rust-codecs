@@ -295,7 +295,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     }
 }
 
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "alloc", feature = "base64"))]
 mod tests {
     use core::convert::Infallible;
     use core::mem::MaybeUninit;

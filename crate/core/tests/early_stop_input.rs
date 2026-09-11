@@ -402,6 +402,7 @@ fn tokenizes_a_string_array_literal_from_a_base64_decoded_two_byte_source() {
 /// internally to do the equivalent for `std::io::Read`/
 /// `embedded_io::Read`; see `CREATING-IO-BACKENDS.md` for the general
 /// pattern.
+#[allow(dead_code)]
 struct CodecSource<I: Source, C: BoundaryAwareCodec, const N: usize> {
     inner: I,
     pump: rust_codecs_core::Pump<C>,
@@ -410,6 +411,7 @@ struct CodecSource<I: Source, C: BoundaryAwareCodec, const N: usize> {
     len: usize,
 }
 
+#[allow(dead_code)]
 impl<I: Source, C: BoundaryAwareCodec, const N: usize> CodecSource<I, C, N> {
     fn new(inner: I, codec: C) -> Self {
         Self {
