@@ -23,8 +23,9 @@
 //!
 //! ## Wrapping an output
 //!
-//! Write a JSON string, escaping its content with `json_enc`, while the
-//! surrounding quotes go straight through to the base writer, unescaped.
+//! This example writes a JSON string and lets `json_enc` escape its
+//! content. The surrounding quotes pass through to the base writer
+//! unchanged.
 //!
 //! ```
 //! # #[cfg(feature = "json")]
@@ -56,7 +57,7 @@
 //!
 //! ## Wrapping an input
 //!
-//! Decode a base64 stream, this time through `embedded_io` streams and
+//! Decode a base64 stream. This example uses `embedded_io` streams and
 //! wrappers instead of `std::io`.
 //!
 //! ```
@@ -86,9 +87,9 @@
 //!
 //! ## Any stream to any stream
 //!
-//! [`stream_to_stream`] applies a codec straight from a [`Source`] to a
-//! [`Sink`], with no reader/writer wrapper in between. Here the source
-//! borrows a `&str`'s bytes and the sink grows a `Vec<u8>`.
+//! [`stream_to_stream`] applies a codec from a [`Source`] to a
+//! [`Sink`]. Here the source borrows a `&str`'s bytes. The sink grows
+//! a `Vec<u8>`.
 //!
 //! ```
 //! # #[cfg(feature = "rot13")]
@@ -116,14 +117,14 @@
 //!
 //! Notes:
 //!
-//! - This slice-to-`Vec` wiring is a simplified re-implementation of
+//! - This slice-to-`Vec` wiring is a simplified reimplementation of
 //!   [`encode_str`](sources_and_sinks::vec::encode_str)/
-//!   [`encode_string`](sources_and_sinks::vec::encode_string); reach for
-//!   those instead of hand-rolling this pattern.
-//! - Side usage: with the [`identity`](identity::identity) codec,
-//!   [`stream_to_stream`] becomes a generic "copy" function between
-//!   streams that are otherwise incompatible, for example `std::io`
-//!   and `embedded_io`.
+//!   [`encode_string`](sources_and_sinks::vec::encode_string). Use
+//!   those functions instead of repeating this pattern.
+//! - With the [`identity`](identity::identity) codec,
+//!   [`stream_to_stream`] works as a generic copy function. It can
+//!   copy between streams that are otherwise incompatible, for
+//!   example `std::io` and `embedded_io`.
 //!
 //! ## Chain of codecs
 //!
@@ -146,32 +147,28 @@
 //! stream_to_stream(&mut source, chain, &mut sink).unwrap();
 //! ```
 //!
-//! This looks equivalent to wrapping the input in one codec and the
-//! output in the other, then running `std::io::copy` between them —
-//! and for a well-behaved, complete stream it is. See [`Chain`]'s docs
-//! for where that equivalence breaks down.
-//!
 //! ## Parsing using early-stop codecs
 //!
 //! A [`BoundaryAwareCodec`] does not have to run through
 //! [`stream_to_stream`] end to end. It can also power a small
-//! hand-written parser, driven one step at a time. The full source for
-//! this example lives in `core/tests/early_stop_input.rs`, which
-//! tokenizes input made of plain text with quoted strings inside it.
+//! hand-written parser, one step at a time.
 //!
-//! The codec at the center of that test, `QuoteEnd`, copies bytes
-//! through unchanged until it meets a `"`. It treats that quote as an
-//! in-band end, but doesn't consume the quote byte itself.
+//! The example lives in `core/tests/early_stop_input.rs`, a tokenizer
+//! for input made of plain text with quoted strings inside it. Its
+//! codec, `QuoteEnd`, copies bytes unchanged until it reaches a `"`.
+//! It treats that quote as an in-band end. It does not consume the
+//! quote byte itself.
 //!
-//! Two ways of moving through the input show up side by side:
+//! The tokenizer moves through the input in two ways:
 //!
 //! - Inside a span of plain text, or inside a quoted string, the
 //!   codec does the reading. `encode_string` runs it over a
-//!   [`Source`] through [`stream_to_stream`], and the source's
-//!   current position moves forward as a side effect.
-//! - The quote character itself has no codec behind it. The driver loop
-//!   reads it with plain [`Source`] calls, `chunk()` and `consume()`,
-//!   advancing the source's position by hand.
+//!   [`Source`] through [`stream_to_stream`]. The source's position
+//!   moves forward as a side effect.
+//! - The quote character itself is not handled by a codec. The driver
+//!   loop reads it directly, with plain [`Source`] calls: `chunk()`
+//!   and `consume()`. This moves the source's position forward by
+//!   hand.
 //!
 //! ```text
 //! while source.chunk().unwrap().is_some() {
@@ -179,21 +176,30 @@
 //!         ...
 //!         State::String => {
 //!             let text = encode_string(source, quote_end()).unwrap();
+//!
 //!             tokens.push(("string", text));
+//!
 //!             State::QuoteThenTopLevel
 //!         }
 //!         State::QuoteThenString | State::QuoteThenTopLevel => {
 //!             let chunk = source.chunk().unwrap().unwrap();
 //!             assert_eq!(chunk[0], b'"');
 //!             source.consume(1);
-//!             ...
+//!
+//!             tokens.push(("quote", "\"".to_string()));
+//!
+//!             if state == State::QuoteThenString {
+//!                 State::String
+//!             } else {
+//!                 State::TopLevel
+//!             }
 //!         }
 //!     };
 //! }
 //! ```
 //!
-//! See `tokenize_string_array_literal` in
-//! `core/tests/early_stop_input.rs` for the full working version.
+//! See `tokenize_string_array_literal` in that same file for the
+//! full working version.
 //!
 //! # A note on `base64` and `json`
 //!
