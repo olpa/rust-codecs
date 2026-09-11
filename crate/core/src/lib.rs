@@ -1,23 +1,20 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-//! Core crate for RustCodecs: the [`Codec`] trait, its vocabulary, and
-//! the stream adapters a codec crate and its clients build on.
+
+//! Provides a stream interface for rewriting input and output byte
+//! streams.
 //!
-//! - [`Codec`]: implement this for a whole-stream codec. Every ordinary
-//!   codec is automatically a [`BoundaryAwareCodec`] too, for input-side
-//!   drivers that can use an in-band end.
-//! - [`Progress`], [`BoundaryAwareProgress`], [`DrainProgress`], [`Error`],
-//!   [`ErrorKind`]: the vocabulary these traits' methods speak in. The
-//!   contract in one sentence: every call fully consumes its input,
-//!   fully fills its output, or (for a `BoundaryAwareCodec`) ends the
-//!   stream in-band.
-//! - [`Source`]/[`Sink`]/[`stream_to_stream`]: the lending stream
-//!   contract, independent of any particular byte transport.
-//! - [`sources_and_sinks`]: concrete `Source`/`Sink` backends —
-//!   `std::io`, `embedded_io`, and `Vec<u8>`.
-//! - [`Pump`]/[`sources_and_sinks::shared_io`]: the reusable core
-//!   behind this crate's own `CodecReader`/`CodecWriter` wrappers, for
-//!   building an incremental `Read`/`Write`-style wrapper over a
-//!   `Source`/`Sink` backend of your own.
+//! - Introduces [`Source`] and [`Sink`] abstractions for I/O backends,
+//!   and [`Codec`] for byte rewriting.
+//! - The entry point is [`stream_to_stream`], to apply a codec.
+//! - Bundles [`identity`] and [`rot13`] codecs, and, for the
+//!   chicken-and-egg time, [`base64_enc`]/[`base64_dec`] and
+//!   [`json_enc`] escaping.
+//! - Bundled I/O backends for `std::io` and `embedded_io` provide
+//!   [`CodecReader`](sources_and_sinks::std_io::CodecReader),
+//!   [`BufReadCodecReader`](sources_and_sinks::std_io::BufReadCodecReader),
+//!   and [`CodecWriter`](sources_and_sinks::std_io::CodecWriter)
+//!   wrappers around a `Read`, `BufRead`, or `Write`.
+//! - Invites third-party codecs and I/O backends.
 //!
 //! # Examples
 //!
