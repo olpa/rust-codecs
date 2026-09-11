@@ -1,4 +1,6 @@
 //! Example [`Codec`]: ROT13 letter substitution.
+//!
+//! Behind the `rot13` feature flag.
 
 use core::mem::MaybeUninit;
 

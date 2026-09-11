@@ -2,6 +2,8 @@
 //!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
+//!
+//! Behind the `json` feature flag.
 
 use core::mem::MaybeUninit;
 

@@ -38,6 +38,8 @@ impl From<alloc::string::FromUtf8Error> for EncodeError {
 /// A convenience combinator over
 /// [`crate::sources_and_sinks::slice::SliceSource`]/[`VecSink`]/
 /// [`stream_to_stream`].
+///
+/// Behind the `alloc` feature flag.
 pub fn encode_str(
     codec: impl BoundaryAwareCodec,
     input: impl AsRef<str>,
@@ -52,6 +54,8 @@ pub fn encode_str(
 /// Run `codec` over a `str`, collecting the result into a `String`.
 ///
 /// Built on [`encode_str`], for codecs whose output is text.
+///
+/// Behind the `alloc` feature flag.
 pub fn encode_string(
     codec: impl BoundaryAwareCodec,
     input: impl AsRef<str>,

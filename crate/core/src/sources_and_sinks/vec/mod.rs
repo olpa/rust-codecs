@@ -1,4 +1,6 @@
 //! Adapters for `Vec<u8>` backend, and to-string helpers.
+//!
+//! Behind the `alloc` feature flag.
 
 mod adapter;
 mod string;

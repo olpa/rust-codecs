@@ -4,6 +4,8 @@
 //! docs' note on why it lives here for now.
 //!
 //! This file's code is mostly AI-generated.
+//!
+//! Behind the `base64` feature flag.
 
 use core::mem::MaybeUninit;
 
