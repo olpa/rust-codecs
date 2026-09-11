@@ -7,8 +7,7 @@
 //! - Introduces [`Source`] and [`Sink`] abstractions for I/O backends,
 //!   and [`Codec`] for byte rewriting.
 //! - The entry points are [`stream_to_stream`] and
-//!   [`encode_str`](sources_and_sinks::vec::encode_str)/
-//!   [`encode_string`](sources_and_sinks::vec::encode_string).
+//!   [`encode_str`]/[`encode_string`].
 //! - Bundles [`identity`] and [`rot13`] codecs, and, until they get
 //!   their own crates, [`base64_enc`]/[`base64_dec`] and [`json_enc`]
 //!   escaping.
@@ -118,9 +117,8 @@
 //! Notes:
 //!
 //! - This slice-to-`Vec` wiring is a simplified reimplementation of
-//!   [`encode_str`](sources_and_sinks::vec::encode_str)/
-//!   [`encode_string`](sources_and_sinks::vec::encode_string). Use
-//!   those functions instead of repeating this pattern.
+//!   [`encode_str`]/[`encode_string`]. Use those functions instead of
+//!   repeating this pattern.
 //! - With the [`identity`](identity::identity) codec,
 //!   [`stream_to_stream`] works as a generic copy function. It can
 //!   copy between streams that are otherwise incompatible, for
@@ -230,6 +228,9 @@ mod chain;
 pub use chain::Chain;
 
 pub mod sources_and_sinks;
+#[cfg(feature = "alloc")]
+#[doc(inline)]
+pub use sources_and_sinks::vec::{encode_str, encode_string, EncodeError};
 
 mod codecs;
 #[allow(unused_imports)]
