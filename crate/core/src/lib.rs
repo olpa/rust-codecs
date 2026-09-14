@@ -151,7 +151,7 @@
 //! [`stream_to_stream`] end to end. It can also power a small
 //! hand-written parser, one step at a time.
 //!
-//! The example lives in `core/tests/early_stop_input.rs`, a tokenizer
+//! The example lives in `core/tests/tokenizer.rs`, a tokenizer
 //! for input made of plain text with quoted strings inside it. Its
 //! codec, `QuoteEnd`, copies bytes unchanged until it reaches a `"`.
 //! It treats that quote as an in-band end. It does not consume the
