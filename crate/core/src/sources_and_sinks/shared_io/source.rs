@@ -84,7 +84,11 @@ impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
     }
 
     fn consume(&mut self, amount: usize) {
-        assert!(amount <= self.len - self.pos);
+        let remaining = self.len - self.pos;
+        assert!(
+            amount <= remaining,
+            "consume({amount}) exceeds the {remaining} bytes remaining in the current chunk"
+        );
         self.pos += amount;
     }
 }

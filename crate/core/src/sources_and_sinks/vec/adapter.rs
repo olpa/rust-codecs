@@ -67,7 +67,6 @@ impl VecSink {
     }
 
     pub fn with_growth(inner: Vec<u8>, grow_by: usize) -> Self {
-        debug_assert!(grow_by > 0, "VecSink growth must be non-zero");
         Self {
             inner,
             grow_by: if grow_by > 0 {

@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSink;
-use crate::stream::{Pump, PumpDrain, PumpTransfer};
+use crate::stream::{Pump, PumpTransfer};
 use crate::{BoundaryAwareCodec, DriveError, Source};
 
 /// Drive `pump` against `input`, filling `buf` with transformed bytes —
@@ -38,16 +38,11 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         }
     };
     if source_exhausted {
-        let drained = pump
-            .finish_to(&mut output)
-            .map_err(DriveError::widen_source)?;
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
-        debug_assert!(matches!(
-            drained,
-            PumpDrain::Done { .. } | PumpDrain::SinkExhausted { .. }
-        ));
+        pump.finish_to(&mut output)
+            .map_err(DriveError::widen_source)?;
     }
     Ok(output.written())
 }

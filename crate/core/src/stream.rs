@@ -153,6 +153,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// - the source is exhausted
     /// - the sink has no more spare space
     /// - the codec signals the end of the stream
+    /// - never partial progress alone. `stream_to_stream` treats that
+    ///   case as `unreachable!()`, so this method must not return it.
     ///
     /// A call that moves zero bytes on both sides without ending the
     /// stream is a stall, reported as `DriveError::NoProgress`.
