@@ -1,8 +1,9 @@
-//! [`QuoteEnd`] copies bytes through unchanged until it sees a `"`,
-//! which it treats as a terminator it will not consume itself (no
-//! escape handling, for simplicity) — an in-band `End` a tokenizer
-//! drives through `stream_to_stream`, one quote-delimited segment at
-//! a time.
+//! A proof of concept: parse using early-stop codecs.
+//!
+//! [`QuoteEnd`] copies bytes unchanged until it finds a `"`. It treats
+//! the quote as an in-band end. It does not consume the quote itself.
+//!
+//! This example is simple, so it does not handle escapes.
 
 #![cfg(feature = "alloc")]
 
@@ -11,8 +12,8 @@ use core::convert::Infallible;
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
 use rust_codecs_core::{
-    stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, DrainCodec, DriveError,
-    Error, Source,
+    stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress,
+    DriveError, Error, Source,
 };
 use std::mem::MaybeUninit;
 
@@ -35,35 +36,31 @@ impl BoundaryAwareCodec for QuoteEnd {
         let n = available.min(output.len());
         output[..n].write_copy_of_slice(&input[..n]);
         if n < available {
-            // Output ran out before reaching the quote (or the end of input).
+            // Output ran out before the quote, or before the end of input.
             Ok(BoundaryAwareProgress::OutputFilled { consumed: n })
         } else if quote_pos.is_some() {
-            // Reached the quote; it's left unconsumed for the driver to deal with.
+            // Reached the quote. Leave it unconsumed; the driver handles it.
             Ok(BoundaryAwareProgress::Boundary {
                 consumed: n,
                 written: n,
             })
         } else {
-            // Consumed all of input; no quote in sight.
+            // Consumed all input. No quote found.
             Ok(BoundaryAwareProgress::InputConsumed { written: n })
         }
     }
 }
 
-/// Build a fresh [`QuoteEnd`]. Even though it happens to hold no
-/// state, call sites that hand a codec to `stream_to_stream` — which
-/// takes it by value and consumes it — should still go through a
-/// constructor rather than writing the unit struct's name directly,
-/// the same as every other codec in this crate (e.g. `rot13()`).
 fn quote_end() -> QuoteEnd {
     QuoteEnd
 }
 
-/// Run `codec` over the remaining bytes of `source`, collecting its
-/// output into a `String` — the shared-`Source` counterpart to
-/// `rust_codecs_core::sources_and_sinks::vec::encode_string`, which
-/// only ever reads from a borrowed `&str` of its own.
-fn encode_string<S: Source>(
+/// Run `codec` over the rest of `source`. Collect the output into a
+/// `String`. Unlike `rust_codecs_core::sources_and_sinks::vec::encode_string`,
+/// which builds its own `SliceSource` from a borrowed `&str`, this
+/// drives an existing, shared `source`, so it does not own it or its
+/// read position.
+fn drive_to_string<S: Source>(
     source: &mut S,
     codec: impl BoundaryAwareCodec,
 ) -> Result<String, DriveError<S::Error, Infallible>> {
@@ -72,25 +69,29 @@ fn encode_string<S: Source>(
     Ok(String::from_utf8(sink.into_inner()).unwrap())
 }
 
-/// What the tokenizer below expects to find next: plain text outside
-/// quotes, plain text inside them, or one of the two quote marks in
-/// between — kept as separate states, rather than one `Quote`
-/// parameterized by what follows, since the opening quote (before a
-/// string) and the closing quote (before a span) lead somewhere
-/// different; each is named for where it leads.
+/// What the tokenizer below expects next.
+///
+/// The opening quote and the closing quote each get their own state,
+/// instead of one `Quote` state parameterized by what follows. Each
+/// name says where that state leads.
 #[derive(Clone, Copy, PartialEq)]
 enum State {
+    /// Plain text outside quotes.
     Span,
+    /// The opening quote. It leads into a string.
     QuoteThenString,
+    /// Plain text inside quotes.
     String,
+    /// The closing quote. It leads into a span.
     QuoteThenSpan,
 }
 
-/// The tokenizing loop: drive [`State`] forward one step per
-/// iteration — `Span`/`String` scan text with [`encode_string`],
-/// either `Quote*` state consumes the delimiter itself — with
-/// `source` picking up exactly where each step left off, since
-/// nothing here ever takes ownership of it.
+/// The tokenizing loop. Each iteration drives [`State`] forward one
+/// step. `Span` and `String` scan text with [`drive_to_string`]. Each
+/// `Quote*` state consumes the delimiter itself.
+///
+/// There is no manual position tracking. Each step reads `source`
+/// starting right where the previous step stopped.
 #[test]
 fn tokenize_string_array_literal() {
     let input = br#"let a = ["s1", "s2", "s3"];"#;
@@ -101,12 +102,12 @@ fn tokenize_string_array_literal() {
     while source.chunk().unwrap().is_some() {
         state = match state {
             State::Span => {
-                let text = encode_string(&mut source, quote_end()).unwrap();
+                let text = drive_to_string(&mut source, quote_end()).unwrap();
                 tokens.push(("span", text));
                 State::QuoteThenString
             }
             State::String => {
-                let text = encode_string(&mut source, quote_end()).unwrap();
+                let text = drive_to_string(&mut source, quote_end()).unwrap();
                 tokens.push(("string", text));
                 State::QuoteThenSpan
             }
