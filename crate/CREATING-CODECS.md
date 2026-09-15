@@ -2,11 +2,11 @@
 
 ## The simplest codec
 
-A codec is a `struct` plus two trait impls: `Codec` for `process`,
-and `DrainCodec` for `finish`. In the simplest case, a transform has
-no internal state and no trailer to write. Then `process` does the
-work and `finish` is a no-op. `core/src/codecs/rot13.rs` is exactly
-that:
+A codec is a `struct` with two trait implementations: `Codec` for
+`process`, and `DrainCodec` for `finish`. In the simplest case, a
+transform has no internal state and no trailer to write. Then
+`process` does the work and `finish` is a no-op.
+`core/src/codecs/rot13.rs` is exactly that:
 
 ```rust
 use core::mem::MaybeUninit;
@@ -46,24 +46,23 @@ impl DrainCodec for Rot13 {
 
 ## The contract: fully consume, or fully fill
 
-There is one rule every `process` call must obey. Each call either consumes
-all of `input`, or fills all of `output`.
+There is one rule every `process` call must obey. Each call either
+consumes all of `input`, or fills all of `output`.
 
-`Progress` is an enum with exactly those two variants, so no other
+`Progress` is an enum with exactly those two variants. No other
 outcome can be reported. `Rot13::process` above shows the pattern:
-compute `n = input.len().min(output.len())`, then report whichever
-side ran out.
+compute `n = input.len().min(output.len())`, then report which side
+ran out.
 
-Why this matters: it avoids a class of bugs.
-Earlier, `Progress` was more relaxed. It had two fields,
-`consumed` and `written`. The driver code (`CodecReader`, `CodecWriter`,
-`stream_to_stream`, `Chain`) grew too complicated to reason about, with many
-corner cases. Moving some of that complexity to the codec side keeps the
-driver simple. This helps the crate, and it helps anyone who writes their
-own driver.
+Why this matters: it avoids a class of bugs. Earlier, `Progress` was
+more relaxed. It had two fields, `consumed` and `written`. The driver
+code (`CodecReader`, `CodecWriter`, `stream_to_stream`, `Chain`) grew
+too complicated. It had many corner cases that were hard to reason
+about. Moving some of that complexity to the codec side keeps the
+driver simple. This helps the crate, and it helps anyone who writes
+their own driver.
 
-
-## A codec that can't finish an atomic unit mid-buffer: the carry buffer
+## A codec that cannot finish an atomic unit mid-buffer: the carry buffer
 
 Base64 shows why the contract above is not always easy to meet. Base64
 turns 3-byte groups of input into 4-byte groups of output. It can only
@@ -74,49 +73,49 @@ Two mismatches follow:
 
 - If `input` ends mid-group, `process` cannot consume the trailing 1
   or 2 bytes yet. A partial group has nothing valid to produce. So
-  `process` must hold onto those bytes and wait for more input on the
-  next call.
+  `process` must keep those bytes and wait for more input on the next
+  call.
 - If `output` has no room for a whole encoded group, `process` cannot
   write a partial group either. It must render the group somewhere
-  else, hand over as much as fits, and keep the rest for the next
-  call.
+  else, pass as much as fits, and keep the rest for the next call.
 
 Base64 solves both with a small internal buffer sized to one atomic
 unit: `PendingInput<3>` on the input side, `PendingOutput<4>` on the
 output side (`core/src/codecs/base64_shared.rs`).
-`Base64Enc::process`
-(`core/src/codecs/base64_enc.rs`) threads through them in order: drain
-whatever `PendingOutput` already holds into `output` first; top up
-`PendingInput` and encode it if a full group just completed; then
-transform the input.
+
+`Base64Enc::process` (`core/src/codecs/base64_enc.rs`) uses them in a
+fixed order:
+
+1. drain whatever `PendingOutput` already holds into `output`
+2. fill `PendingInput`; if a full group just completed, encode it
+3. transform the rest of the input directly
 
 The general rule: a codec with an atomic transform unit needs a carry
 buffer sized to that unit. This makes every input or output buffer
-size legal, even a 1-byte output slice. It will just work slowly.
+size legal, even a 1-byte output slice. It will work, but slowly.
 
 ## `finish` is not always a no-op
 
 `Rot13::finish` above does nothing because ROT13 has no trailing
 state.
 
-Base64 is the counter-example: `finish` is where the format's
-padding gets written.
+Base64 is the counter-example: `finish` writes the format's padding.
 
-Only whole 3-byte groups pass through `base64::process`. So a stream whose
-length is not a multiple of 3 always ends with 1 or 2 bytes still
-sitting in `PendingInput` when the caller signals end-of-input. No more
-input is coming to complete that group. The base64 format defines what
-to do: pad the short group with `=` bytes so it still decodes to the
-right length.
+Only whole 3-byte groups pass through `Base64Enc::process`. A stream
+whose length is not a multiple of 3 always ends with 1 or 2 bytes
+still in `PendingInput` when the caller signals end-of-input. No more
+input follows to complete that group. The base64 format defines what
+to do: pad the short group with `=` bytes. This keeps the decoded
+length correct.
 
-As a general rule: if a format has a trailer, a checksum, or padding rules,
-`finish` is not optional.
+The general rule: if a format has a trailer, a checksum, or padding
+rules, `finish` is not optional.
 
 ## Boundary-aware codecs
 
 A `BoundaryAwareCodec` is a `Codec` whose `process` can also report
-`BoundaryAwareProgress::Boundary`: The logical stream ended right
-here, inside this `input` slice. Bytes past that point belong to
+`BoundaryAwareProgress::Boundary`. This means the logical stream ended
+right here, inside this `input` slice. Bytes past that point belong to
 whatever comes next.
 
 One example is parsing a token embedded in a larger stream.
@@ -124,6 +123,6 @@ One example is parsing a token embedded in a larger stream.
 parser drives a `BoundaryAwareCodec` one step at a time instead of
 running it through `stream_to_stream` end to end.
 
-Every `Codec` already gets a `BoundaryAwareCodec` impl for free (it
-just never returns `Boundary`), so drivers on the input side
-(`CodecReader`, `stream_to_stream`) accept either kind interchangeably.
+Every `Codec` already has a `BoundaryAwareCodec` implementation (it
+never returns `Boundary`). Drivers on the input side (`CodecReader`,
+`stream_to_stream`) accept either kind, without change.
