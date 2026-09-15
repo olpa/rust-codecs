@@ -4,13 +4,17 @@ This document covers how to **create** a codec crate on top of
 `rust-codecs-core`. See [`README.md`](./README.md) for how to **use**
 one.
 
-## 1. Implement `Codec`
+## The simplest codec
+
+A codec is a `struct` plus two trait impls: [`Codec`] for `process`,
+and [`DrainCodec`] for `finish`. In the simplest case — a transform
+with no internal state and no trailer to write — `process` does the
+work and `finish` is a no-op. `core/src/codecs/rot13.rs` is exactly
+that:
 
 ```rust
-use rust_codecs_core::{Codec, Drain, DrainCodec, Error, Progress};
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Rot13;
+use core::mem::MaybeUninit;
+use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 fn rot13_byte(b: u8) -> u8 {
     match b {
@@ -20,17 +24,20 @@ fn rot13_byte(b: u8) -> u8 {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rot13;
+
 impl DrainCodec for Rot13 {
-    fn finish(&mut self, _output: &mut [u8]) -> Result<Drain, Error> {
-        Ok(Drain::Done { written: 0 })
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
     }
 }
 
 impl Codec for Rot13 {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
         for (out, &inp) in output[..n].iter_mut().zip(&input[..n]) {
-            *out = rot13_byte(inp);
+            out.write(rot13_byte(inp));
         }
         if n == input.len() {
             Ok(Progress::InputConsumed { written: n })
@@ -39,121 +46,169 @@ impl Codec for Rot13 {
         }
     }
 }
+
+pub fn rot13() -> Rot13 {
+    Rot13
+}
 ```
 
-`finish`/`flush` live on [`DrainCodec`], a supertrait shared by
-`Codec` and `BoundaryAwareCodec` (see below) — implement it first, then
-`Codec` for `process`.
+Then expose a plain constructor (`rot13()` above) so callers get a
+value ready to hand to `CodecReader`, `CodecWriter`, `stream_to_stream`
+with `VecSink`, and so on — no associated-type machinery to satisfy.
 
-## The contract
+## The contract: fully consume, or fully fill
 
-**Every call fully consumes its input, or fully fills its output.**
-That's the whole contract for an ordinary `Codec`, and the return type
-makes any other outcome unrepresentable:
+The one rule every `process` call must obey:
 
-- `process` returns a [`Progress`]:
-  - `InputConsumed { written }` — all of `input` was taken (some
-    possibly into internal buffering, so `written` may be less than
-    what will eventually come out, even zero).
-  - `OutputFilled { consumed }` — every byte of `output` was written;
-    `consumed` says how much of `input` that took (possibly zero, when
-    output held over from an earlier call filled the buffer by
-    itself).
-- `finish` (and `flush`) return a [`Drain`]: `OutputFilled` (all of
-  `output` written, more to come — the driver will call again) or
-  `Done { written }` (everything owed was delivered).
-- Errors carry `kind` plus the `consumed`/`written` progress the call
-  made before failing, so no bytes become unaccounted for.
+**Each call either consumes all of `input`, or fills all of `output`.**
 
-If your format is self-terminating — it can recognize its own end
-inside an input slice, with bytes past that end belonging to whatever
-follows (a delimiter, a length-prefixed frame) — implement
-[`BoundaryAwareCodec`] instead of `Codec`. It's the same shape, except
-`process` returns a [`BoundaryAwareProgress`] that adds a third outcome,
-`Boundary { consumed, written }`. Every `Codec` already gets a
-`BoundaryAwareCodec` impl for free (it just never returns `Boundary`), so
-input-side drivers (`CodecReader`, `stream_to_stream`) accept either
-kind interchangeably; only implement `BoundaryAwareCodec` directly when
-your format actually has an in-band end to report.
-`CodecWriter` accepts only `Codec` — `Write` has no way to represent a
-permanent short write, so a genuinely terminating codec can't be
-wrapped as one.
+`Progress` makes any other outcome unrepresentable — it's an enum with
+exactly those two variants, `InputConsumed { written }` and
+`OutputFilled { consumed }`. `Rot13::process` above shows the pattern:
+compute `n = input.len().min(output.len())`, then report whichever
+side ran out.
 
-`Boundary` completes the current logical driving operation. Drivers must
-latch that signal: later calls for the same stream return terminal
-zero-progress results without re-entering the codec. The trait does
-not specify raw codec calls after `Boundary`; a concrete codec may document
-that its instance can be reused for another logical stream, but generic
-code cannot assume that.
+Why this matters: a driver (`CodecReader`, `CodecWriter`,
+`stream_to_stream`, `Chain`) calls `process` in a loop, feeding it
+whatever buffers it currently has. If a codec could stop partway
+through both `input` and `output` — some input left, some output space
+left, no clear reason to stop — the driver would have no way to tell
+"call me again with the same buffers" from "you're stuck, give me
+different buffers." Every driver would need bespoke logic to guess
+which case it's in. Holding codecs to one of the two outcomes means
+one driver loop works for every codec, unconditionally.
 
-The drivers do not take your word for it: every reported count is
-checked against the buffer sizes the call was given
-(`Progress::validated`/`BoundaryAwareProgress::validated`/`Drain::validated`),
-and an overclaimed count surfaces as an `ErrorKind::ContractViolation`
-error rather than corrupting driver state. If you build your own
-driver, apply the same check at your codec boundary.
+## A codec that can't finish an atomic unit mid-buffer: the carry buffer
 
-Two consequences worth spelling out:
+Base64 shows why the contract above isn't always free. Base64 turns
+3-byte groups of input into 4-byte groups of output; it can only
+produce output in whole 4-byte groups, and it can only consume input
+in whole 3-byte groups (the last, short group at the very end of the
+stream aside — see below). But the contract says every call must fully
+consume `input` or fully fill `output`, and neither the caller's
+`input` nor its `output` is guaranteed to be a multiple of the group
+size.
 
-- **"I need more input before I can produce anything" is expressed by
-  consuming.** Buffer the partial unit internally (see `pending_input`
-  in `core/src/codecs/base64_enc.rs`/`base64_dec.rs`) and return
-  `InputConsumed { written: 0 }`; the driver feeds the next chunk,
-  and at end of stream `finish` drains what you buffered. Drivers
-  never coalesce input into a larger contiguous slice for you.
-- **"This output buffer is too small for my atomic unit" does not
-  exist.** A codec that can only emit whole units (base64: 4-byte
-  encoded groups) needs a small **carry buffer** at the output
-  boundary: a fixed-size array sized to your largest atomic unit — a
-  compile-time constant of the format — holding a write position and a
-  read position/length, so a unit rendered in full can still be
-  delivered a few bytes at a time across as many calls as it takes.
-  Usage pattern inside `process`/`finish`/`flush`:
+Two mismatches follow:
 
-  1. First thing: drain whatever the carry buffer already holds into
-     `output`. If it's still non-empty afterward, `output` is now
-     full — return `OutputFilled`.
-  2. Choose the largest prefix of `input` made of whole transform
-     units for which the transformed output fits in the *remaining*
-     `output`. Transform it directly into `output` — no buffering
-     needed for this part.
-  3. If that underfilled `output`, but one more unit would overfill
-     it: render that one extra unit into the carry buffer, then drain
-     it into the remainder of `output`, retaining whatever didn't fit
-     for the next call.
+- If `input` ends mid-group, `process` cannot consume the trailing 1
+  or 2 bytes yet — there's nothing valid to produce from a partial
+  group. It has to hold onto those bytes and wait for more input on
+  the next call.
+- If `output` doesn't have room for a whole encoded group, `process`
+  cannot write a partial group either. It has to render the group
+  somewhere else, hand over as much as fits, and keep the remainder
+  for the next call.
 
-  This is what makes every buffer size legal everywhere: 1-byte
-  staging in a `Chain`, 1-byte slots in `stream_to_stream`, 1-byte
-  reads from a `CodecReader`.
+Base64 solves both with a small internal buffer sized to one atomic
+unit: `PendingInput<3>` on the input side, `PendingOutput<4>` on the
+output side (`core/src/codecs/base64_shared.rs`). `Base64Enc::process`
+(`core/src/codecs/base64_enc.rs`) threads through them in order: drain
+whatever `PendingOutput` already holds into `output` first; top up
+`PendingInput` and encode it if a full group just completed; then
+transform as many whole groups as possible directly between `input`
+and `output` (no buffering — this is the hot path); and finally stage
+one more group into `PendingOutput` if a whole input group remains but
+less than one encoded group of output space is left, or buffer a
+leftover partial input group into `PendingInput` for next time.
 
-  For base64 encoding with 10 bytes of output space: encode two 3-byte
-  input groups directly into the first 8 output bytes (step 2), then
-  render one more group into a 4-byte carry buffer (step 3) — drain 2
-  bytes to fill the output and retain 2 for the next call. Rendering
-  every group separately through the carry buffer is functionally
-  correct, but it adds a copy and staging call per group and defeats
-  the base64 engine's bulk/SIMD implementation; the carry-staging path
-  should handle at most the one group that straddles the output
-  boundary. See `PendingOutput` in `core/src/codecs/base64_shared.rs`
-  for a worked implementation.
+The general shape: **a codec with an atomic transform unit needs a
+carry buffer sized to that unit**, holding a read and a write position,
+so the unit can be delivered a few bytes at a time across as many
+calls as it takes. This is what makes every buffer size legal
+everywhere — a 1-byte output slice must still work, just slowly.
 
-Degenerate buffers: with empty `input`, `process` drains pending
-output (if any) and reports `InputConsumed`; drivers avoid calling
-with empty `output`, where `OutputFilled` would be trivially true.
-`finish` with an empty buffer is meaningful and expected: `Done` says
-the codec owes nothing, `OutputFilled` says it owes bytes and needs
-room.
+## `finish` is not always a no-op
 
-`DrainCodec` also has `flush` (drain pending state to a sync boundary
-*without* ending the stream — the stream continues afterward). It has
-a default that owes nothing; only override it if your format defines
-an in-band sync marker (deflate/zlib/gzip do, ROT13 doesn't).
+`Rot13::finish` above does nothing because ROT13 has no trailing
+state. Base64 is the counter-example: `finish` is where the format's
+padding gets written.
 
-A codec that reverses another one (e.g. a compressor and its matching
-decompressor) is a separate, independent value with its own `Codec`
-impl — there's no shared type or trait connecting the two.
+Only whole 3-byte groups pass through `process`, so a stream whose
+length isn't a multiple of 3 always ends with 1 or 2 bytes still
+sitting in `PendingInput` when the caller signals end-of-input. There
+is no more input coming to complete that group, and the base64 format
+defines what to do about it: pad the short group out with `=` bytes so
+it still decodes to the right length. `Base64Enc::finish`
+(`core/src/codecs/base64_enc.rs`) is where that padding gets emitted —
+first draining anything still sitting in `PendingOutput`, then, if
+`PendingInput` holds a partial group, encoding it (the underlying
+`Engine` pads it) and draining that too. Only once both are empty does
+`finish` report `DrainProgress::Done`.
 
-## 2. Expose a constructor
+The general rule: whatever a codec deferred while waiting for more
+input that will never arrive, `finish` is where it gets settled. If
+your format has a trailer, a checksum, or padding rules, `finish` is
+not optional.
+
+## Boundary-aware codecs and `sync_flush`
+
+Base64 and ROT13 cover the two methods every codec needs. Two more
+exist in the trait vocabulary — [`BoundaryAwareCodec`] and
+`DrainCodec::sync_flush` — for a case neither example above runs into:
+a self-terminating format embedded in a larger stream, and a
+compressor that needs to hand a peer a decodable prefix without ending
+the stream. They matter once real compression algorithms are wired
+in, so it's worth explaining where they come from.
+
+### `BoundaryAwareCodec`
+
+A [`BoundaryAwareCodec`] is a `Codec` whose `process` can also report
+[`BoundaryAwareProgress::Boundary`] — "the logical stream ended right
+here, inside this `input` slice, with bytes past that point belonging
+to whatever comes next." From `core/src/protocol.rs`:
+
+> A stateful transform that can recognize the logical end of its input
+> inside a byte stream. It leaves the rest of the source available to
+> whatever comes next.
+
+Every `Codec` already gets a `BoundaryAwareCodec` impl for free (it
+just never returns `Boundary`), so drivers on the input side
+(`CodecReader`, `stream_to_stream`) accept either kind interchangeably.
+`core/tests/tokenizer.rs` is the worked example: a small hand-written
+parser drives a `BoundaryAwareCodec` one step at a time instead of
+running it through `stream_to_stream` end to end.
+
+### `sync_flush`
+
+`DrainCodec::sync_flush` drains a codec's buffered state to a sync
+point **without** ending the stream — unlike `finish`, the codec stays
+usable afterward. From `core/src/protocol.rs`:
+
+> Deflate, zlib, and similar codecs support this: they write buffered
+> output and a sync marker. Most codecs do not need `sync_flush`.
+
+Neither ROT13 nor base64 needs this — neither buffers anything a peer
+would need mid-stream. Real compressors do. The
+[`compcol`](https://docs.rs/compcol) crate (a `no_std` collection of
+compression codecs behind a uniform streaming trait, and the intended
+source for this crate's future gzip/deflate codecs) documents the same
+concept as `Encoder::flush`:
+
+> Drain pending encoder state to `output` at a `mode`-defined sync
+> boundary, keeping the encoder usable for further `encode` / `flush`
+> / `finish` calls. Unlike `finish`, `flush` **never** ends the
+> stream.
+
+and spells out why a long-lived stream needs this at all:
+
+> Use case: per-packet sync boundaries in long-lived compressed
+> transports like SSH ("zlib" compression, RFC 4253 §6.2), HTTP/2
+> dynamic table updates, RPC pipes, append-only log streams.
+
+That is: a compressor may hold back bytes internally (an unfinished
+DEFLATE block, an open history window) for better ratio. A peer
+reading the stream live — not after it's closed — can't decode past
+whatever the compressor is still sitting on. `sync_flush` is the
+escape hatch: byte-align the bitstream, emit whatever trailing marker
+the format defines, and let the peer decode everything sent so far,
+while the compressor keeps running for the rest of the stream.
+`DrainCodec` gives `sync_flush` a no-op default, since most codecs
+here (ROT13, base64) have nothing to hold back and no marker to emit;
+only override it if your format defines one, the way deflate/zlib/gzip
+do.
+
+## Expose a constructor
 
 ```rust
 pub fn rot13() -> Rot13 {
@@ -161,21 +216,14 @@ pub fn rot13() -> Rot13 {
 }
 ```
 
-Plain functions need no trait import and no pairing machinery — callers
-just call `rot13()` and get a value ready to hand to `CodecReader`,
-`CodecWriter`, `stream_to_stream` with `VecSink`, etc.
+ROT13 is stateless and self-inverse, so one `<name>()` constructor
+covers both directions. If encoding and decoding need different
+values (different initial state, different configuration), expose the
+pair as `<name>_enc()` / `<name>_dec()` instead. If your codec takes
+configuration (compression level, dictionary, …), give the constructor
+a parameter or add a `_with` variant.
 
-ROT13 is stateless and self-inverse — the same value handles both
-directions — so one `<name>()` constructor is enough. If encoding and
-decoding genuinely need different values (different initial state,
-different configuration), expose the pair as `<name>_enc()` /
-`<name>_dec()` instead, one returning each.
-
-If your codec takes configuration (compression level, dictionary, …),
-give the constructor a parameter or add a `_with` variant — there's no
-associated-type machinery to satisfy.
-
-## 3. Test it
+## Test it
 
 At minimum, exercise:
 
@@ -187,7 +235,7 @@ At minimum, exercise:
 - If the codec has an atomic output unit: buffers *smaller than the
   unit* on both sides (a 1-byte output is the strongest version), to
   prove the carry spans buffers correctly.
-- `finish()` reaching `Drain::Done`.
+- `finish()` reaching `DrainProgress::Done`.
 
 If you implemented `BoundaryAwareCodec`, additionally exercise:
 
@@ -198,7 +246,3 @@ If you implemented `BoundaryAwareCodec`, additionally exercise:
   results without re-entering the codec.
 - EOF arriving before the in-band boundary, per whatever policy you
   documented for that case.
-
-That's the whole surface: implement `Codec` or `BoundaryAwareCodec`,
-expose constructor function(s), and the rest of RustCodecs (stream
-adapters, `Vec<u8>` helper) works with your codec for free.
