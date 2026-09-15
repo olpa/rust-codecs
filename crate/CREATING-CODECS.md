@@ -91,8 +91,8 @@ fixed order:
 3. transform the rest of the input directly
 
 The general rule: a codec with an atomic transform unit needs a carry
-buffer sized to that unit. This makes every input or output buffer
-size legal, even a 1-byte output slice. It will work, but slowly.
+buffer. This makes every input or output buffer size legal, even a
+1-byte input or output slice.
 
 ## `finish` is not always a no-op
 
