@@ -32,25 +32,10 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
     })
 }
 
-/// Selects which of [`DrainCodec`]'s two draining operations
-/// [`DrainOp::step`] runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DrainOp {
-    Finish,
-    SyncFlush,
-}
-
-impl DrainOp {
-    /// Run this operation once against `codec` and validate the result.
-    pub(crate) fn step<C: DrainCodec + ?Sized>(
-        self,
-        codec: &mut C,
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<DrainProgress, Error> {
-        let result = match self {
-            DrainOp::Finish => codec.finish(output),
-            DrainOp::SyncFlush => codec.sync_flush(output),
-        };
-        result?.validated(output.len())
-    }
+/// Run one `finish` step against `codec` and validate the result.
+pub(crate) fn finish_step<C: DrainCodec + ?Sized>(
+    codec: &mut C,
+    output: &mut [MaybeUninit<u8>],
+) -> Result<DrainProgress, Error> {
+    codec.finish(output)?.validated(output.len())
 }

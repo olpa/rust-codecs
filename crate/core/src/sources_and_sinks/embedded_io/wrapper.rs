@@ -4,7 +4,7 @@ use core::fmt;
 use embedded_io::{BufRead, ErrorType, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    boundary_aware_pump_read, pump_finish, pump_flush, pump_sync_flush, pump_write,
+    boundary_aware_pump_read, pump_finish, pump_flush, pump_write,
 };
 use crate::stream::Pump;
 use crate::{BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind};
@@ -229,14 +229,6 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
         Ok(self.output.into_inner())
-    }
-
-    /// Ask the codec to emit buffered output and a sync marker without
-    /// ending its stream, then flush the wrapped writer.
-    ///
-    /// Unlike [`Write::flush`], this can change the encoded byte stream.
-    pub fn sync_flush(&mut self) -> Result<(), EmbeddedError<W::Error>> {
-        pump_sync_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)
     }
 
     /// Reclaim the writer, the codec, and the scratch buffer. If the

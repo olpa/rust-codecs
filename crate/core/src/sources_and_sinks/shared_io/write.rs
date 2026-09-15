@@ -1,7 +1,7 @@
 // The functions here are trivial.
 // - Technical goal: a caller forwards execution to one of them, so
-//   that the body of a caller (a `Write::write`/`finish`/`flush`/
-//   `sync_flush` method) is only one line.
+//   that the body of a caller (a `Write::write`/`finish`/`flush`
+//   method) is only one line.
 // - Reason: implementors of an io backend don't need to learn the
 //   gory details of what to call in which order, and don't need to
 //   copy-paste the drain/finalize/sync sequencing across backends.
@@ -37,19 +37,7 @@ pub fn pump_finish<O: Sink, C: Codec>(
     Ok(())
 }
 
-/// Flush only the output endpoint, without asking the codec to emit a
-/// sync marker.
+/// Flush the output endpoint.
 pub fn pump_flush<O: Sink>(output: &mut O) -> Result<(), DriveError<Infallible, O::Error>> {
     output.flush().map_err(DriveError::Sink)
-}
-
-/// Drain `pump`'s output into `output` at a sync point, then flush
-/// `output` itself, without ending the stream.
-pub fn pump_sync_flush<O: Sink, C: Codec>(
-    pump: &mut Pump<C>,
-    output: &mut O,
-) -> Result<(), DriveError<Infallible, O::Error>> {
-    pump.sync_flush_to(output)?;
-    output.flush().map_err(DriveError::Sink)?;
-    Ok(())
 }

@@ -64,18 +64,11 @@ pub trait Sink {
 // Codec traits
 // ----
 
-/// Shared supertrait with [`Self::sync_flush`] and [`Self::finish`].
+/// Shared supertrait with [`Self::finish`].
 ///
 /// This trait is a technical artifact, not a standalone abstraction.
 /// Write code against [`Codec`] or [`BoundaryAwareCodec`] instead.
 pub trait DrainCodec {
-    /// Deflate, zlib, and similar codecs support this: they write
-    /// buffered output and a sync marker. Most codecs do not need
-    /// `sync_flush`.
-    fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        Ok(DrainProgress::Done { written: 0 })
-    }
-
     /// Tell the codec that no more input will come. The codec flushes
     /// any buffered state. If the format has a trailer or a checksum,
     /// the codec writes it now.
@@ -107,9 +100,8 @@ pub trait Codec: DrainCodec {
     /// 3) The codec state after `Err` is not defined. A later call can fail
     /// again or make normal progress.
     ///
-    /// 4) This contract does not define a call to `process` or
-    /// [`sync_flush`](DrainCodec::sync_flush) after `finish`. Two
-    /// behaviors are valid:
+    /// 4) This contract does not define a call to `process` after
+    /// `finish`. Two behaviors are valid:
     /// - a codec without a trailer or terminal state may continue to
     ///   process input, or
     /// - a codec that has closed its format, for example by writing a
@@ -210,8 +202,7 @@ impl From<Progress> for BoundaryAwareProgress {
     }
 }
 
-/// Progress of one [`DrainCodec::finish`] or [`DrainCodec::sync_flush`]
-/// call.
+/// Progress of one [`DrainCodec::finish`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainProgress {
     /// The call filled all of `output`. More output is pending.
@@ -261,7 +252,7 @@ impl BoundaryAwareProgress {
 }
 
 impl DrainProgress {
-    /// The [`Progress::validated`] counterpart for `finish`/`flush`.
+    /// The [`Progress::validated`] counterpart for `finish`.
     pub fn validated(self, output_len: usize) -> Result<DrainProgress, Error> {
         match self {
             DrainProgress::Done { written } if written > output_len => {
@@ -289,10 +280,6 @@ use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
-    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        (**self).sync_flush(output)
-    }
-
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         (**self).finish(output)
     }

@@ -4,7 +4,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::step::DrainOp;
+use crate::step::finish_step;
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, Error, Sink, Source, TransferCounts,
 };
@@ -291,25 +291,10 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     }
 
     /// Drain the codec's trailing output.
-    pub(crate) fn finish_to<O: Sink>(
-        &mut self,
-        output: &mut O,
-    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
-        self.drain_to(output, DrainOp::Finish)
-    }
-
-    /// Let deflate/zlib and similar codecs write a sync marker mid-stream.
-    pub(crate) fn sync_flush_to<O: Sink>(
-        &mut self,
-        output: &mut O,
-    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
-        self.drain_to(output, DrainOp::SyncFlush)
-    }
-
-    /// Shared loop behind `finish_to`/`sync_flush_to`: repeatedly get
-    /// spare space from `output` and hand it to
-    /// [`Pump::latched_finish_or_sync_flush_step`], committing what was
-    /// written, until the codec reports `Done`.
+    ///
+    /// Repeatedly get spare space from `output` and hand it to
+    /// [`Pump::latched_finish_step`], committing what was written,
+    /// until the codec reports `Done`.
     ///
     /// When `output.spare()` returns `None`, the sink has no room.
     /// One more call is made against an empty slice, to check whether
@@ -322,15 +307,14 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// stall (`DriveError::NoProgress`). Neither case commits
     /// anything to the sink before propagating; the uncommitted
     /// `spare` stays available for the next caller.
-    fn drain_to<O: Sink>(
+    pub(crate) fn finish_to<O: Sink>(
         &mut self,
         output: &mut O,
-        op: DrainOp,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         let mut written = 0;
         loop {
             let (step_written, done) = match output.spare().map_err(DriveError::Sink)? {
-                Some(spare) => match self.latched_finish_or_sync_flush_step(spare, op) {
+                Some(spare) => match self.latched_finish_step(spare) {
                     Ok(DrainProgress::Done { written }) => (written, true),
                     Ok(DrainProgress::OutputFilled) if !spare.is_empty() => (spare.len(), false),
                     Ok(DrainProgress::OutputFilled) => return Err(DriveError::NoProgress),
@@ -346,7 +330,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 },
                 None => {
                     let moved = self
-                        .latched_finish_or_sync_flush_step(&mut [], op)
+                        .latched_finish_step(&mut [])
                         .map_err(DriveError::Codec)?;
                     return Ok(match moved {
                         DrainProgress::Done { .. } => PumpDrain::Done { written },
@@ -364,21 +348,20 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
-    /// Run one `finish`/`sync_flush` call, chosen by `op`.
+    /// Run one `finish` call.
     ///
     /// If the codec already ended in-band, [`BoundaryAwareCodec::process`]'s
     /// contract already required it to finish itself first. So this
     /// function skips the call. It reports a permanent `Done` and
     /// never touches the codec again.
-    fn latched_finish_or_sync_flush_step(
+    fn latched_finish_step(
         &mut self,
         output: &mut [MaybeUninit<u8>],
-        op: DrainOp,
     ) -> Result<DrainProgress, Error> {
         if self.ended_in_band {
             return Ok(DrainProgress::Done { written: 0 });
         }
-        op.step(&mut self.codec, output)
+        finish_step(&mut self.codec, output)
     }
 }
 
@@ -388,7 +371,6 @@ mod tests {
 
     use super::{Pump, PumpTransfer};
     use crate::sources_and_sinks::slice::SliceSource;
-    use crate::step::DrainOp;
     use crate::{
         BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError,
         Error, ErrorKind, Progress, Sink, TransferCounts,
@@ -400,10 +382,6 @@ mod tests {
     }
 
     impl DrainCodec for Scripted {
-        fn sync_flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(self.drain)
-        }
-
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             Ok(self.drain)
         }
@@ -627,7 +605,7 @@ mod tests {
             .unwrap();
         assert!(pump.is_done());
         assert_eq!(
-            pump.latched_finish_or_sync_flush_step(&mut [], DrainOp::Finish),
+            pump.latched_finish_step(&mut []),
             Ok(DrainProgress::Done { written: 0 })
         );
         let repeated = pump

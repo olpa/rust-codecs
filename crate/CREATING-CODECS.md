@@ -141,17 +141,12 @@ input that will never arrive, `finish` is where it gets settled. If
 your format has a trailer, a checksum, or padding rules, `finish` is
 not optional.
 
-## Boundary-aware codecs and `sync_flush`
+## Boundary-aware codecs
 
-Base64 and ROT13 cover the two methods every codec needs. Two more
-exist in the trait vocabulary — [`BoundaryAwareCodec`] and
-`DrainCodec::sync_flush` — for a case neither example above runs into:
-a self-terminating format embedded in a larger stream, and a
-compressor that needs to hand a peer a decodable prefix without ending
-the stream. They matter once real compression algorithms are wired
-in, so it's worth explaining where they come from.
-
-### `BoundaryAwareCodec`
+Base64 and ROT13 cover the two methods every codec needs. One more
+exists in the trait vocabulary — [`BoundaryAwareCodec`] — for a case
+neither example above runs into: a self-terminating format embedded in
+a larger stream.
 
 A [`BoundaryAwareCodec`] is a `Codec` whose `process` can also report
 [`BoundaryAwareProgress::Boundary`] — "the logical stream ended right
@@ -169,44 +164,15 @@ just never returns `Boundary`), so drivers on the input side
 parser drives a `BoundaryAwareCodec` one step at a time instead of
 running it through `stream_to_stream` end to end.
 
-### `sync_flush`
-
-`DrainCodec::sync_flush` drains a codec's buffered state to a sync
-point **without** ending the stream — unlike `finish`, the codec stays
-usable afterward. From `core/src/protocol.rs`:
-
-> Deflate, zlib, and similar codecs support this: they write buffered
-> output and a sync marker. Most codecs do not need `sync_flush`.
-
-Neither ROT13 nor base64 needs this — neither buffers anything a peer
-would need mid-stream. Real compressors do. The
-[`compcol`](https://docs.rs/compcol) crate (a `no_std` collection of
-compression codecs behind a uniform streaming trait, and the intended
-source for this crate's future gzip/deflate codecs) documents the same
-concept as `Encoder::flush`:
-
-> Drain pending encoder state to `output` at a `mode`-defined sync
-> boundary, keeping the encoder usable for further `encode` / `flush`
-> / `finish` calls. Unlike `finish`, `flush` **never** ends the
-> stream.
-
-and spells out why a long-lived stream needs this at all:
-
-> Use case: per-packet sync boundaries in long-lived compressed
-> transports like SSH ("zlib" compression, RFC 4253 §6.2), HTTP/2
-> dynamic table updates, RPC pipes, append-only log streams.
-
-That is: a compressor may hold back bytes internally (an unfinished
-DEFLATE block, an open history window) for better ratio. A peer
-reading the stream live — not after it's closed — can't decode past
-whatever the compressor is still sitting on. `sync_flush` is the
-escape hatch: byte-align the bitstream, emit whatever trailing marker
-the format defines, and let the peer decode everything sent so far,
-while the compressor keeps running for the rest of the stream.
-`DrainCodec` gives `sync_flush` a no-op default, since most codecs
-here (ROT13, base64) have nothing to hold back and no marker to emit;
-only override it if your format defines one, the way deflate/zlib/gzip
-do.
+There is deliberately no mid-stream "sync flush" method here (write
+buffered state to a sync point without ending the stream, the way
+deflate/zlib/gzip support). No codec in this crate needs one yet — the
+shape such a method should take (see
+[`compcol::Encoder::flush`](https://docs.rs/compcol/latest/compcol/trait.Encoder.html#tymethod.flush),
+which takes a `Sync`/`Full` mode) is better derived from a real
+compressor's requirements than guessed at ahead of one. When gzip or
+deflate get ported into this crate (`compcol` is the intended source),
+add it then, sized to what that port actually needs.
 
 ## Expose a constructor
 

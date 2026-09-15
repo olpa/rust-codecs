@@ -5,7 +5,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::step::{codec_step, DrainOp};
+use crate::step::{codec_step, finish_step};
 use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress};
 
@@ -140,30 +140,26 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         Ok(moved.written)
     }
 
-    /// Shared engine behind `finish` and `sync_flush`.
+    /// Engine behind `finish`.
     ///
     /// Finishing the chain means finishing both inner codecs, in
     /// pipeline order. Each one may still hold buffered bytes after
-    /// the caller stops feeding input. So this flushes `first` into
+    /// the caller stops feeding input. So this finishes `first` into
     /// `staging`, drains `staging` into `second`, and repeats. Only
     /// once `first` and `staging` are both empty does it run
-    /// `second`'s own finish or flush. `second` must not finish
-    /// while data is still upstream of it.
-    fn drain_through(
-        &mut self,
-        output: &mut [MaybeUninit<u8>],
-        op: DrainOp,
-    ) -> Result<DrainProgress, Error> {
+    /// `second`'s own finish. `second` must not finish while data is
+    /// still upstream of it.
+    fn finish_through(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
         let mut nothing_more_from_first = false;
 
         loop {
             if !nothing_more_from_first {
                 //
-                // Flush/finish `first` to `staging`.
+                // Finish `first` into `staging`.
                 //
                 let staging = self.staging.as_mut();
-                let moved = match op.step(
+                let moved = match finish_step(
                     &mut self.first,
                     as_uninit_mut(&mut staging[self.stage_len..]),
                 ) {
@@ -193,9 +189,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             if nothing_more_from_first && self.stage_len == 0 {
                 //
                 // At this point, `first` is done and `staging` is empty.
-                // Flush/finish `second`.
+                // Finish `second`.
                 //
-                let moved = match op.step(&mut self.second, &mut output[out_pos..]) {
+                let moved = match finish_step(&mut self.second, &mut output[out_pos..]) {
                     Ok(moved) => moved,
                     Err(error) => {
                         let error = error
@@ -222,16 +218,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
-    /// Sync-flush `first` through `staging` to `second`, then
-    /// sync-flush `second`.
-    fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.drain_through(output, DrainOp::SyncFlush)
-    }
-
     /// Finish `first` through `staging` to `second`, then finish
     /// `second`.
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.drain_through(output, DrainOp::Finish)
+        self.finish_through(output)
     }
 }
 
@@ -312,14 +302,12 @@ mod tests {
     use crate::uninit::as_uninit_mut;
     use crate::{
         stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress,
-        Pump, Sink,
+        Sink,
     };
 
     const INPUT: &str = "Hello, World! 123";
     // rot13(base64_enc(INPUT)): $ echo -n "Hello, World! 123" | base64 | rot13
     const ROT13_OF_BASE64_INPUT: &str = "FTIfoT8fVSqipzkxVFNkZwZ=";
-    // rot13(INPUT): $ echo -n "Hello, World! 123" | rot13
-    const ROT13_OF_INPUT: &str = "Uryyb, Jbeyq! 123";
 
     // ----
     // Round-trip basics
@@ -445,19 +433,18 @@ mod tests {
     }
 
     // ----
-    // `sync_flush`/`finish` draining
+    // `finish` draining
     // ----
 
     /// A block-buffering codec: hoards all input and emits it only on
-    /// `sync_flush`/`finish`, the class `DrainCodec::sync_flush`
-    /// exists for (deflate-style sync boundaries).
+    /// `finish`.
     #[derive(Default)]
     struct Hoarder {
         buf: Vec<u8>,
     }
 
-    impl Hoarder {
-        fn emit(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    impl DrainCodec for Hoarder {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             let n = self.buf.len().min(output.len());
             output[..n].write_copy_of_slice(&self.buf[..n]);
             self.buf.drain(..n);
@@ -466,16 +453,6 @@ mod tests {
             } else {
                 Ok(DrainProgress::OutputFilled)
             }
-        }
-    }
-
-    impl DrainCodec for Hoarder {
-        fn sync_flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            self.emit(output)
-        }
-
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            self.emit(output)
         }
     }
 
@@ -491,10 +468,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_drains_a_hoarding_first_through_second() {
-        // `first` withholds everything until flushed;
-        // `Chain::sync_flush` must pull it out through `second` so
-        // the bytes arrive transformed, and the stream stays open.
+    fn finish_drains_a_hoarding_first_through_second() {
+        // `first` withholds everything until finished; `Chain::finish`
+        // must pull it out through `second` so the bytes arrive
+        // transformed.
         let expected = encode_string(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]).unwrap();
         let mut out = [0u8; 64];
@@ -502,7 +479,7 @@ mod tests {
             .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
             .unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
+        let drain = chain.finish(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
             drain,
             DrainProgress::Done {
@@ -513,9 +490,9 @@ mod tests {
     }
 
     #[test]
-    fn flush_drains_a_hoarding_second() {
-        // `second` withholds; `Chain::sync_flush` must invoke
-        // `second`'s own sync_flush after `first`'s.
+    fn finish_drains_a_hoarding_second() {
+        // `second` withholds; `Chain::finish` must invoke `second`'s
+        // own finish after `first`'s.
         let expected = encode_string(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]).unwrap();
         let mut out = [0u8; 64];
@@ -523,7 +500,7 @@ mod tests {
             .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
             .unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let drain = chain.sync_flush(as_uninit_mut(&mut out)).unwrap();
+        let drain = chain.finish(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
             drain,
             DrainProgress::Done {
@@ -531,36 +508,6 @@ mod tests {
             }
         );
         assert_eq!(&out[..expected.len()], expected.as_bytes());
-    }
-
-    #[test]
-    fn interrupted_flush_resumes_and_the_stream_stays_open() {
-        // The point isn't `sync_flush`'s own return value: it's that
-        // flushing a hoarding `first` through 1-byte outputs doesn't
-        // end the stream. `Pump` must still accept and flush new
-        // input afterward.
-        let chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]).unwrap();
-        let mut pump = Pump::new(chain);
-        let mut big = [0u8; 64];
-        pump.get_mut()
-            .process(INPUT.as_bytes(), as_uninit_mut(&mut big))
-            .unwrap();
-
-        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
-        pump.sync_flush_to(&mut sink).unwrap();
-        assert_eq!(sink.bytes, ROT13_OF_INPUT.as_bytes());
-        assert!(!pump.is_done());
-
-        // Second round: same input again, flushed into the same
-        // sink, must land right after the first round's output.
-        pump.get_mut()
-            .process(INPUT.as_bytes(), as_uninit_mut(&mut big))
-            .unwrap();
-        pump.sync_flush_to(&mut sink).unwrap();
-        let mut expected = Vec::new();
-        expected.extend_from_slice(ROT13_OF_INPUT.as_bytes());
-        expected.extend_from_slice(ROT13_OF_INPUT.as_bytes());
-        assert_eq!(sink.bytes, expected);
     }
 
     // ----
@@ -626,9 +573,9 @@ mod tests {
     #[test]
     fn lying_drain_codec_is_an_error_not_index_corruption() {
         // Same property as `lying_inner_codec_is_an_error_not_index_corruption`,
-        // but for a `finish`/`sync_flush` overclaim instead of a
-        // `process` overclaim: `DrainOp::step` validates the count
-        // before `drain_through` ever uses it to advance `stage_len`.
+        // but for a `finish` overclaim instead of a `process` overclaim:
+        // `finish_step` validates the count before `finish_through`
+        // ever uses it to advance `stage_len`.
         let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]).unwrap();
         let mut output = [0u8; 8];
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
