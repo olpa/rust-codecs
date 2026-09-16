@@ -7,9 +7,6 @@ Optionally, if your transport provides counterparts of `std::io::Read`/`Write`
 or `std::io::BufRead`, add a way to wrap them with a `Codec`. This produces
 a new `Read`/`Write`.
 
-Use the same approach as this crate's own `std_io`/`embedded_io` backends.
-These backends are thin wrappers around `shared_io`.
-
 ## `Source`/`Sink`
 
 ```rust
