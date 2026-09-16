@@ -1,24 +1,23 @@
 # Creating an I/O backend
 
-This guide shows how to add a `Source`/`Sink` adapter for a new byte
-transport. Write it in your own crate, against `rust-codecs-core`'s
-public API. Use the same shape as this crate's own `std_io`/
-`embedded_io` backends.
+This guide shows how to add an I/O backend for a new byte transport.
+Write it in your own crate, against `rust-codecs-core`'s public API.
+Use the same shape as this crate's own `std_io`/`embedded_io` backends.
 
-Note what this crate's own backends deliberately do not do.
-`StdSource`, `EmbeddedSource`, and `BufReadSource` never remember that
-the wrapped reader once returned nothing. Each `chunk()` call just
-tries the read again, with no memory of the last attempt.
+A complete backend has three parts, in this order:
 
-This choice matters for a transport whose "nothing right now" is not
-permanent, such as a growing file or a pipe. The backend can pick up
-later bytes on its own. It does not latch shut the first time it sees
-an empty read. The cost is one real I/O attempt per `chunk()` call, for
-as long as the transport stays empty.
-
-A transport with a genuine, final EOF is different. If you know no
-more bytes will ever come, your backend can cache that fact and skip
-the repeated attempts. The trait does not require either choice.
+1. **`Source`/`Sink` adapters (required).** These wrap your transport
+   and give a codec a way to pull input bytes and push output bytes.
+   This is the only part you must write.
+2. **`CodecReader`/`CodecWriter` wrappers (nice to have).** These wrap
+   a `Source`/`Sink` plus a codec behind `std::io::Read`/`Write` or
+   `embedded_io::Read`/`Write`, so callers can use your codec through
+   an ordinary reader/writer instead of driving `Source`/`Sink`
+   directly.
+3. **A `BufReadCodecReader` (nice to have).** If your transport already
+   exposes a buffered, lending read, such as `std::io::BufRead` or
+   `embedded_io::BufRead`, add this variant so callers can skip the
+   scratch buffer entirely.
 
 ## Implement `Source`/`Sink` for your transport
 
@@ -69,6 +68,21 @@ condition, so it panics instead of returning a `Result`. Each also
 provides `into_inner` and `get_mut`, to reclaim or bypass the wrapped
 transport. `Self::Error` is whatever error type your own transport
 reports.
+
+Note what this crate's own backends deliberately do not do.
+`StdSource`, `EmbeddedSource`, and `BufReadSource` never remember that
+the wrapped reader once returned nothing. Each `chunk()` call just
+tries the read again, with no memory of the last attempt.
+
+This choice matters for a transport whose "nothing right now" is not
+permanent, such as a growing file or a pipe. The backend can pick up
+later bytes on its own. It does not latch shut the first time it sees
+an empty read. The cost is one real I/O attempt per `chunk()` call, for
+as long as the transport stays empty.
+
+A transport with a genuine, final EOF is different. If you know no
+more bytes will ever come, your backend can cache that fact and skip
+the repeated attempts. The trait does not require either choice.
 
 ## Skipping the scratch-buffer bookkeeping
 
@@ -143,12 +157,19 @@ input bytes before it can emit anything. `boundary_aware_pump_read`
 loops past these pulls, because returning `0` there would look like
 EOF to the caller.
 
+## Supporting a buffered reader
+
 If your transport already exposes a lending, buffered read, in the
 `fill_buf`/`consume` shape of `std::io::BufRead` or
-`embedded_io::BufRead`, skip the scratch buffer entirely. Adapt
-straight from `fill_buf`/`consume`, instead of copying into a buffer
-of your own. See `BufReadSource`/`BufReadCodecReader` in `std_io`/
-`embedded_io` for the pattern.
+`embedded_io::BufRead`, add a `BufReadSource`/`BufReadCodecReader`
+pair. `BufReadSource` adapts straight from `fill_buf`/`consume`,
+instead of copying into a scratch buffer of its own. It plays the same
+role as `StdSource`/`EmbeddedSource`, but for a buffered reader.
+`BufReadCodecReader` then wraps `BufReadSource` the same way
+`CodecReader` wraps `StdSource`/`EmbeddedSource`. See
+`BufReadSource`/`BufReadCodecReader` in `std_io::adapter`/
+`std_io::wrapper` and `embedded_io::adapter`/`embedded_io::wrapper`
+for the pattern to copy.
 
 ## Testing your `Read`/`Write` wrapper
 
