@@ -10,7 +10,7 @@ a new `Read`/`Write`.
 Use the same approach as this crate's own `std_io`/`embedded_io` backends.
 These backends are thin wrappers around `shared_io`.
 
-## Implement `Source`/`Sink` for your transport
+## Implement `Source`/`Sink`
 
 ```rust
 pub trait Source {
@@ -28,23 +28,20 @@ pub trait Sink {
 ```
 
 `chunk` and `spare` return a borrowed window into storage that the
-adapter itself owns. A caller should call `consume`/`commit` to say
-how much of the window it used.
+adapter itself owns. A caller calls `consume`/`commit` to say how much
+of the window it used. The next call then returns at least the
+unconsumed remainder, possibly with more data appended.
 
-The next call returns at least the
-  unconsumed remainder, and may append more data after it. 
+A caller can call `spare` again without committing first. The adapter
+may then return the same span again. Bytes already written into it but
+not committed may be overwritten.
 
-If a caller calls
-  `spare` again without committing the previous one, the adapter may
-  return the same span back, and bytes already written into it but not committed may
-  be overwritten.
+`chunk` returns `None` at the end of input. `spare` returns `None` when
+there is no room left. Neither returns `Some` of an empty slice. Return
+`None` instead.
 
-Return `None` for exhausted: end of
-  input for `chunk`, no room left for `spare`. Never return `Some` of
-  an empty slice; return `None` instead.
-
-`Sink::finish` defaults to a no-op. Override it only if your
-  transport needs a final flush once the codec's stream has ended.
+`Sink::finish` defaults to a no-op. Override it if your transport
+needs a final flush once the codec's stream has ended.
 
 A custom `Source`/`Sink` can be a thin wrapper over `shared_io`'s
 template implementation, which provides:
