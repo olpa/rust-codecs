@@ -53,15 +53,14 @@ template implementation, which provides:
 
 This part is more boilerplate code, but straightforward.
 
-The shared work lives in
-`Pump` and the `pump_*` functions. Your wrapper is again a thin shell
-around them.
+The shared work lives in `Pump` and the `pump_*` functions.
+Your wrapper is again a thin shell around them.
 
 For a `BoundaryAwareCodec`, the reader yields whatever bytes the codec
-produced up to its boundary, then reports EOF on the next call. You
-get this behavior for free from the shared code; nothing extra to
-implement. It's mentioned here because this behavior is not obvious in
-advance.
+produced up to its boundary. It then reports EOF on the next call. The
+shared code already gives you this behavior. You do not need to
+implement anything extra. It is mentioned here because this behavior
+is not obvious in advance.
 
-Otherwise, there are no surprises. Follow `std_io`/`embedded_io` as a template.
-Do not forget the buffered version.
+Nothing else about this is a surprise. Follow `std_io`/`embedded_io`
+as a template. Do not forget the buffered version.
