@@ -1,23 +1,14 @@
 # Creating an I/O backend
 
-This guide shows how to add an I/O backend for a new byte transport.
-Write it in your own crate, against `rust-codecs-core`'s public API.
-Use the same shape as this crate's own `std_io`/`embedded_io` backends.
+The traits `Source` and `Sink` abstract a custom byte transport. This is the
+only part you must implement.
 
-A complete backend has three parts, in this order:
+Optionally, if your transport provides counterparts of `std::io::Read`/`Write`
+or `std::io::BufRead`, add a way to wrap them with a `Codec`. This produces
+a new `Read`/`Write`.
 
-1. **`Source`/`Sink` adapters (required).** These wrap your transport
-   and give a codec a way to pull input bytes and push output bytes.
-   This is the only part you must write.
-2. **`CodecReader`/`CodecWriter` wrappers (nice to have).** These wrap
-   a `Source`/`Sink` plus a codec behind `std::io::Read`/`Write` or
-   `embedded_io::Read`/`Write`, so callers can use your codec through
-   an ordinary reader/writer instead of driving `Source`/`Sink`
-   directly.
-3. **A `BufReadCodecReader` (nice to have).** If your transport already
-   exposes a buffered, lending read, such as `std::io::BufRead` or
-   `embedded_io::BufRead`, add this variant so callers can skip the
-   scratch buffer entirely.
+Use the same approach as this crate's own `std_io`/`embedded_io` backends.
+These backends are thin wrappers around `shared_io`.
 
 ## Implement `Source`/`Sink` for your transport
 
