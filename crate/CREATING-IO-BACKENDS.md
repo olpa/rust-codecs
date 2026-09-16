@@ -1,21 +1,24 @@
 # Creating an I/O backend
 
-How to add a `Source`/`Sink` adapter for a new byte transport, in your
-own crate, against `rust-codecs-core`'s public API — the same shape as
-this crate's own `std_io`/`embedded_io` backends.
+This guide shows how to add a `Source`/`Sink` adapter for a new byte
+transport. Write it in your own crate, against `rust-codecs-core`'s
+public API. Use the same shape as this crate's own `std_io`/
+`embedded_io` backends.
 
-Note what this crate's own backends deliberately don't do: `StdSource`/
-`EmbeddedSource`/`BufReadSource` never cache "the wrapped reader once
-returned nothing" — they just re-attempt the read on the very next
-`chunk()` call, with no memory of the last one. That's what lets one of
-these be handed a transport whose "nothing right now" isn't forever (a
-growing file, a pipe) and have it pick up later bytes on its own,
-instead of latching itself shut the first time it sees an empty read —
-at the cost of one real I/O attempt per `chunk()` call for as long as
-the transport stays empty. A backend for a transport with a genuine,
-final EOF (and no reason to expect more bytes ever) is free to cache
-that instead and skip the repeated attempts — the trait doesn't require
-either choice.
+Note what this crate's own backends deliberately do not do.
+`StdSource`, `EmbeddedSource`, and `BufReadSource` never remember that
+the wrapped reader once returned nothing. Each `chunk()` call just
+tries the read again, with no memory of the last attempt.
+
+This choice matters for a transport whose "nothing right now" is not
+permanent, such as a growing file or a pipe. The backend can pick up
+later bytes on its own. It does not latch shut the first time it sees
+an empty read. The cost is one real I/O attempt per `chunk()` call, for
+as long as the transport stays empty.
+
+A transport with a genuine, final EOF is different. If you know no
+more bytes will ever come, your backend can cache that fact and skip
+the repeated attempts. The trait does not require either choice.
 
 ## Implement `Source`/`Sink` for your transport
 
@@ -34,60 +37,64 @@ pub trait Sink {
 }
 ```
 
-Both are lending: `chunk`/`spare` hand back a borrowed window into
-storage the adapter itself owns (a scratch buffer, in `StdSource`'s
-case), not the caller's. Load-bearing details, easiest to get wrong:
+Both traits are lending. `chunk` and `spare` return a borrowed window
+into storage that the adapter itself owns, for example a scratch
+buffer in `StdSource`. The window is not the caller's own storage. The
+following details matter most, and are the easiest to get wrong:
 
-- **"Current" is not "fresh."** `chunk`/`spare` return whatever hasn't
-  been released by `consume`/`commit` yet. A caller is never required
-  to consume/commit a whole window in one call — the unconsumed
-  remainder is exactly what the next call returns, so consecutive
-  windows can overlap. Don't hand out new bytes ahead of the
-  unconsumed position.
-- **`None` means exhausted**, not "call again later" — end of input
-  for `Source`, no room for `Sink`.
-- **`spare` never needs a matching `commit`.** A caller is free to
-  call `spare` again without having committed the previous one — the
-  same span (or an equivalent one) is simply re-offered. This mirrors
-  `chunk`/`consume`: nothing is lost by not committing, since whatever
-  was (or wasn't) written into the returned window is still there, or
-  is irrelevant, either way.
-- **`Sink::finish` defaults to a no-op** — override it only if your
-  transport needs a final flush once the codec's stream has ended
-  (`StdSink`/`EmbeddedSink` forward to the wrapped writer's own
-  `flush`).
+- **"Current" does not mean "fresh."** `chunk` and `spare` return
+  whatever `consume`/`commit` has not released yet. A caller does not
+  have to consume or commit a whole window in one call. The next call
+  returns exactly the unconsumed remainder, so consecutive windows can
+  overlap. Do not hand out new bytes ahead of the unconsumed position.
+- **`None` means exhausted, not "call again later."** For `Source`, it
+  means end of input. For `Sink`, it means no room is left.
+- **`spare` never needs a matching `commit`.** A caller can call
+  `spare` again without committing the previous one. The adapter
+  simply re-offers the same span, or an equivalent one. This mirrors
+  `chunk`/`consume`: nothing is lost by skipping a commit. Whatever
+  was, or was not, written into the returned window is still there, or
+  does not matter either way.
+- **`Sink::finish` defaults to a no-op.** Override it only if your
+  transport needs a final flush once the codec's stream has ended.
+  `StdSink` and `EmbeddedSink` forward this call to the wrapped
+  writer's own `flush`.
 
-`StdSource`/`StdSink` (in `rust-codecs-core`'s own
-`sources_and_sinks::std_io` module — both public, so you can read them
-directly) are the template: a caller-provided scratch buffer
-(`S: AsMut<[u8]>`), asserted non-empty at construction (a caller bug,
-not a runtime condition — panic, don't return a `Result`), plus
-`into_inner`/`get_mut` for reclaiming/bypassing the wrapped transport.
-`Self::Error` is whatever error type your transport itself reports.
+`StdSource` and `StdSink` are the template to follow. You find them in
+`rust-codecs-core`'s own `sources_and_sinks::std_io` module, and both
+are public, so you can read them directly. Each takes a caller-
+provided scratch buffer (`S: AsMut<[u8]>`). The constructor asserts
+the buffer is non-empty: this is a caller bug, not a runtime
+condition, so it panics instead of returning a `Result`. Each also
+provides `into_inner` and `get_mut`, to reclaim or bypass the wrapped
+transport. `Self::Error` is whatever error type your own transport
+reports.
 
 ## Skipping the scratch-buffer bookkeeping
 
-You don't have to implement `Source`/`Sink` by hand. `std_io` and
-`embedded_io` share their scratch-buffer/`spare`/`commit` bookkeeping
-and interrupt-retry logic through `sources_and_sinks::shared_io`'s
-`ScratchSource`/`LendingSource`/`ScratchSink` — all public, along with
-the `EintrRead`/`EintrFillBuf`/`RetryingWrite` traits they're
-generic over. If your transport looks like a single retrying
-`read`/`write`/`fill_buf` call, you can build on these instead of
-reimplementing that bookkeeping yourself, the same way `std_io`'s and
+You do not have to implement `Source`/`Sink` by hand. `std_io` and
+`embedded_io` share their scratch-buffer, `spare`/`commit` bookkeeping,
+and interrupt-retry logic through `sources_and_sinks::shared_io`. This
+module exposes `ScratchSource`, `LendingSource`, and `ScratchSink`, all
+public, along with the `EintrRead`, `EintrFillBuf`, and `RetryingWrite`
+traits they are generic over.
+
+If your transport looks like a single retrying `read`, `write`, or
+`fill_buf` call, build on these types instead of reimplementing the
+bookkeeping yourself. This is exactly what `std_io`'s and
 `embedded_io`'s own `Source`/`Sink` adapters do. See
-`sources_and_sinks::std_io::adapter`/`sources_and_sinks::embedded_io::adapter`
-(`StdSource`/`StdSink`, `EmbeddedSource`/`EmbeddedSink`) for the
-pattern to copy.
+`sources_and_sinks::std_io::adapter` and
+`sources_and_sinks::embedded_io::adapter` (`StdSource`/`StdSink`,
+`EmbeddedSource`/`EmbeddedSink`) for the pattern to copy.
 
 ## Wrapping it as `Read`/`Write`
 
-Reuse `Pump` and `sources_and_sinks::shared_io` — don't hand-roll the
-chunk/commit drive loop; `shared_io` already is that loop, public for
-exactly this purpose. Hold a `Pump<C>` next to your adapter, the same
-way `std_io::wrapper::CodecReader`/`CodecWriter` hold one next to
-`StdSource`/`StdSink`, and let one `shared_io` call implement each
-`Read`/`Write` method:
+Reuse `Pump` and `sources_and_sinks::shared_io`. Do not hand-roll the
+chunk/commit drive loop yourself: `shared_io` already is that loop,
+and it is public for exactly this purpose. Hold a `Pump<C>` next to
+your adapter, the same way `std_io::wrapper::CodecReader`/
+`CodecWriter` hold one next to `StdSource`/`StdSink`. Then let one
+`shared_io` call implement each `Read`/`Write` method:
 
 ```rust
 use core::convert::Infallible;
@@ -105,47 +112,50 @@ impl<I: Source, C: BoundaryAwareCodec> YourReader<I, C> {
         Self { input, pump: Pump::new(codec) }
     }
 
-    // Wire this into `std::io::Read`/`embedded_io::Read`/whatever
-    // your transport's own read trait is, mapping `DriveError` into
-    // your error type at the boundary (see `reader_error` in
-    // `std_io::wrapper`/`embedded_io::wrapper` for the pattern).
+    // Wire this into `std::io::Read`, `embedded_io::Read`, or whatever
+    // your transport's own read trait is. Map `DriveError` into your
+    // error type at the boundary. See `reader_error` in
+    // `std_io::wrapper`/`embedded_io::wrapper` for the pattern.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, DriveError<I::Error, Infallible>> {
         boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
     }
 }
 ```
 
-`shared_io` has one function per operation — `boundary_aware_pump_read`, `pump_write`,
-`pump_finish`, `pump_flush` — each the whole body of the matching
-`Read`/`Write` method. Map their `DriveError` result into your own
-error type at the call site (`reader_error`/`writer_error` in
-`std_io::wrapper`/`embedded_io::wrapper` are the templates).
+`shared_io` has one function per operation: `boundary_aware_pump_read`,
+`pump_write`, `pump_finish`, and `pump_flush`. Each one is the whole
+body of the matching `Read`/`Write` method. Map their `DriveError`
+result into your own error type at the call site. `reader_error` and
+`writer_error`, in `std_io::wrapper`/`embedded_io::wrapper`, are the
+templates for this.
 
-`boundary_aware_pump_read` returns as soon as one pull from `input` actually yields
-output, instead of chasing a full `buf` — the interactive-application
-behavior: a handler downstream of your reader sees each unit `input`
-produces (a terminal line, a network datagram) as soon as it arrives,
-not only once enough of them have piled up to fill whatever buffer a
-caller driving your reader through something like `std::io::copy`
-happens to be using. A pull that consumes input but produces no output
-yet (a codec buffering several input bytes before it can emit
-anything) doesn't count as a stopping point: `boundary_aware_pump_read` loops past
-those, since returning `0` there would be indistinguishable from EOF
-to the caller.
+`boundary_aware_pump_read` returns as soon as one pull from `input`
+actually yields output. It does not wait to fill the whole `buf`. This
+gives interactive-application behavior: a handler downstream of your
+reader sees each unit that `input` produces, such as a terminal line
+or a network datagram, as soon as it arrives. It does not wait until
+enough units pile up to fill whatever buffer a caller happens to use,
+for example one driving your reader through `std::io::copy`.
 
-If your transport already exposes a lending, buffered read (an
-`fill_buf`/`consume` shape, like `std::io::BufRead`/
-`embedded_io::BufRead`), skip the scratch buffer entirely — see
-`BufReadSource`/`BufReadCodecReader` in `std_io`/`embedded_io` for the
-pattern: adapt straight from `fill_buf`/`consume` instead of copying
-into a buffer of your own.
+A pull that consumes input but produces no output yet does not count
+as a stopping point. This can happen when a codec buffers several
+input bytes before it can emit anything. `boundary_aware_pump_read`
+loops past these pulls, because returning `0` there would look like
+EOF to the caller.
+
+If your transport already exposes a lending, buffered read, in the
+`fill_buf`/`consume` shape of `std::io::BufRead` or
+`embedded_io::BufRead`, skip the scratch buffer entirely. Adapt
+straight from `fill_buf`/`consume`, instead of copying into a buffer
+of your own. See `BufReadSource`/`BufReadCodecReader` in `std_io`/
+`embedded_io` for the pattern.
 
 ## Testing your `Read`/`Write` wrapper
 
-Write your own test doubles against your own transport trait, the way
-this crate's `std_io`/`embedded_io` adapters each keep their own
-`FlakyOnce` for retry tests, and its `shared_io::read` module keeps its
-own minimal `BoundaryAwareCodec` double (a codec that ends its stream
-in-band after a fixed number of bytes) — use it the same way to prove
-your reader stops yielding bytes and reports EOF right at a codec's
-in-band end.
+Write your own test doubles against your own transport trait. This
+crate's `std_io`/`embedded_io` adapters each keep their own `FlakyOnce`
+double for retry tests. Its `shared_io::read` module keeps its own
+minimal `BoundaryAwareCodec` double: a codec that ends its stream
+in-band after a fixed number of bytes. Use a double like this the same
+way, to prove that your reader stops yielding bytes and reports EOF
+right at a codec's in-band end.
