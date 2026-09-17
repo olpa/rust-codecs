@@ -21,6 +21,8 @@ pub fn pump_write<O: Sink, C: Codec>(
     buf: &[u8],
 ) -> Result<usize, DriveError<Infallible, O::Error>> {
     let mut input = SliceSource::new(buf);
+    // FIXME: A commit error can occur after input was consumed.
+    // Track Write::write failure handling: https://github.com/olpa/rust-codecs/issues/20
     pump.transfer_from(&mut input, output)?;
     Ok(input.consumed())
 }
