@@ -111,6 +111,8 @@ impl Sink for VecSink {
 
     // SAFETY: the driver must only pass an `amount` that reflects how much
     // of the spare slice it actually initialized since the last `spare` call.
+    // FIXME: Safe commit relies on caller-provided initialization.
+    // Track the output API safety fix: https://github.com/olpa/rust-codecs/issues/19
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         let amount = amount.min(self.offered);
         unsafe { self.inner.set_len(self.inner.len() + amount) };
