@@ -201,16 +201,17 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         self.pump.get_mut()
     }
 
-    /// Drain the codec by calling its `finish` repeatedly until
-    /// `DrainProgress::Done` (delivering any trailer/checksum/padding bytes it
-    /// was still holding), finalize the sink itself ([`Sink::finish`](crate::Sink::finish),
-    /// e.g. flushing the wrapped writer), and hand back ownership of it.
+    /// Call the codec's `finish` repeatedly until it returns
+    /// `DrainProgress::Done`. This writes any remaining trailer,
+    /// checksum, or padding bytes.
     ///
-    /// Don't forget to call this: dropping a `CodecWriter` without
-    /// calling `finish` silently drops any trailer/padding/checksum
-    /// bytes the codec was still holding. There is no compiler
-    /// warning or runtime error, only truncated output discovered
-    /// later.
+    /// Then call [`Sink::finish`](crate::Sink::finish), which flushes
+    /// the wrapped writer, and return ownership of the writer.
+    ///
+    /// You must call this method to complete the output. Dropping a
+    /// `CodecWriter` without calling `finish` loses any remaining
+    /// trailer, checksum, or padding bytes. This produces no compiler
+    /// warning or runtime error.
     pub fn finish(mut self) -> io::Result<W> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)?;
         Ok(self.output.into_inner())

@@ -53,8 +53,7 @@ pub trait Sink {
         Ok(())
     }
 
-    /// Flush this sink, ensuring that all intermediately buffered
-    /// contents reach their destination.
+    /// Flush this sink so that all buffered data reaches its destination.
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -91,17 +90,17 @@ pub trait Codec: DrainCodec {
     /// - it fills **all** of `output`, reporting [`Progress::OutputFilled`].
     ///
     /// 2) Each call reads `input` and writes `output` starting at byte 0 of
-    /// the slices it was given.
+    ///    the slices it was given.
     ///
     /// The codec does not remember a "leftover" position from the previous call.
     /// If a call did not consume all of `input`, the caller must retain those
     /// bytes and supply them again.
     ///
     /// 3) The codec state after `Err` is not defined. A later call can fail
-    /// again or make normal progress.
+    ///    again or make normal progress.
     ///
     /// 4) This contract does not define a call to `process` after
-    /// `finish`. Two behaviors are valid:
+    ///    `finish`. Two behaviors are valid:
     /// - a codec without a trailer or terminal state may continue to
     ///   process input, or
     /// - a codec that has closed its format, for example by writing a
