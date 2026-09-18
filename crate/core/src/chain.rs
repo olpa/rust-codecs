@@ -48,6 +48,10 @@ pub struct Chain<A, B, S> {
     /// Bytes in `staging[..stage_len]` are valid: produced by `first`,
     /// not drained by `second`.
     stage_len: usize,
+    /// Persistent flag for `finish`. Does not affect `process`: the
+    /// `Codec` contract does not specify `process` after `finish`,
+    /// so we skip that work.
+    first_done: bool,
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
@@ -65,6 +69,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             second,
             staging,
             stage_len: 0,
+            first_done: false,
         })
     }
 
@@ -151,10 +156,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// still upstream of it.
     fn finish_through(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
-        let mut nothing_more_from_first = false;
 
         loop {
-            if !nothing_more_from_first {
+            if !self.first_done {
                 //
                 // Finish `first` into `staging`.
                 //
@@ -176,7 +180,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     DrainProgress::OutputFilled => self.stage_len = staging.len(),
                     DrainProgress::Done { written } => {
                         self.stage_len += written;
-                        nothing_more_from_first = true;
+                        self.first_done = true;
                     }
                 }
             }
@@ -186,7 +190,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             //
             out_pos += self.drain_staging_into(output, out_pos, 0)?;
 
-            if nothing_more_from_first && self.stage_len == 0 {
+            if self.first_done && self.stage_len == 0 {
                 //
                 // At this point, `first` is done and `staging` is empty.
                 // Finish `second`.
@@ -301,8 +305,7 @@ mod tests {
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::as_uninit_mut;
     use crate::{
-        stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress,
-        Sink,
+        stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress, Sink,
     };
 
     const INPUT: &str = "Hello, World! 123";
@@ -508,6 +511,65 @@ mod tests {
             }
         );
         assert_eq!(&out[..expected.len()], expected.as_bytes());
+    }
+
+    #[derive(Default)]
+    struct CountingFinisher {
+        inner: Identity,
+        finish_calls: usize,
+    }
+
+    impl DrainCodec for CountingFinisher {
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.finish_calls += 1;
+            self.inner.finish(output)
+        }
+    }
+
+    impl Codec for CountingFinisher {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            self.inner.process(input, output)
+        }
+    }
+
+    #[test]
+    fn finish_does_not_call_a_completed_first_codec_again() {
+        let mut chain = Chain::new(
+            CountingFinisher::default(),
+            Hoarder::default(),
+            vec![0u8; 8],
+        )
+        .unwrap();
+        let mut output = [0u8; 8];
+
+        let outcome = chain
+            .process(INPUT.as_bytes(), as_uninit_mut(&mut output))
+            .unwrap();
+        assert_eq!(outcome, Progress::InputConsumed { written: 0 });
+
+        let mut small_output = [0u8; 1];
+        let mut outer_finish_calls = 0;
+        loop {
+            outer_finish_calls += 1;
+            match chain.finish(as_uninit_mut(&mut small_output)).unwrap() {
+                DrainProgress::OutputFilled => continue,
+                DrainProgress::Done { .. } => break,
+            }
+        }
+        assert!(
+            outer_finish_calls > 1,
+            "the test setup must force several outer finish calls, or it does not exercise the latch"
+        );
+
+        let (first, _second, _staging) = chain.into_parts();
+        assert_eq!(
+            first.finish_calls, 1,
+            "first's finish must run exactly once, no matter how many outer finish calls it took"
+        );
     }
 
     // ----
