@@ -116,6 +116,11 @@ pub(crate) enum PumpDrain {
 pub struct Pump<C> {
     codec: C,
     ended_in_band: bool,
+    /// Persistent flag for `finish`:
+    /// - Does not guard transfer steps. The `Codec` contract allows
+    ///   `process` after `finish`, so we skip that extra work.
+    /// - Independent from `ended_in_band`.
+    ended_by_finish: bool,
 }
 
 impl<C: BoundaryAwareCodec> Pump<C> {
@@ -123,6 +128,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         Self {
             codec,
             ended_in_band: false,
+            ended_by_finish: false,
         }
     }
 
@@ -142,7 +148,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// Tell a caller such as `shared_io::boundary_aware_pump_read`
     /// that the stream has ended.
     pub(crate) fn is_done(&self) -> bool {
-        self.ended_in_band
+        self.ended_in_band || self.ended_by_finish
     }
 
     /// Drive the codec by repeatedly pulling chunks from `input` and
@@ -349,20 +355,26 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
-    /// Run one `finish` call.
+    /// Run one `finish` call, latched.
     ///
-    /// If the codec already ended in-band, [`BoundaryAwareCodec::process`]'s
-    /// contract already required it to finish itself first. So this
-    /// function skips the call. It reports a permanent `Done` and
-    /// never touches the codec again.
+    /// Skips the call and reports a permanent `Done` in two cases:
+    /// - The codec already ended in-band. [`BoundaryAwareCodec::process`]'s
+    ///   contract already required it to finish itself first.
+    /// - `finish` already reported `Done`. The [`DrainCodec`](crate::DrainCodec)
+    ///   contract does not specify a repeat call. We skip it for
+    ///   defensive programming: a repeat call could replay a trailer.
     fn latched_finish_step(
         &mut self,
         output: &mut [MaybeUninit<u8>],
     ) -> Result<DrainProgress, Error> {
-        if self.ended_in_band {
+        if self.ended_in_band || self.ended_by_finish {
             return Ok(DrainProgress::Done { written: 0 });
         }
-        finish_step(&mut self.codec, output)
+        let progress = finish_step(&mut self.codec, output)?;
+        if matches!(progress, DrainProgress::Done { .. }) {
+            self.ended_by_finish = true;
+        }
+        Ok(progress)
     }
 }
 
@@ -370,7 +382,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 mod tests {
     use core::mem::MaybeUninit;
 
-    use super::{Pump, PumpTransfer};
+    use super::{Pump, PumpDrain, PumpTransfer};
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::{
         BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError,
@@ -572,6 +584,33 @@ mod tests {
                 written: 1
             })
         ));
+    }
+
+    #[test]
+    fn finish_to_must_not_run_a_completed_codec_again() {
+        // `Scripted` always answers the same `Done { written: 1 }`,
+        // whether or not it was already called before. So a second
+        // `finish_to` call that still writes a byte means `finish`
+        // ran again after it already reported `Done`.
+        let mut pump = Pump::new(Scripted {
+            process: BoundaryAwareProgress::InputConsumed { written: 0 },
+            drain: DrainProgress::Done { written: 1 },
+        });
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+
+        let first = pump.finish_to(&mut output).unwrap();
+        assert_eq!(first, PumpDrain::Done { written: 1 });
+
+        output.written = 0;
+        let second = pump.finish_to(&mut output).unwrap();
+        assert_eq!(
+            second,
+            PumpDrain::Done { written: 0 },
+            "finish ran again after it already reported Done"
+        );
     }
 
     // ----
