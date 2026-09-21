@@ -14,6 +14,10 @@ pub trait Source {
     ///
     /// A caller may consume only part of the chunk; the next call
     /// returns at least the rest, possibly with more data appended.
+    ///
+    /// A blocking `Source` should not read ahead for more. This avoids
+    /// blocking a transfer loop when the `Sink` has less room than
+    /// the chunk.
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
 
     /// Consume the first `amount` bytes of the current chunk.

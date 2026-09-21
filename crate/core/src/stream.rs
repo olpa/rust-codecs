@@ -213,6 +213,20 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         input: &mut I,
         output: &mut O,
     ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
+        // AI review agents detect a potential problem here:
+        //
+        // > A blocking `Source` transport can stall here. Drain
+        // > available codec output before requesting more input.
+        //
+        // Two independent cases produce "available codec output":
+        //
+        // - The `output` buffer is smaller than `input`. Should not
+        //   happen: `Source::chunk`'s doc tells implementors to
+        //   return available data instead of reading more.
+        // - The codec buffers bytes internally, for example atomic
+        //   units in the base64 codec. With large buffers, the worst
+        //   case is a one-read delay at each atomic-unit boundary.
+        //   This delay is tolerable. We do not plan to fix it.
         let Some(chunk) = input.chunk().map_err(DriveError::Source)? else {
             return Ok(PumpTransfer::SourceExhausted(TransferCounts::default()));
         };
@@ -262,7 +276,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
         // `moved.consumed` may be less than `chunk.len()` if output
         // ran out first. The unconsumed remainder is not lost: it
-        // reappears on the next `input.chunk()` call.
+        // reappears on the next `input.chunk()` call, possibly
+        // together with newly arrived input.
         if moved.consumed > 0 {
             input.consume(moved.consumed);
         }
