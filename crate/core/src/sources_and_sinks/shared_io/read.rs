@@ -4,20 +4,18 @@ use crate::sources_and_sinks::slice::SliceSink;
 use crate::stream::{Pump, PumpTransfer};
 use crate::{BoundaryAwareCodec, DriveError, Source};
 
-/// Drive `pump` against `input`, filling `buf` with transformed bytes —
-/// the transport-independent core of a `Read::read` impl.
+/// This is the transport-independent core of a `Read::read`
+/// implementation. In the normal case, one pull from `input` makes
+/// the codec produce output.
 ///
-/// - Returns as soon as one pull from `input` yields output, instead of
-///   chasing a full `buf` — so `read()` never blocks past what a
-///   single pull from `input` already blocked on.
-/// - Loops past a step that pulls input but produces no output yet (a
-///   codec buffering several input bytes before it can emit anything,
-///   e.g. `base64_dec`): counting that as a stopping point would make
-///   `read()` return `Ok(0)`, which callers would misread as EOF
-///   before the stream has genuinely ended.
-/// - Ends the codec's stream (running `finish`) once `input` reports
-///   exhaustion. It's an extra responsibility, but there is no good
-///   way to let the caller do so.
+/// If the codec produces no output, the function pulls again.
+/// It repeats until the codec produces output, or `input` ends.
+/// Rationale: `Ok(0)` here would wrongly signal EOF to the caller.
+///
+/// Once `input` ends, this function also ends the codec's stream,
+/// by running `finish`. This is an extra responsibility for this
+/// function. Rationale: No good way exists to let the caller do
+/// this instead.
 pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     pump: &mut Pump<C>,
     input: &mut I,
