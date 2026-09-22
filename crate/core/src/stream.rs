@@ -121,6 +121,14 @@ pub struct Pump<C> {
     ///   `process` after `finish`, so we skip that extra work.
     /// - Independent from `ended_in_band`.
     ended_by_finish: bool,
+    /// Latches when `finish_to` is entered.
+    ///
+    /// `Read`-style interfaces have no `finish` call. A wrapper like
+    /// `boundary_aware_pump_read` integrates `finish` into `read`. This
+    /// flag selects the mode. `false` means `read` pulls more data
+    /// from the source. `true` means `read` drives the codec to its
+    /// end.
+    finishing: bool,
 }
 
 impl<C: BoundaryAwareCodec> Pump<C> {
@@ -129,6 +137,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             codec,
             ended_in_band: false,
             ended_by_finish: false,
+            finishing: false,
         }
     }
 
@@ -149,6 +158,11 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// that the stream has ended.
     pub(crate) fn is_done(&self) -> bool {
         self.ended_in_band || self.ended_by_finish
+    }
+
+    /// See [`Self::finishing`].
+    pub(crate) fn is_finishing(&self) -> bool {
+        self.finishing
     }
 
     /// Drive the codec by repeatedly pulling chunks from `input` and
@@ -333,6 +347,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self,
         output: &mut O,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
+        self.finishing = true;
         let mut written = 0;
         loop {
             let (step_written, done) = match output.spare().map_err(DriveError::Sink)? {
