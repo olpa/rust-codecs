@@ -93,6 +93,7 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::SliceWriter;
     use super::{RetryingWrite, ScratchSink};
     use crate::Sink;
     use core::convert::Infallible;
@@ -117,55 +118,17 @@ mod tests {
         }
     }
 
-    /// A minimal [`RetryingWrite`] over a borrowed byte slice, filling
-    /// it left to right — stands in for a real `std::io`/`embedded_io`
-    /// writer when testing `ScratchSink` itself. Panics (via the slice
-    /// index) if written past capacity; tests using this should size
-    /// the slice generously, the same way they'd size a real fixed
-    /// buffer.
-    struct SliceWriter<'a> {
-        remaining: &'a mut [u8],
-    }
-
-    impl<'a> RetryingWrite for SliceWriter<'a> {
-        type Error = Infallible;
-
-        fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-            let n = buf.len();
-            self.remaining[..n].copy_from_slice(buf);
-            let remaining = core::mem::take(&mut self.remaining);
-            self.remaining = &mut remaining[n..];
-            Ok(())
-        }
-
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn spare_offers_the_whole_buffer() {
         let mut bytes = [0u8; 32];
-        let mut output = ScratchSink::new(
-            SliceWriter {
-                remaining: &mut bytes,
-            },
-            [0u8; 6],
-        )
-        .unwrap();
+        let mut output = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 6]).unwrap();
         assert_eq!(output.spare().unwrap().unwrap().len(), 6);
     }
 
     #[test]
     fn spare_without_commit_is_reissuable() {
         let mut bytes = [0u8; 32];
-        let mut output = ScratchSink::new(
-            SliceWriter {
-                remaining: &mut bytes,
-            },
-            [0u8; 6],
-        )
-        .unwrap();
+        let mut output = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 6]).unwrap();
         let first_len = output.spare().unwrap().unwrap().len();
         let second_len = output.spare().unwrap().unwrap().len();
         assert_eq!(first_len, second_len);
@@ -175,17 +138,12 @@ mod tests {
     fn commit_writes_only_the_committed_prefix_through() {
         let mut bytes = [0u8; 32];
         let written = {
-            let mut output = ScratchSink::new(
-                SliceWriter {
-                    remaining: &mut bytes,
-                },
-                [0u8; 8],
-            )
-            .unwrap();
+            let mut output =
+                ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 8]).unwrap();
             let spare = output.spare().unwrap().unwrap();
             spare[..5].write_copy_of_slice(b"abcde");
             output.commit(3).unwrap();
-            32 - output.into_inner().remaining.len()
+            32 - output.into_inner().remaining_len()
         };
         assert_eq!(&bytes[..written], b"abc");
     }
@@ -194,13 +152,7 @@ mod tests {
     #[should_panic]
     fn commit_more_than_offered_panics() {
         let mut bytes = [0u8; 32];
-        let mut output = ScratchSink::new(
-            SliceWriter {
-                remaining: &mut bytes,
-            },
-            [0u8; 4],
-        )
-        .unwrap();
+        let mut output = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 4]).unwrap();
         output.spare().unwrap();
         output.commit(5).unwrap();
     }
