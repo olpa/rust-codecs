@@ -200,43 +200,13 @@ mod tests {
         assert_eq!(read(), b"");
     }
 
-    /// A codec with nothing to process, only a multi-byte trailer to
-    /// emit from `finish` — stands in for a format whose finalization
-    /// (a checksum, a footer) is bigger than one `read()` buffer.
-    struct EmitsTrailerOnFinish {
-        position: usize,
-    }
-
-    impl DrainCodec for EmitsTrailerOnFinish {
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            const TRAILER: &[u8] = b"final";
-            let n = (TRAILER.len() - self.position).min(output.len());
-            output[..n].write_copy_of_slice(&TRAILER[self.position..self.position + n]);
-            self.position += n;
-            if self.position == TRAILER.len() {
-                Ok(DrainProgress::Done { written: n })
-            } else {
-                Ok(DrainProgress::OutputFilled)
-            }
-        }
-    }
-
-    impl Codec for EmitsTrailerOnFinish {
-        fn process(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
-            Ok(Progress::InputConsumed { written: 0 })
-        }
-    }
-
     #[test]
     fn resumes_a_partial_finish_on_the_next_read() {
         use crate::sources_and_sinks::slice::SliceSource;
+        use super::super::test_support::EmitsTrailerOnFinish;
 
         let mut source = SliceSource::new(b"");
-        let mut pump = Pump::new(EmitsTrailerOnFinish { position: 0 });
+        let mut pump = Pump::new(EmitsTrailerOnFinish::new(b"final"));
         let mut buf = [0u8; 2];
 
         let mut read = || {
@@ -313,13 +283,15 @@ mod tests {
 
     #[test]
     fn resumes_a_partial_finish_without_polling_the_source_again() {
+        use super::super::test_support::EmitsTrailerOnFinish;
+
         let mut source = ChunkedSource {
             bytes: b"x",
             pos: 0,
             chunk_size: 8,
             count_chunk_calls: 0,
         };
-        let mut pump = Pump::new(EmitsTrailerOnFinish { position: 0 });
+        let mut pump = Pump::new(EmitsTrailerOnFinish::new(b"final"));
         let mut buf = [0u8; 2];
 
         // The 2-byte buffer can't hold all of "final" at once, so the
