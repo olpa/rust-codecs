@@ -25,16 +25,17 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         return Ok(0);
     }
     let mut output = SliceSink::new(buf);
-    let source_exhausted = loop {
-        let step = pump.transfer_step(input, &mut output)?;
-        match step {
-            PumpTransfer::SourceExhausted(_) => break true,
-            PumpTransfer::Progressed(_) if output.written() == 0 => {}
-            PumpTransfer::Progressed(_) | PumpTransfer::SinkExhausted(_) | PumpTransfer::End(_) => {
-                break false
+    let source_exhausted = pump.is_finishing()
+        || loop {
+            let step = pump.transfer_step(input, &mut output)?;
+            match step {
+                PumpTransfer::SourceExhausted(_) => break true,
+                PumpTransfer::Progressed(_) if output.written() == 0 => {}
+                PumpTransfer::Progressed(_)
+                | PumpTransfer::SinkExhausted(_)
+                | PumpTransfer::End(_) => break false,
             }
-        }
-    };
+        };
     if source_exhausted {
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
@@ -66,12 +67,14 @@ mod tests {
         bytes: &'a [u8],
         pos: usize,
         chunk_size: usize,
+        count_chunk_calls: usize,
     }
 
     impl Source for ChunkedSource<'_> {
         type Error = Infallible;
 
         fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+            self.count_chunk_calls += 1;
             let end = (self.pos + self.chunk_size).min(self.bytes.len());
             Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..end]))
         }
@@ -87,6 +90,7 @@ mod tests {
             bytes: b"ok",
             pos: 0,
             chunk_size: 1,
+            count_chunk_calls: 0,
         };
         let mut pump = Pump::new(identity());
         let mut buf = [0u8; 8];
@@ -154,6 +158,7 @@ mod tests {
             bytes: b"ok",
             pos: 0,
             chunk_size: 1,
+            count_chunk_calls: 0,
         };
         let mut pump = Pump::new(CanProgressWithoutOutput::default());
         let mut buf = [0u8; 8];
@@ -177,6 +182,7 @@ mod tests {
             bytes: b"odd",
             pos: 0,
             chunk_size: 1,
+            count_chunk_calls: 0,
         };
         let mut pump = Pump::new(CanProgressWithoutOutput::default());
         let mut buf = [0u8; 8];
@@ -303,5 +309,34 @@ mod tests {
         let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
         assert_eq!(n, 0);
         assert_eq!(source.consumed(), 3);
+    }
+
+    #[test]
+    fn resumes_a_partial_finish_without_polling_the_source_again() {
+        let mut source = ChunkedSource {
+            bytes: b"x",
+            pos: 0,
+            chunk_size: 8,
+            count_chunk_calls: 0,
+        };
+        let mut pump = Pump::new(EmitsTrailerOnFinish { position: 0 });
+        let mut buf = [0u8; 2];
+
+        // The 2-byte buffer can't hold all of "final" at once, so the
+        // first read only starts draining. By then the source has
+        // already reported exhaustion once. A buggy implementation
+        // that forgets that would poll it again on each following
+        // call.
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"fi");
+        let chunk_calls_once_exhausted = source.count_chunk_calls;
+
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"na");
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"l");
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(source.count_chunk_calls, chunk_calls_once_exhausted);
     }
 }
