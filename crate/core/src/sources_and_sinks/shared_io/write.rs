@@ -50,11 +50,14 @@ pub fn pump_flush<O: Sink>(output: &mut O) -> Result<(), DriveError<Infallible, 
 
 #[cfg(test)]
 mod tests {
-    use super::pump_finish;
-    use super::super::test_support::EmitsTrailerOnFinish;
+    use core::mem::MaybeUninit;
+
+    use super::super::sink::ScratchSink;
+    use super::super::test_support::{EmitsTrailerOnFinish, SliceWriter};
+    use super::{pump_finish, pump_flush, pump_write};
     use crate::sources_and_sinks::slice::SliceSink;
     use crate::stream::Pump;
-    use crate::DriveError;
+    use crate::{Codec, DrainCodec, DrainProgress, DriveError, Error, Progress};
 
     #[test]
     fn reports_sink_exhausted_instead_of_silently_truncating_the_trailer() {
@@ -62,12 +65,66 @@ mod tests {
         let mut buf = [0u8; 1];
         let mut sink = SliceSink::new(&mut buf);
 
-        // Regression: `pump_finish` used to discard `finish_to`'s
-        // `PumpDrain` and always return `Ok(())`. The trailer is 4
-        // bytes ("YQ=="), but the sink holds only 1, so draining did
-        // not complete — `pump_finish` must report that, not silently
-        // succeed after writing only "Y".
+        // Regression: `pump_finish` discarded `finish_to`'s result
+        // and always returned `Ok(())`. The trailer is 4 bytes, the
+        // sink holds 1. Draining did not finish. `pump_finish` must
+        // report that, not return success.
         let result = pump_finish(&mut pump, &mut sink);
         assert!(matches!(result, Err(DriveError::SinkExhausted)));
+    }
+
+    /// A codec that holds output:
+    /// - For each input byte, adds `HOLD` of 'X' to hold.
+    /// - Each call releases one held 'X', if any.
+    ///
+    /// To simplify, requires exactly 1 byte of input and 1 byte of
+    /// output per call.
+    #[derive(Default)]
+    struct HoldsProducedOutput {
+        hold_left: usize,
+    }
+
+    const HOLD: usize = 3;
+
+    impl DrainCodec for HoldsProducedOutput {
+        // The test never calls `finish`. A stub is enough to satisfy
+        // `Codec: DrainCodec`.
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
+        }
+    }
+
+    impl Codec for HoldsProducedOutput {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            debug_assert_eq!(input.len(), 1);
+            debug_assert_eq!(output.len(), 1);
+            if self.hold_left > 0 {
+                output[0].write(b'X');
+                self.hold_left -= 1;
+                return Ok(Progress::OutputFilled { consumed: 0 });
+            }
+            self.hold_left = HOLD;
+            Ok(Progress::InputConsumed { written: 0 })
+        }
+    }
+
+    #[test]
+    fn flush_delivers_already_produced_output_without_finalizing_the_codec() {
+        let mut pump = Pump::new(HoldsProducedOutput::default());
+        let mut bytes = *b"aaaaaaaa";
+        {
+            let mut sink = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 1]).unwrap();
+            pump_write(&mut pump, &mut sink, b"a").unwrap();
+
+            // Regression: `pump_flush` only flushes the transport.
+            // It must also drain the codec's held output, without
+            // finalizing it.
+            pump_flush(&mut sink).unwrap();
+        }
+        assert_eq!(bytes, *b"XXXaaaaa");
     }
 }
