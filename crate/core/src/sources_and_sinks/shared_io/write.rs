@@ -13,8 +13,9 @@ use crate::stream::{Pump, PumpDrain};
 use crate::{Codec, DriveError, Sink};
 
 /// Drive `pump` from `buf`, writing transformed bytes into `output`.
-/// The transport-independent core of a `Write::write` impl.
 /// Returns the number of bytes consumed from `buf`.
+///
+/// This is the transport-independent core of a `Write::write` impl.
 pub fn pump_write<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
@@ -27,9 +28,41 @@ pub fn pump_write<O: Sink, C: Codec>(
     Ok(input.consumed())
 }
 
-/// Drain `pump`'s trailing output into `output`, then finalize
-/// `output` itself. The transport-independent core of a `finish`
-/// method that consumes the wrapper and hands back its endpoint.
+/// Drain the bytes that the codec produced but did not write yet
+/// into `output`. Then flush `output`. The codec stream does not
+/// end.
+///
+/// This is the transport-independent core of a `Write::flush` impl.
+///
+/// # Errors
+///
+/// - If `output` is full before the codec is done, the function
+///   returns `DriveError::SinkExhausted`.
+/// - The function returns all errors from `pump` and from `output`
+///   without change.
+pub fn pump_flush<O: Sink, C: Codec>(
+    pump: &mut Pump<C>,
+    output: &mut O,
+) -> Result<(), DriveError<Infallible, O::Error>> {
+    match pump.flush_to(output)? {
+        PumpDrain::Done { .. } => output.flush().map_err(DriveError::Sink),
+        PumpDrain::SinkExhausted { .. } => Err(DriveError::SinkExhausted),
+    }
+}
+
+/// Drain all the bytes that the codec must still write into
+/// `output`. Then finish `output`. The codec stream ends. The
+/// function does not close `output`.
+///
+/// This is the transport-independent core of a `finish` method.
+/// That method consumes the wrapper and gives back its endpoint.
+///
+/// # Errors
+///
+/// - If `output` is full before the codec is done, the function
+///   returns `DriveError::SinkExhausted`.
+/// - The function returns all errors from `pump` and from `output`
+///   without change.
 pub fn pump_finish<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
@@ -41,11 +74,6 @@ pub fn pump_finish<O: Sink, C: Codec>(
         }
         PumpDrain::SinkExhausted { .. } => Err(DriveError::SinkExhausted),
     }
-}
-
-/// Flush the output endpoint.
-pub fn pump_flush<O: Sink>(output: &mut O) -> Result<(), DriveError<Infallible, O::Error>> {
-    output.flush().map_err(DriveError::Sink)
 }
 
 #[cfg(test)]
@@ -77,8 +105,8 @@ mod tests {
     /// - For each input byte, adds `HOLD` of 'X' to hold.
     /// - Each call releases one held 'X', if any.
     ///
-    /// To simplify, requires exactly 1 byte of input and 1 byte of
-    /// output per call.
+    /// To simplify, requires input of 0 or 1 byte, and exactly 1
+    /// byte of output, per call. Input of 0 bytes comes from a flush.
     #[derive(Default)]
     struct HoldsProducedOutput {
         hold_left: usize,
@@ -100,14 +128,16 @@ mod tests {
             input: &[u8],
             output: &mut [MaybeUninit<u8>],
         ) -> Result<Progress, Error> {
-            debug_assert_eq!(input.len(), 1);
+            debug_assert!(input.len() <= 1);
             debug_assert_eq!(output.len(), 1);
             if self.hold_left > 0 {
                 output[0].write(b'X');
                 self.hold_left -= 1;
                 return Ok(Progress::OutputFilled { consumed: 0 });
             }
-            self.hold_left = HOLD;
+            if !input.is_empty() {
+                self.hold_left = HOLD;
+            }
             Ok(Progress::InputConsumed { written: 0 })
         }
     }
@@ -120,10 +150,10 @@ mod tests {
             let mut sink = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 1]).unwrap();
             pump_write(&mut pump, &mut sink, b"a").unwrap();
 
-            // Regression: `pump_flush` only flushes the transport.
+            // Regression: `pump_flush` only flushed the transport.
             // It must also drain the codec's held output, without
             // finalizing it.
-            pump_flush(&mut sink).unwrap();
+            pump_flush(&mut pump, &mut sink).unwrap();
         }
         assert_eq!(bytes, *b"XXXaaaaa");
     }

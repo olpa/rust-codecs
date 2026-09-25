@@ -27,7 +27,7 @@ pub enum DriveError<EI, EO> {
 impl<EO> DriveError<core::convert::Infallible, EO> {
     /// Widen `EI` from `Infallible` to any type.
     ///
-    /// `finish_to`/`drain_to` never touch a `Source`, so their result
+    /// `flush_to`/`finish_to` never touch a `Source`, so their result
     /// carries `Infallible` in this slot. A caller with a real
     /// `Source` error type uses this to line its `DriveError` up with
     /// its own, so both share one `?`-friendly error type.
@@ -154,8 +154,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         self.codec
     }
 
-    /// Tell a caller such as `shared_io::boundary_aware_pump_read`
-    /// that the stream has ended.
+    /// Whether the stream has ended, in-band or by `finish`.
     pub(crate) fn is_done(&self) -> bool {
         self.ended_in_band || self.ended_by_finish
     }
@@ -326,11 +325,30 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         Ok(progress)
     }
 
-    /// Drain the codec's trailing output.
+    /// Drain the bytes that the codec produced but did not write yet.
+    /// The codec stream does not end.
+    pub(crate) fn flush_to<O: Sink>(
+        &mut self,
+        output: &mut O,
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
+        self.drain_loop(output, Self::latched_flush_step)
+    }
+
+    /// Drain all the bytes that the codec must still write, and end
+    /// the codec stream.
+    pub(crate) fn finish_to<O: Sink>(
+        &mut self,
+        output: &mut O,
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
+        self.finishing = true;
+        self.drain_loop(output, Self::latched_finish_step)
+    }
+
+    /// Move the bytes that the codec must still write into `output`.
+    /// The codec gets no new input.
     ///
-    /// Repeatedly get spare space from `output` and hand it to
-    /// [`Pump::latched_finish_step`], committing what was written,
-    /// until the codec reports `Done`.
+    /// Repeatedly get spare space from `output` and hand it to `step`,
+    /// committing what was written, until `step` reports `Done`.
     ///
     /// When `output.spare()` returns `None`, the sink has no room.
     /// One more call is made against an empty slice, to check whether
@@ -340,18 +358,17 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     ///   so `SinkExhausted` is returned
     ///
     /// A call that writes nothing and does not reach `Done` is a
-    /// stall (`DriveError::NoProgress`). Neither case commits
-    /// anything to the sink before propagating; the uncommitted
-    /// `spare` stays available for the next caller.
-    pub(crate) fn finish_to<O: Sink>(
+    /// stall (`DriveError::NoProgress`). A codec error still commits
+    /// whatever progress it validly reported.
+    fn drain_loop<O: Sink>(
         &mut self,
         output: &mut O,
+        mut step: impl FnMut(&mut Self, &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
-        self.finishing = true;
         let mut written = 0;
         loop {
             let (step_written, done) = match output.spare().map_err(DriveError::Sink)? {
-                Some(spare) => match self.latched_finish_step(spare) {
+                Some(spare) => match step(self, spare) {
                     Ok(DrainProgress::Done { written }) => (written, true),
                     Ok(DrainProgress::OutputFilled) if !spare.is_empty() => (spare.len(), false),
                     Ok(DrainProgress::OutputFilled) => return Err(DriveError::NoProgress),
@@ -366,9 +383,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                     }
                 },
                 None => {
-                    let moved = self
-                        .latched_finish_step(&mut [])
-                        .map_err(DriveError::Codec)?;
+                    let moved = step(self, &mut []).map_err(DriveError::Codec)?;
                     return Ok(match moved {
                         DrainProgress::Done { .. } => PumpDrain::Done { written },
                         DrainProgress::OutputFilled => PumpDrain::SinkExhausted { written },
@@ -385,7 +400,33 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
+    /// With [`Pump::drain_loop`], drains the bytes that the codec
+    /// produced but did not write yet.
+    fn latched_flush_step(
+        &mut self,
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<DrainProgress, Error> {
+        if self.is_done() {
+            return Ok(DrainProgress::Done { written: 0 });
+        }
+        Ok(match self.latched_step(&[], output)? {
+            BoundaryAwareProgress::OutputFilled { .. } => DrainProgress::OutputFilled,
+            BoundaryAwareProgress::InputConsumed { written } => DrainProgress::Done { written },
+            // A well-behaved codec should not decide on an in-band end
+            // without new input. If one does, treat it as the end:
+            // `latched_step` has latched it, so later calls skip the
+            // codec, and flush still succeeds.
+            // Open question, see
+            // `check_if_a_bug_early_end_while_cannot_write.md`.
+            BoundaryAwareProgress::Boundary { written, .. } => DrainProgress::Done { written },
+        })
+    }
+
     /// Run one `finish` call, latched.
+    ///
+    /// With [`Pump::drain_loop`], drains all the bytes that the codec
+    /// must still write. The trailer is part of these bytes, if the
+    /// format has one. Then the codec stream ends.
     ///
     /// Skips the call and reports a permanent `Done` in two cases:
     /// - The codec already ended in-band. [`BoundaryAwareCodec::process`]'s
@@ -397,7 +438,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self,
         output: &mut [MaybeUninit<u8>],
     ) -> Result<DrainProgress, Error> {
-        if self.ended_in_band || self.ended_by_finish {
+        if self.is_done() {
             return Ok(DrainProgress::Done { written: 0 });
         }
         let progress = finish_step(&mut self.codec, output)?;
