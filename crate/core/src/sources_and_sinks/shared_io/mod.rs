@@ -15,6 +15,3 @@ pub use source::{EintrFillBuf, EintrRead, LendingSource, ScratchSource};
 
 mod retry;
 pub use retry::{retry_fill_buf, retry_on_interrupted, retry_write_all};
-
-#[cfg(test)]
-mod test_support;

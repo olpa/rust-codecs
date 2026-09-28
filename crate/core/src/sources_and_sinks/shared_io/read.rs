@@ -202,11 +202,14 @@ mod tests {
 
     #[test]
     fn resumes_a_partial_finish_on_the_next_read() {
+        use crate::codecs::test_support::HoldsOutput;
         use crate::sources_and_sinks::slice::SliceSource;
-        use super::super::test_support::EmitsTrailerOnFinish;
 
         let mut source = SliceSource::new(b"");
-        let mut pump = Pump::new(EmitsTrailerOnFinish::new(b"final"));
+        let mut pump = Pump::new(HoldsOutput {
+            trailer: b"final",
+            ..Default::default()
+        });
         let mut buf = [0u8; 2];
 
         let mut read = || {
@@ -283,7 +286,7 @@ mod tests {
 
     #[test]
     fn resumes_a_partial_finish_without_polling_the_source_again() {
-        use super::super::test_support::EmitsTrailerOnFinish;
+        use crate::codecs::test_support::HoldsOutput;
 
         let mut source = ChunkedSource {
             bytes: b"x",
@@ -291,7 +294,10 @@ mod tests {
             chunk_size: 8,
             count_chunk_calls: 0,
         };
-        let mut pump = Pump::new(EmitsTrailerOnFinish::new(b"final"));
+        let mut pump = Pump::new(HoldsOutput {
+            trailer: b"final",
+            ..Default::default()
+        });
         let mut buf = [0u8; 2];
 
         // The 2-byte buffer can't hold all of "final" at once, so the

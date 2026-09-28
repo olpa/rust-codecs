@@ -14,3 +14,6 @@ mod base64_shared;
 
 #[cfg(feature = "json")]
 pub mod json_enc;
+
+#[cfg(test)]
+pub(crate) mod test_support;

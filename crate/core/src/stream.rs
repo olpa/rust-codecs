@@ -454,6 +454,7 @@ mod tests {
     use core::mem::MaybeUninit;
 
     use super::{Pump, PumpDrain, PumpTransfer};
+    use crate::codecs::test_support::HoldsOutput;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::{
         BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError,
@@ -511,6 +512,28 @@ mod tests {
             Ok(Some(crate::uninit::as_uninit_mut(
                 &mut self.bytes[self.written..],
             )))
+        }
+
+        fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
+            self.written += amount;
+            Ok(())
+        }
+    }
+
+    /// Like `RecordingSink`, but each `spare` call offers a maximum
+    /// of 1 byte.
+    struct OneByteWindowSink {
+        bytes: [u8; 8],
+        written: usize,
+    }
+
+    impl Sink for OneByteWindowSink {
+        type Error = core::convert::Infallible;
+
+        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+            let end = (self.written + 1).min(self.bytes.len());
+            Ok((self.written < end)
+                .then(|| crate::uninit::as_uninit_mut(&mut self.bytes[self.written..end])))
         }
 
         fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
@@ -682,6 +705,32 @@ mod tests {
             PumpDrain::Done { written: 0 },
             "finish ran again after it already reported Done"
         );
+    }
+
+    // ----
+    // Pump::flush_to
+    // ----
+
+    #[test]
+    fn flush_to_keeps_draining_across_output_windows() {
+        let mut pump = Pump::new(HoldsOutput {
+            held: 3,
+            trailer: b"F",
+            ..Default::default()
+        });
+        let mut output = OneByteWindowSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+
+        // Each window holds 1 byte, so the 3 held bytes need 3 codec
+        // calls. `flush_to` must not stop after the first window.
+        // Also, `flush_to` must not finish the codec. If it does, the
+        // output gets an 'F' marker.
+        let drained = pump.flush_to(&mut output).unwrap();
+
+        assert_eq!(drained, PumpDrain::Done { written: 3 });
+        assert_eq!(&output.bytes[..output.written], b"XXX");
     }
 
     // ----

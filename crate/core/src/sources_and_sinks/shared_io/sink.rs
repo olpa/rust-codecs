@@ -93,22 +93,28 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::SliceWriter;
     use super::{RetryingWrite, ScratchSink};
     use crate::Sink;
     use core::convert::Infallible;
 
-    /// A writer double that counts `flush` calls made on it, to prove
-    /// `ScratchSink::finish` actually reaches the wrapped writer.
+    /// A writer double that records the bytes it gets and counts the
+    /// `flush` calls on it, to prove that `ScratchSink` actually
+    /// reaches the wrapped writer. Panics if a test writes more than
+    /// 32 bytes.
     #[derive(Default)]
     struct RecordingWriter {
+        bytes: [u8; 32],
+        written: usize,
         flushes: usize,
     }
 
     impl RetryingWrite for RecordingWriter {
         type Error = Infallible;
 
-        fn retrying_write_all(&mut self, _buf: &[u8]) -> Result<(), Self::Error> {
+        fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+            let end = self.written + buf.len();
+            self.bytes[self.written..end].copy_from_slice(buf);
+            self.written = end;
             Ok(())
         }
 
@@ -120,15 +126,13 @@ mod tests {
 
     #[test]
     fn spare_offers_the_whole_buffer() {
-        let mut bytes = [0u8; 32];
-        let mut output = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 6]).unwrap();
+        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 6]).unwrap();
         assert_eq!(output.spare().unwrap().unwrap().len(), 6);
     }
 
     #[test]
     fn spare_without_commit_is_reissuable() {
-        let mut bytes = [0u8; 32];
-        let mut output = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 6]).unwrap();
+        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 6]).unwrap();
         let first_len = output.spare().unwrap().unwrap().len();
         let second_len = output.spare().unwrap().unwrap().len();
         assert_eq!(first_len, second_len);
@@ -136,37 +140,32 @@ mod tests {
 
     #[test]
     fn commit_writes_only_the_committed_prefix_through() {
-        let mut bytes = [0u8; 32];
-        let written = {
-            let mut output =
-                ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 8]).unwrap();
-            let spare = output.spare().unwrap().unwrap();
-            spare[..5].write_copy_of_slice(b"abcde");
-            output.commit(3).unwrap();
-            32 - output.into_inner().remaining_len()
-        };
-        assert_eq!(&bytes[..written], b"abc");
+        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 8]).unwrap();
+        let spare = output.spare().unwrap().unwrap();
+        spare[..5].write_copy_of_slice(b"abcde");
+        output.commit(3).unwrap();
+        let inner = output.get_ref();
+        assert_eq!(&inner.bytes[..inner.written], b"abc");
     }
 
     #[test]
     #[should_panic]
     fn commit_more_than_offered_panics() {
-        let mut bytes = [0u8; 32];
-        let mut output = ScratchSink::new(SliceWriter::new(&mut bytes), [0u8; 4]).unwrap();
+        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 4]).unwrap();
         output.spare().unwrap();
         output.commit(5).unwrap();
     }
 
     #[test]
     fn finish_flushes_the_inner_writer() {
-        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]).unwrap();
+        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 4]).unwrap();
         output.finish().unwrap();
         assert_eq!(output.get_ref().flushes, 1);
     }
 
     #[test]
     fn flush_flushes_the_inner_writer() {
-        let mut output = ScratchSink::new(RecordingWriter { flushes: 0 }, [0u8; 4]).unwrap();
+        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 4]).unwrap();
         output.flush().unwrap();
         assert_eq!(output.get_ref().flushes, 1);
     }
