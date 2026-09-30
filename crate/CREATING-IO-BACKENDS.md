@@ -53,11 +53,11 @@ This part is more boilerplate code, but straightforward.
 The shared work lives in `Pump` and the `pump_*` functions.
 Your wrapper is again a thin shell around them.
 
-For a `BoundaryAwareCodec`, the reader yields whatever bytes the codec
-produced up to its boundary. It then reports EOF on the next call. The
-shared code already gives you this behavior. You do not need to
-implement anything extra. It is mentioned here because this behavior
-is not obvious in advance.
+For a `BoundaryAwareCodec`, the reader stops pulling input at the
+codec's in-band end. Then it drains the codec with `finish`. Then it
+reports EOF. The shared code already gives you this behavior. You do
+not need to implement anything extra. It is mentioned here because
+this behavior is not obvious in advance.
 
 Nothing else about this is a surprise. Follow `std_io`/`embedded_io`
 as a template. Do not forget the buffered version.

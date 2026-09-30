@@ -2,10 +2,13 @@
 
 ## The simplest codec
 
-A codec is a `struct` with two trait implementations: `Codec` for
-`process`, and `DrainCodec` for `finish`. In the simplest case, a
-transform has no internal state and no trailer to write. Then
-`process` does the work and `finish` is a no-op.
+A codec is a `struct` with two trait implementations:
+
+- `Codec` for`process`, and
+- `DrainCodec` for `flush` and `finish`.
+
+In the simplest case, a transform has no internal state and no trailer
+to write. Then `process` does the work, and `flush` and `finish` are no-ops.
 `core/src/codecs/rot13.rs` is exactly that:
 
 ```rust
@@ -38,6 +41,10 @@ impl Codec for Rot13 {
 }
 
 impl DrainCodec for Rot13 {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
@@ -111,12 +118,22 @@ length correct.
 The general rule: if a format has a trailer, a checksum, or padding
 rules, `finish` is not optional.
 
+## `flush` can write held output
+
+`flush` gives the codec an opportunity to write the output that it
+holds internally. The codec decides how much to write. The stream does
+not end.
+
+Base64 again: `Base64Enc::flush` writes what `PendingOutput` holds. A
+partial group in `PendingInput` stays. Only `finish` can encode it,
+because the encoding needs padding.
+
 ## Boundary-aware codecs
 
 A `BoundaryAwareCodec` is a `Codec` whose `process` can also report
-`BoundaryAwareProgress::Boundary`. This means the logical stream ended
-right here, inside this `input` slice. Bytes past that point belong to
-whatever comes next.
+`BoundaryAwareProgress::Boundary`. This means the input of the logical
+stream ended right here, inside this `input` slice. Bytes past that
+point belong to whatever comes next.
 
 One example is parsing a token embedded in a larger stream.
 `core/tests/tokenizer.rs` is the worked example: a small hand-written

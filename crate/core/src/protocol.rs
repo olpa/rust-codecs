@@ -67,14 +67,25 @@ pub trait Sink {
 // Codec traits
 // ----
 
-/// Shared supertrait with [`Self::finish`].
+/// Shared supertrait with [`Self::flush`] and [`Self::finish`].
 ///
 /// This trait is a technical artifact, not a standalone abstraction.
 /// Write code against [`Codec`] or [`BoundaryAwareCodec`] instead.
 pub trait DrainCodec {
+    /// Give the codec an opportunity to write the output that it holds
+    /// internally. The codec decides how much to write.
+    ///
+    /// One call may not be enough. If `output` is too small, `flush`
+    /// returns [`DrainProgress::OutputFilled`]. Call `flush` again until
+    /// it returns [`DrainProgress::Done`].
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>;
+
     /// Tell the codec that no more input will come. The codec flushes
     /// any buffered state. If the format has a trailer or a checksum,
     /// the codec writes it now.
+    ///
+    /// A generic driver does not use the codec again after `finish`
+    /// reports [`DrainProgress::Done`].
     ///
     /// One call may not be enough. If `output` is too small to hold
     /// all pending output, `finish` returns [`DrainProgress::OutputFilled`]
@@ -126,14 +137,13 @@ pub trait BoundaryAwareCodec: DrainCodec {
     /// [`BoundaryAwareProgress::Boundary`].
     ///
     /// Once `process` reaches [`Boundary`](BoundaryAwareProgress::Boundary), a
-    /// driver must stop driving the current logical stream. Lifecycle
-    /// wrappers such as [`Pump`](crate::stream::Pump) latch the signal
-    /// and answer later calls themselves with zero-progress terminal
-    /// results.
+    /// driver must stop calling `process` for the current logical
+    /// stream. Then the driver must call [`finish`](DrainCodec::finish)
+    /// until it reports [`Done`](DrainProgress::Done).
     ///
     /// This trait does not define what direct codec calls do after
-    /// [`Boundary`](BoundaryAwareProgress::Boundary). A concrete codec may
-    /// document that its instance can be reused for another logical
+    /// `finish` reports [`Done`](DrainProgress::Done). A concrete codec
+    /// may document that its instance can be reused for another logical
     /// stream; another may have entered a permanently terminal internal
     /// state.
     ///
@@ -191,8 +201,9 @@ pub enum BoundaryAwareProgress {
     /// The call filled all of `output` and took `consumed` bytes of
     /// input. `consumed` may be zero.
     OutputFilled { consumed: usize },
-    /// The current logical stream ended in-band. `consumed` and
-    /// `written` need not reach the buffer lengths.
+    /// The input of the current logical stream ended in-band. `consumed` and
+    /// `written` need not reach the buffer lengths. The codec can have
+    /// more output to write. [`DrainCodec::finish`] writes it.
     Boundary { consumed: usize, written: usize },
 }
 
@@ -283,6 +294,10 @@ use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        (**self).flush(output)
+    }
+
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         (**self).finish(output)
     }

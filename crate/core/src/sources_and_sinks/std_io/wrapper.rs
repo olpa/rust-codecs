@@ -42,13 +42,13 @@ fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error
 /// runs codec's `finish` (trailer, padding) and its bytes are
 /// yielded before this reader reports EOF itself.
 ///
-/// End-of-codec: for an end-signalling codec that ends its stream before
-/// the input does, the reader yields exactly the bytes produced up
-/// to that point and then reports EOF itself:
+/// End-of-codec: a codec can end its input in-band, before the
+/// wrapped reader hits EOF. It reports
+/// [`BoundaryAwareProgress::Boundary`](crate::BoundaryAwareProgress::Boundary).
+/// Then the reader stops pulling from the wrapped reader:
 ///
-/// - `finish` is not called: a codec that ends its own stream
-///   is assumed to have already taken care of its own finalization
-///   before reporting [`BoundaryAwareProgress::Boundary`](crate::BoundaryAwareProgress::Boundary).
+/// - The reader runs the codec's `finish`, the same as at EOF. The
+///   reader yields the output of `finish`. Then it reports EOF.
 /// - Trailing input bytes already pulled from the wrapped reader are
 ///   not yielded as output; retrieve them with [`CodecReader::pending`]
 ///   before dropping the reader.

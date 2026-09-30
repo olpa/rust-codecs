@@ -19,6 +19,10 @@ fn rot13_byte(b: u8) -> u8 {
 pub struct Rot13;
 
 impl DrainCodec for Rot13 {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }

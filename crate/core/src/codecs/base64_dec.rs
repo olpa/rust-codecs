@@ -65,6 +65,17 @@ impl<E: Engine> Base64Dec<E> {
 }
 
 impl<E: Engine> DrainCodec for Base64Dec<E> {
+    /// Write the pending output. A partial group of input stays
+    /// pending: only `finish` can convert it.
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        let written = self.pending_output.drain(output);
+        if !self.pending_output.is_empty() {
+            debug_assert_eq!(written, output.len());
+            return Ok(DrainProgress::OutputFilled);
+        }
+        Ok(DrainProgress::Done { written })
+    }
+
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
@@ -371,5 +382,20 @@ mod tests {
         assert!(dec
             .process(b"SGVsbG8=SGVs", as_uninit_mut(&mut out))
             .is_err());
+    }
+
+    #[test]
+    fn flush_writes_pending_output() {
+        // "YWJj" decodes to "abc". A 1-byte output takes only "a". The
+        // decoder holds "bc" as pending output.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 8];
+        let progress = dec.process(b"YWJj", as_uninit_mut(&mut out[..1])).unwrap();
+        assert_eq!(progress, Progress::OutputFilled { consumed: 4 });
+        assert_eq!(out[0], b'a');
+
+        let drained = dec.flush(as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(drained, DrainProgress::Done { written: 2 });
+        assert_eq!(&out[..2], b"bc");
     }
 }

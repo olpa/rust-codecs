@@ -59,6 +59,10 @@ impl Sink for DummySink {
 struct DummyCodec;
 
 impl DrainCodec for DummyCodec {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
@@ -82,6 +86,10 @@ impl Codec for DummyCodec {
 struct DummyBoundaryCodec;
 
 impl DrainCodec for DummyBoundaryCodec {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }

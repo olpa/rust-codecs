@@ -46,6 +46,17 @@ impl<E: Engine> Base64Enc<E> {
 }
 
 impl<E: Engine> DrainCodec for Base64Enc<E> {
+    /// Write the pending output. A partial group of input stays
+    /// pending: only `finish` can convert it.
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        let written = self.pending_output.drain(output);
+        if !self.pending_output.is_empty() {
+            debug_assert_eq!(written, output.len());
+            return Ok(DrainProgress::OutputFilled);
+        }
+        Ok(DrainProgress::Done { written })
+    }
+
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
@@ -204,5 +215,41 @@ mod tests {
             }
         }
         assert_eq!(collected, ENCODED.as_bytes());
+    }
+
+    #[test]
+    fn flush_writes_pending_output() {
+        // "abc" is one full group. A 1-byte output takes only "Y".
+        // The encoder holds "WJj" as pending output.
+        let mut enc = base64_enc();
+        let mut out = [0u8; 2];
+        // The call consumes all input and fills all output. The
+        // `Progress` contract allows either variant, so ignore it.
+        enc.process(b"abc", as_uninit_mut(&mut out[..1])).unwrap();
+        assert_eq!(out[0], b'Y');
+
+        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(drained, DrainProgress::OutputFilled);
+        assert_eq!(&out, b"WJ");
+        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(drained, DrainProgress::Done { written: 1 });
+        assert_eq!(&out[..1], b"j");
+    }
+
+    #[test]
+    fn flush_keeps_a_partial_group() {
+        // "d" is a partial group. Only `finish` can encode it, because
+        // the encoding needs padding.
+        let mut enc = base64_enc();
+        let mut out = [0u8; 8];
+        let progress = enc.process(b"abcd", as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 4 });
+        assert_eq!(&out[..4], b"YWJj");
+
+        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(drained, DrainProgress::Done { written: 0 });
+        let drained = enc.finish(as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(drained, DrainProgress::Done { written: 4 });
+        assert_eq!(&out[..4], b"ZA==");
     }
 }

@@ -12,10 +12,10 @@ use crate::{BoundaryAwareCodec, DriveError, Source};
 /// It repeats until the codec produces output, or `input` ends.
 /// Rationale: `Ok(0)` here would wrongly signal EOF to the caller.
 ///
-/// Once `input` ends, this function also ends the codec's stream,
-/// by running `finish`. This is an extra responsibility for this
-/// function. Rationale: No good way exists to let the caller do
-/// this instead.
+/// Once `input` ends, or the codec reports an in-band end, this
+/// function also ends the codec's stream, by running `finish`. This
+/// is an extra responsibility for this function. Rationale: No good
+/// way exists to let the caller do this instead.
 pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     pump: &mut Pump<C>,
     input: &mut I,
@@ -25,18 +25,16 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         return Ok(0);
     }
     let mut output = SliceSink::new(buf);
-    let source_exhausted = pump.is_finishing()
+    let input_ended = pump.is_finishing()
         || loop {
             let step = pump.transfer_step(input, &mut output)?;
             match step {
-                PumpTransfer::SourceExhausted(_) => break true,
+                PumpTransfer::SourceExhausted(_) | PumpTransfer::InputEnded(_) => break true,
                 PumpTransfer::Progressed(_) if output.written() == 0 => {}
-                PumpTransfer::Progressed(_)
-                | PumpTransfer::SinkExhausted(_)
-                | PumpTransfer::End(_) => break false,
+                PumpTransfer::Progressed(_) | PumpTransfer::SinkExhausted(_) => break false,
             }
         };
-    if source_exhausted {
+    if input_ended {
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
@@ -48,16 +46,11 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
 
 #[cfg(test)]
 mod tests {
-    use core::mem::MaybeUninit;
-
     use core::convert::Infallible;
 
     use super::boundary_aware_pump_read;
     use crate::identity::identity;
-    use crate::{
-        BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error,
-        Progress, Pump, Source,
-    };
+    use crate::{Pump, Source};
 
     /// A `Source` over a byte slice, yielding it in fixed-size pulls
     /// no matter how much of `bytes` remains — stands in for a wrapped
@@ -107,60 +100,22 @@ mod tests {
         assert_eq!(read(), b"");
     }
 
-    /// Buffers one byte silently, then emits both held bytes together
-    /// on the next `process` call. It helps to test the interaction
-    /// when the codec must consume several input bytes before it can
-    /// produce any output.
-    ///
-    /// To simplify the codec logic, the input buffer must be always
-    /// exactly one byte.
-    #[derive(Default)]
-    struct CanProgressWithoutOutput {
-        held: Option<u8>,
-    }
-
-    impl DrainCodec for CanProgressWithoutOutput {
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            match self.held.take() {
-                None => Ok(DrainProgress::Done { written: 0 }),
-                Some(held) => {
-                    output[0].write(held);
-                    Ok(DrainProgress::Done { written: 1 })
-                }
-            }
-        }
-    }
-
-    impl Codec for CanProgressWithoutOutput {
-        fn process(
-            &mut self,
-            input: &[u8],
-            output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
-            debug_assert_eq!(input.len(), 1);
-            match self.held.take() {
-                None => {
-                    self.held = Some(input[0]);
-                    Ok(Progress::InputConsumed { written: 0 })
-                }
-                Some(held) => {
-                    output[0].write(held);
-                    output[1].write(input[0]);
-                    Ok(Progress::InputConsumed { written: 2 })
-                }
-            }
-        }
-    }
-
     #[test]
     fn loops_past_a_step_that_consumes_input_but_writes_nothing_yet() {
+        use crate::codecs::test_support::HoldsOutput;
+
         let mut source = ChunkedSource {
             bytes: b"ok",
             pos: 0,
             chunk_size: 1,
             count_chunk_calls: 0,
         };
-        let mut pump = Pump::new(CanProgressWithoutOutput::default());
+        // Each input byte makes the codec hold one 'X'. It releases the
+        // 'X' on the next call.
+        let mut pump = Pump::new(HoldsOutput {
+            per_input: 1,
+            ..Default::default()
+        });
         let mut buf = [0u8; 8];
 
         let mut read = || {
@@ -171,20 +126,25 @@ mod tests {
         // The first pull only consumes 'o' and writes nothing — a
         // buggy `boundary_aware_pump_read` that stopped there would
         // return `b""` here instead of looping to the next pull.
-        assert_eq!(read(), b"ok");
-        assert_eq!(read(), b"");
+        assert_eq!(read(), b"X");
+        assert_eq!(read(), b"X");
         assert_eq!(read(), b"");
     }
 
     #[test]
     fn drains_pending_codec_state_before_reporting_done() {
+        use crate::codecs::test_support::HoldsOutput;
+
         let mut source = ChunkedSource {
             bytes: b"odd",
             pos: 0,
             chunk_size: 1,
             count_chunk_calls: 0,
         };
-        let mut pump = Pump::new(CanProgressWithoutOutput::default());
+        let mut pump = Pump::new(HoldsOutput {
+            per_input: 1,
+            ..Default::default()
+        });
         let mut buf = [0u8; 8];
 
         let mut read = || {
@@ -192,11 +152,12 @@ mod tests {
             buf[..n].to_vec()
         };
 
-        // 'o' and 'd' pair up and come out together; the trailing 'd'
-        // is left held when the source is exhausted, so `finish` must
-        // flush it instead of silently dropping it.
-        assert_eq!(read(), b"od");
-        assert_eq!(read(), b"d");
+        // The codec releases one 'X' per call, one call late. When the
+        // source is exhausted, it still holds the 'X' for the last
+        // 'd'. `finish` must write it, not silently drop it.
+        assert_eq!(read(), b"X");
+        assert_eq!(read(), b"X");
+        assert_eq!(read(), b"X");
         assert_eq!(read(), b"");
     }
 
@@ -226,62 +187,6 @@ mod tests {
         assert_eq!(read(), b"l");
         assert_eq!(read(), b"");
         assert_eq!(read(), b"");
-    }
-
-    /// A `BoundaryAwareCodec` that copies bytes 1:1 but ends its stream
-    /// after `limit` bytes, like a self-describing format with an
-    /// in-band terminator.
-    struct EarlyEnd {
-        limit: usize,
-        done: usize,
-    }
-
-    impl DrainCodec for EarlyEnd {
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
-        }
-    }
-
-    impl BoundaryAwareCodec for EarlyEnd {
-        fn process(
-            &mut self,
-            input: &[u8],
-            output: &mut [MaybeUninit<u8>],
-        ) -> Result<BoundaryAwareProgress, Error> {
-            let remaining = self.limit - self.done;
-            let n = input.len().min(output.len()).min(remaining);
-            output[..n].write_copy_of_slice(&input[..n]);
-            self.done += n;
-            if self.done >= self.limit {
-                Ok(BoundaryAwareProgress::Boundary {
-                    consumed: n,
-                    written: n,
-                })
-            } else if n == input.len() {
-                Ok(BoundaryAwareProgress::InputConsumed { written: n })
-            } else {
-                Ok(BoundaryAwareProgress::OutputFilled { consumed: n })
-            }
-        }
-    }
-
-    #[test]
-    fn stops_at_in_band_end_without_touching_the_source_again() {
-        use crate::sources_and_sinks::slice::SliceSource;
-
-        let mut source = SliceSource::new(b"Hello World");
-        let mut pump = Pump::new(EarlyEnd { limit: 3, done: 0 });
-        let mut buf = [0u8; 8];
-
-        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
-        assert_eq!(&buf[..n], b"Hel");
-
-        // `pump.is_done()` must short-circuit before ever calling
-        // `source.chunk()` again — if it didn't, `source.consumed()`
-        // would advance past 3.
-        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
-        assert_eq!(n, 0);
-        assert_eq!(source.consumed(), 3);
     }
 
     #[test]
@@ -316,5 +221,53 @@ mod tests {
         let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
         assert_eq!(n, 0);
         assert_eq!(source.count_chunk_calls, chunk_calls_once_exhausted);
+    }
+
+    #[test]
+    fn drains_the_tail_after_an_in_band_end() {
+        use crate::codecs::test_support::{EndsAtBar, HoldsOutput};
+
+        let mut source = ChunkedSource {
+            bytes: b"ab|cd",
+            pos: 0,
+            chunk_size: 8,
+            count_chunk_calls: 0,
+        };
+        // For the input "ab", `HoldsOutput` holds "XX". At the in-band
+        // end, it did not write "XX" and the trailer yet.
+        let mut pump = Pump::new(EndsAtBar {
+            inner: HoldsOutput {
+                per_input: 1,
+                trailer: b"TAIL",
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mut buf = [0u8; 2];
+
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"XX");
+        let chunk_calls_at_the_end = source.count_chunk_calls;
+
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"TA");
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"IL");
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(n, 0);
+        let finish_calls_at_eof = pump.get_ref().finish_calls;
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(
+            pump.get_ref().finish_calls,
+            finish_calls_at_eof,
+            "a read after EOF must not call `finish` again"
+        );
+
+        assert_eq!(source.pos, 3, "bytes after the marker stay in the source");
+        assert_eq!(
+            source.count_chunk_calls, chunk_calls_at_the_end,
+            "the source must not be polled after the in-band end"
+        );
     }
 }

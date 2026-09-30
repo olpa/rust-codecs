@@ -20,6 +20,10 @@ use std::mem::MaybeUninit;
 struct QuoteEnd;
 
 impl DrainCodec for QuoteEnd {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }

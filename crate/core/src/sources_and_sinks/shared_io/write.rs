@@ -28,9 +28,9 @@ pub fn pump_write<O: Sink, C: Codec>(
     Ok(input.consumed())
 }
 
-/// Drain the bytes that the codec produced but did not write yet
-/// into `output`. Then flush `output`. The codec stream does not
-/// end.
+/// Flush the codec into `output`. The codec decides how much of its
+/// held output to write. Then flush `output`. The codec stream does
+/// not end.
 ///
 /// This is the transport-independent core of a `Write::flush` impl.
 ///

@@ -5,7 +5,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::step::{codec_step, finish_step};
+use crate::step::{codec_step, finish_step, flush_step};
 use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress};
 
@@ -145,7 +145,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         Ok(moved.written)
     }
 
-    /// Engine behind `finish`.
+    /// Engine behind `flush` and `finish`.
     ///
     /// Finishing the chain means finishing both inner codecs, in
     /// pipeline order. Each one may still hold buffered bytes after
@@ -154,16 +154,24 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// once `first` and `staging` are both empty does it run
     /// `second`'s own finish. `second` must not finish while data is
     /// still upstream of it.
-    fn finish_through(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    ///
+    /// Flushing the chain follows the same order, with `flush` instead
+    /// of `finish`. A flush does not read or set `first_done`.
+    fn drain_through(
+        &mut self,
+        output: &mut [MaybeUninit<u8>],
+        mode: DrainMode,
+    ) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
+        let mut first_done = mode == DrainMode::Finish && self.first_done;
 
         loop {
-            if !self.first_done {
+            if !first_done {
                 //
-                // Finish `first` into `staging`.
+                // Drain `first` into `staging`.
                 //
                 let staging = self.staging.as_mut();
-                let moved = match finish_step(
+                let moved = match mode.step(
                     &mut self.first,
                     as_uninit_mut(&mut staging[self.stage_len..]),
                 ) {
@@ -180,7 +188,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     DrainProgress::OutputFilled => self.stage_len = staging.len(),
                     DrainProgress::Done { written } => {
                         self.stage_len += written;
-                        self.first_done = true;
+                        first_done = true;
+                        if mode == DrainMode::Finish {
+                            self.first_done = true;
+                        }
                     }
                 }
             }
@@ -190,12 +201,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             //
             out_pos += self.drain_staging_into(output, out_pos, 0)?;
 
-            if self.first_done && self.stage_len == 0 {
+            if first_done && self.stage_len == 0 {
                 //
                 // At this point, `first` is done and `staging` is empty.
-                // Finish `second`.
+                // Drain `second`.
                 //
-                let moved = match finish_step(&mut self.second, &mut output[out_pos..]) {
+                let moved = match mode.step(&mut self.second, &mut output[out_pos..]) {
                     Ok(moved) => moved,
                     Err(error) => {
                         let error = error
@@ -221,11 +232,37 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     }
 }
 
+/// Selects the `DrainCodec` method that `Chain::drain_through` calls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DrainMode {
+    Flush,
+    Finish,
+}
+
+impl DrainMode {
+    fn step<C: DrainCodec>(
+        self,
+        codec: &mut C,
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<DrainProgress, Error> {
+        match self {
+            DrainMode::Flush => flush_step(codec, output),
+            DrainMode::Finish => finish_step(codec, output),
+        }
+    }
+}
+
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
+    /// Flush `first` through `staging` to `second`, then flush
+    /// `second`.
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.drain_through(output, DrainMode::Flush)
+    }
+
     /// Finish `first` through `staging` to `second`, then finish
     /// `second`.
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.finish_through(output)
+        self.drain_through(output, DrainMode::Finish)
     }
 }
 
@@ -299,6 +336,7 @@ mod tests {
     use super::Chain;
     use crate::base64_dec::base64_dec;
     use crate::base64_enc::base64_enc;
+    use crate::codecs::test_support::HoldsOutput;
     use crate::identity::{identity, Identity};
     use crate::rot13::rot13;
     use crate::sources_and_sinks::slice::SliceSource;
@@ -447,6 +485,10 @@ mod tests {
     }
 
     impl DrainCodec for Hoarder {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
+        }
+
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             let n = self.buf.len().min(output.len());
             output[..n].write_copy_of_slice(&self.buf[..n]);
@@ -520,6 +562,10 @@ mod tests {
     }
 
     impl DrainCodec for CountingFinisher {
+        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.inner.flush(output)
+        }
+
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             self.finish_calls += 1;
             self.inner.finish(output)
@@ -573,6 +619,56 @@ mod tests {
     }
 
     // ----
+    // `flush` draining
+    // ----
+
+    /// Call `flush` with a 1-byte output until it reports `Done`.
+    /// Return the collected output.
+    fn flush_one_byte_at_a_time(codec: &mut impl DrainCodec) -> Vec<u8> {
+        let mut collected = Vec::new();
+        loop {
+            let mut out = [0u8; 1];
+            match codec.flush(as_uninit_mut(&mut out)).unwrap() {
+                DrainProgress::OutputFilled => collected.push(out[0]),
+                DrainProgress::Done { written } => {
+                    collected.extend_from_slice(&out[..written]);
+                    return collected;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flush_drains_a_holding_first_through_second() {
+        // `first` holds "XXX", and rot13 turns each 'X' into 'K'.
+        //
+        // `flush` and `finish` share one drain loop. In that loop, it
+        // is not immediately clear when it calls `finish`. If `Chain`
+        // calls `finish` on `first` by mistake, the output also gets
+        // the trailer "T".
+        let first = HoldsOutput {
+            held: 3,
+            trailer: b"T",
+            ..Default::default()
+        };
+        let mut chain = Chain::new(first, rot13(), vec![0u8; 1]).unwrap();
+        assert_eq!(flush_one_byte_at_a_time(&mut chain), b"KKK");
+    }
+
+    #[test]
+    fn flush_drains_a_holding_second() {
+        // The same as `flush_drains_a_holding_first_through_second`,
+        // but here `second` holds the output: "XX".
+        let second = HoldsOutput {
+            held: 2,
+            trailer: b"T",
+            ..Default::default()
+        };
+        let mut chain = Chain::new(identity(), second, vec![0u8; 1]).unwrap();
+        assert_eq!(flush_one_byte_at_a_time(&mut chain), b"XX");
+    }
+
+    // ----
     // Error handling
     // ----
 
@@ -580,6 +676,10 @@ mod tests {
     struct Overclaimer;
 
     impl DrainCodec for Overclaimer {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
+        }
+
         fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
@@ -615,6 +715,10 @@ mod tests {
     struct DrainOverclaimer;
 
     impl DrainCodec for DrainOverclaimer {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
+        }
+
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done {
                 written: output.len() + 1,
@@ -636,7 +740,7 @@ mod tests {
     fn lying_drain_codec_is_an_error_not_index_corruption() {
         // Same property as `lying_inner_codec_is_an_error_not_index_corruption`,
         // but for a `finish` overclaim instead of a `process` overclaim:
-        // `finish_step` validates the count before `finish_through`
+        // `finish_step` validates the count before `drain_through`
         // ever uses it to advance `stage_len`.
         let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]).unwrap();
         let mut output = [0u8; 8];
@@ -655,6 +759,10 @@ mod tests {
     }
 
     impl DrainCodec for FailsOnce {
+        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.inner.flush(output)
+        }
+
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             self.inner.finish(output)
         }
