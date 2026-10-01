@@ -42,6 +42,33 @@ impl<EO> DriveError<core::convert::Infallible, EO> {
     }
 }
 
+impl<EI: core::fmt::Display, EO: core::fmt::Display> core::fmt::Display for DriveError<EI, EO> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Source(_) => f.write_str("source error"),
+            Self::Sink(_) => f.write_str("sink error"),
+            Self::Codec(_) => f.write_str("codec error"),
+            Self::SinkExhausted => f.write_str("sink has no more room"),
+            Self::NoProgress => f.write_str("no progress on input or output"),
+        }
+    }
+}
+
+impl<EI, EO> core::error::Error for DriveError<EI, EO>
+where
+    EI: core::error::Error + 'static,
+    EO: core::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Sink(error) => Some(error),
+            Self::Codec(error) => Some(error),
+            Self::SinkExhausted | Self::NoProgress => None,
+        }
+    }
+}
+
 /// Drive the codec from the input source to the output sink.
 pub fn stream_to_stream<I, O, C>(
     input: &mut I,

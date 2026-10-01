@@ -27,6 +27,26 @@ impl<EI, EO> From<DriveError<EI, EO>> for EncodeError {
     }
 }
 
+impl core::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Codec(_) => f.write_str("codec error"),
+            Self::NoProgress => f.write_str("no progress on input or output"),
+            Self::Utf8(_) => f.write_str("output is not UTF-8"),
+        }
+    }
+}
+
+impl core::error::Error for EncodeError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Codec(error) => Some(error),
+            Self::NoProgress => None,
+            Self::Utf8(error) => Some(error),
+        }
+    }
+}
+
 impl From<alloc::string::FromUtf8Error> for EncodeError {
     fn from(error: alloc::string::FromUtf8Error) -> Self {
         Self::Utf8(error)

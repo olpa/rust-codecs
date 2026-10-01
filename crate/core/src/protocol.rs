@@ -361,3 +361,34 @@ impl Error {
         }
     }
 }
+
+impl core::fmt::Display for EmptyBufferError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("buffer is empty")
+    }
+}
+
+impl core::error::Error for EmptyBufferError {}
+
+impl core::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::CorruptStream => "corrupt stream",
+            Self::UnexpectedEnd => "unexpected end of stream",
+            Self::CodecBufferTooSmall => "codec buffer too small",
+            Self::ByteCountClaim => "codec reported byte counts outside its buffers",
+        })
+    }
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} (consumed {} bytes, wrote {} bytes)",
+            self.kind, self.consumed, self.written
+        )
+    }
+}
+
+impl core::error::Error for Error {}
