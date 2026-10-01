@@ -147,9 +147,8 @@
 //!
 //! ## Parsing using early-stop codecs
 //!
-//! A [`BoundaryAwareCodec`] does not have to run through
-//! [`stream_to_stream`] end to end. It can also power a small
-//! hand-written parser, one step at a time.
+//! You can use a [`BoundaryAwareCodec`] in a small hand-written
+//! parser, one step at a time.
 //!
 //! The example lives in `core/tests/tokenizer.rs`, a tokenizer
 //! for input made of plain text with quoted strings inside it. Its
@@ -160,9 +159,9 @@
 //! The tokenizer moves through the input in two ways:
 //!
 //! - Inside a span of plain text, or inside a quoted string, the
-//!   codec does the reading. `encode_string` runs it over a
-//!   [`Source`] through [`stream_to_stream`]. The source's position
-//!   moves forward as a side effect.
+//!   codec does the reading. The test helper `drive_to_string` runs
+//!   it over a shared [`Source`] through [`stream_to_stream`]. The
+//!   source's position moves forward as a side effect.
 //! - The quote character itself is not handled by a codec. The driver
 //!   loop reads it directly, with plain [`Source`] calls: `chunk()`
 //!   and `consume()`. This moves the source's position forward by
@@ -173,13 +172,13 @@
 //!     state = match state {
 //!         ...
 //!         State::String => {
-//!             let text = encode_string(source, quote_end()).unwrap();
+//!             let text = drive_to_string(&mut source, quote_end()).unwrap();
 //!
 //!             tokens.push(("string", text));
 //!
-//!             State::QuoteThenTopLevel
+//!             State::QuoteThenSpan
 //!         }
-//!         State::QuoteThenString | State::QuoteThenTopLevel => {
+//!         State::QuoteThenString | State::QuoteThenSpan => {
 //!             let chunk = source.chunk().unwrap().unwrap();
 //!             assert_eq!(chunk[0], b'"');
 //!             source.consume(1);
@@ -189,7 +188,7 @@
 //!             if state == State::QuoteThenString {
 //!                 State::String
 //!             } else {
-//!                 State::TopLevel
+//!                 State::Span
 //!             }
 //!         }
 //!     };

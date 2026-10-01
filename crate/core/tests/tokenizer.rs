@@ -3,7 +3,12 @@
 //! [`QuoteEnd`] copies bytes unchanged until it finds a `"`. It treats
 //! the quote as an in-band end. It does not consume the quote itself.
 //!
-//! This example is simple, so it does not handle escapes.
+//! This example is simple. It has these known limits:
+//!
+//! - It does not handle escapes.
+//! - The string step does not make a difference between a string
+//!   without a closing quote and a string that a quote closes at the
+//!   end of the input.
 
 #![cfg(feature = "alloc")]
 
