@@ -84,6 +84,31 @@ mod tests {
         *e == "eintr"
     }
 
+    /// Collects bytes in a fixed array. It replaces `Vec`, so the
+    /// tests do not need `alloc`.
+    struct Collected {
+        bytes: [u8; 1024],
+        len: usize,
+    }
+
+    impl Collected {
+        fn new() -> Self {
+            Self {
+                bytes: [0; 1024],
+                len: 0,
+            }
+        }
+
+        fn extend_from_slice(&mut self, data: &[u8]) {
+            self.bytes[self.len..self.len + data.len()].copy_from_slice(data);
+            self.len += data.len();
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            &self.bytes[..self.len]
+        }
+    }
+
     /// Yields `data` one byte per real call, alternating an
     /// `Interrupted` error in between every two real calls (real,
     /// eintr, real, eintr, ...).
@@ -116,11 +141,11 @@ mod tests {
     #[test]
     fn retry_on_interrupted_reads_hello_through_eintr() {
         let mut source = FlakyBytes::new(b"hello");
-        let mut got = Vec::new();
+        let mut got = Collected::new();
         while let Some(byte) = retry_on_interrupted(|| source.read_one(), is_interrupted).unwrap() {
-            got.push(byte);
+            got.extend_from_slice(&[byte]);
         }
-        assert_eq!(got, b"hello");
+        assert_eq!(got.as_slice(), b"hello");
     }
 
     /// The `fill_buf`-shaped counterpart to [`FlakyBytes`]: a fetched
@@ -175,7 +200,7 @@ mod tests {
     #[test]
     fn retry_fill_buf_reads_hello_through_eintr() {
         let mut source = FlakyFillBuf::new(b"hello");
-        let mut got = Vec::new();
+        let mut got = Collected::new();
         loop {
             let len = {
                 let buf =
@@ -188,7 +213,7 @@ mod tests {
             };
             source.consume(len);
         }
-        assert_eq!(got, b"hello");
+        assert_eq!(got.as_slice(), b"hello");
     }
 
     #[test]
@@ -206,14 +231,14 @@ mod tests {
     /// alternating an `Interrupted` error in between every two real
     /// calls, the same pattern as [`FlakyBytes`].
     struct FlakyWriter {
-        written: Vec<u8>,
+        written: Collected,
         attempts: usize,
     }
 
     impl FlakyWriter {
         fn new() -> Self {
             Self {
-                written: Vec::new(),
+                written: Collected::new(),
                 attempts: 0,
             }
         }
@@ -223,7 +248,7 @@ mod tests {
             if self.attempts.is_multiple_of(2) {
                 return Err("eintr");
             }
-            self.written.push(buf[0]);
+            self.written.extend_from_slice(&buf[..1]);
             Ok(1)
         }
     }
@@ -239,7 +264,7 @@ mod tests {
             || "unreachable",
         )
         .unwrap();
-        assert_eq!(sink.written, b"hello");
+        assert_eq!(sink.written.as_slice(), b"hello");
     }
 
     #[test]

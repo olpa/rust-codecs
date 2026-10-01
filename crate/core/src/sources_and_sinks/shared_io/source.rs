@@ -152,6 +152,12 @@ mod tests {
     use crate::Source;
     use core::convert::Infallible;
 
+    /// The error of the test readers. It is the "interrupted" error of
+    /// a real backend, for example `std::io::ErrorKind::Interrupted`.
+    /// With this type, the tests do not need `std`.
+    #[derive(Debug)]
+    struct Interrupted;
+
     /// A minimal [`EintrRead`]/[`EintrFillBuf`] over a borrowed
     /// byte slice — stands in for a real `std::io`/`embedded_io` reader
     /// when testing `ScratchSource`/`LendingSource`, which don't care
@@ -159,30 +165,33 @@ mod tests {
     struct SliceReader<'a>(&'a [u8]);
 
     impl<'a> EintrRead for SliceReader<'a> {
-        type Error = std::io::Error;
+        type Error = Interrupted;
 
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            std::io::Read::read(&mut self.0, buf)
+            let n = buf.len().min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
         }
 
-        fn is_interrupted(err: &Self::Error) -> bool {
-            err.kind() == std::io::ErrorKind::Interrupted
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            true
         }
     }
 
     impl<'a> EintrFillBuf for SliceReader<'a> {
-        type Error = std::io::Error;
+        type Error = Interrupted;
 
         fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
-            std::io::BufRead::fill_buf(&mut self.0)
+            Ok(self.0)
         }
 
-        fn is_interrupted(err: &Self::Error) -> bool {
-            err.kind() == std::io::ErrorKind::Interrupted
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            true
         }
 
         fn consume(&mut self, amount: usize) {
-            std::io::BufRead::consume(&mut self.0, amount)
+            self.0 = &self.0[amount..];
         }
     }
 
@@ -195,16 +204,13 @@ mod tests {
         failed: bool,
     }
 
-    impl<R: EintrRead<Error = std::io::Error>> EintrRead for FlakyOnce<R> {
-        type Error = std::io::Error;
+    impl<R: EintrRead<Error = Interrupted>> EintrRead for FlakyOnce<R> {
+        type Error = Interrupted;
 
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             if !self.failed {
                 self.failed = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "eintr",
-                ));
+                return Err(Interrupted);
             }
             self.inner.read(buf)
         }
@@ -214,16 +220,13 @@ mod tests {
         }
     }
 
-    impl<R: EintrFillBuf<Error = std::io::Error>> EintrFillBuf for FlakyOnce<R> {
-        type Error = std::io::Error;
+    impl<R: EintrFillBuf<Error = Interrupted>> EintrFillBuf for FlakyOnce<R> {
+        type Error = Interrupted;
 
         fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
             if !self.failed {
                 self.failed = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "eintr",
-                ));
+                return Err(Interrupted);
             }
             self.inner.fill_buf()
         }
