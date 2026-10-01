@@ -11,7 +11,13 @@ use crate::{BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, Erro
 use super::adapter::{BufReadSource, StdSink, StdSource};
 
 fn to_io_error(err: Error) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}"))
+    let kind = match err.kind {
+        ErrorKind::CorruptStream => io::ErrorKind::InvalidData,
+        ErrorKind::UnexpectedEnd => io::ErrorKind::UnexpectedEof,
+        // Both are codec bugs. The data is not at fault.
+        ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, err)
 }
 
 fn adapter_contract_violation() -> io::Error {
