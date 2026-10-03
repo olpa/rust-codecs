@@ -202,8 +202,20 @@ fn run_io_stream<R: Read, W: Write>(
     let mut source = StdSource::new(input, vec![0u8; STAGING]).expect("STAGING is non-zero");
     let mut sink = StdSink::new(output, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
-    stream_to_stream(&mut source, codec, &mut sink).map_err(|e| format!("{e:?}"))?;
+    stream_to_stream(&mut source, codec, &mut sink).map_err(|e| error_chain(&e))?;
     Ok(sink.into_inner())
+}
+
+/// Print an error and all its sources, separated by ": ".
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(inner) = source {
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    text
 }
 
 fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
