@@ -4,7 +4,7 @@ use crate::sources_and_sinks::shared_io::{
     retry_write_all, EintrFillBuf, EintrRead, LendingSource, RetryingWrite, ScratchSink,
     ScratchSource,
 };
-use crate::{Sink, Source};
+use crate::{Sink, Source, StallError};
 
 fn is_interrupted<E: embedded_io::Error>(e: &E) -> bool {
     e.kind() == ErrorKind::Interrupted
@@ -147,9 +147,12 @@ pub enum WriteError<E> {
     ZeroWrite,
 }
 
-impl<E: core::fmt::Debug> core::fmt::Display for WriteError<E> {
+impl<E: core::fmt::Display> core::fmt::Display for WriteError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            WriteError::Io(error) => write!(f, "I/O error: {error}"),
+            WriteError::ZeroWrite => StallError::ZeroWrite.fmt(f),
+        }
     }
 }
 

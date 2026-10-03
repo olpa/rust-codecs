@@ -47,9 +47,13 @@ fn writer_error_to_embedded_error<E>(
     }
 }
 
-impl<E: embedded_io::Error> fmt::Display for EmbeddedError<E> {
+impl<E: fmt::Display> fmt::Display for EmbeddedError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Codec(error) => write!(f, "codec error: {error}"),
+            Self::Stall(error) => write!(f, "transfer stalled: {error}"),
+        }
     }
 }
 
