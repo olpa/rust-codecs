@@ -7,19 +7,21 @@ use crate::sources_and_sinks::shared_io::{
     boundary_aware_pump_read, pump_finish, pump_flush, pump_write,
 };
 use crate::stream::Pump;
-use crate::{BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind};
+use crate::{
+    BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind, StallError,
+};
 
 use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
 
-/// An endpoint error or a codec error from an embedded I/O wrapper.
+/// An error from an embedded I/O wrapper.
 #[derive(Debug)]
 pub enum EmbeddedError<E> {
+    /// The wrapped reader or writer reported an error.
     Io(E),
+    /// The codec reported an error.
     Codec(Error),
-}
-
-fn adapter_contract_violation<E>() -> EmbeddedError<E> {
-    EmbeddedError::Codec(Error::new(ErrorKind::ByteCountClaim, 0, 0))
+    /// The transfer stalled.
+    Stall(StallError),
 }
 
 fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> EmbeddedError<E> {
@@ -27,7 +29,8 @@ fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> Embedd
         DriveError::Source(error) => EmbeddedError::Io(error),
         DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
+        DriveError::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
+        DriveError::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
     }
 }
 
@@ -37,11 +40,10 @@ fn writer_error_to_embedded_error<E>(
     match error {
         DriveError::Source(never) => match never {},
         DriveError::Sink(WriteError::Io(error)) => EmbeddedError::Io(error),
-        // A zero-length write on non-empty input is a backend contract
-        // violation, same bucket as `SinkExhausted`/`NoProgress` below.
-        DriveError::Sink(WriteError::ZeroWrite) => adapter_contract_violation(),
+        DriveError::Sink(WriteError::ZeroWrite) => EmbeddedError::Stall(StallError::ZeroWrite),
         DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
+        DriveError::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
+        DriveError::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
     }
 }
 
@@ -57,7 +59,19 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
     fn kind(&self) -> embedded_io::ErrorKind {
         match self {
             Self::Io(error) => error.kind(),
-            Self::Codec(_) => embedded_io::ErrorKind::InvalidData,
+            Self::Codec(error) => match error.kind {
+                ErrorKind::CorruptStream | ErrorKind::UnexpectedEnd => {
+                    embedded_io::ErrorKind::InvalidData
+                }
+                // Both are codec bugs. The data is not at fault.
+                ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim => {
+                    embedded_io::ErrorKind::Other
+                }
+            },
+            Self::Stall(StallError::ZeroWrite | StallError::SinkExhausted) => {
+                embedded_io::ErrorKind::WriteZero
+            }
+            Self::Stall(StallError::NoProgress) => embedded_io::ErrorKind::Other,
         }
     }
 }

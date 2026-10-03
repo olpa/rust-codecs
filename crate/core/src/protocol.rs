@@ -318,6 +318,19 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyBufferError;
 
+/// The transfer stopped, but the codec and the endpoints reported no
+/// error. No bytes moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallError {
+    /// The wrapped writer returned `Ok(0)` from `write`.
+    ZeroWrite,
+    /// The sink had no more room before the codec was done.
+    SinkExhausted,
+    /// One codec step read no input and wrote no output, and the
+    /// stream did not end.
+    NoProgress,
+}
+
 /// What kind of failure a codec reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -369,6 +382,18 @@ impl core::fmt::Display for EmptyBufferError {
 }
 
 impl core::error::Error for EmptyBufferError {}
+
+impl core::fmt::Display for StallError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::ZeroWrite => "writer accepted zero bytes",
+            Self::SinkExhausted => "sink has no more room",
+            Self::NoProgress => "no progress on input or output",
+        })
+    }
+}
+
+impl core::error::Error for StallError {}
 
 impl core::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

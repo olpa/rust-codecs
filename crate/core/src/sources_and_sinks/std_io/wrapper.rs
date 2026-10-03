@@ -6,7 +6,9 @@ use crate::sources_and_sinks::shared_io::{
     boundary_aware_pump_read, pump_finish, pump_flush, pump_write,
 };
 use crate::stream::Pump;
-use crate::{BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind};
+use crate::{
+    BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind, StallError,
+};
 
 use super::adapter::{BufReadSource, StdSink, StdSource};
 
@@ -20,8 +22,12 @@ fn to_io_error(err: Error) -> io::Error {
     io::Error::new(kind, err)
 }
 
-fn adapter_contract_violation() -> io::Error {
-    to_io_error(Error::new(ErrorKind::ByteCountClaim, 0, 0))
+fn stall_to_io_error(error: StallError) -> io::Error {
+    let kind = match error {
+        StallError::ZeroWrite | StallError::SinkExhausted => io::ErrorKind::WriteZero,
+        StallError::NoProgress => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, error)
 }
 
 fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error {
@@ -29,7 +35,8 @@ fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error
         DriveError::Source(error) => error,
         DriveError::Sink(never) => match never {},
         DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
+        DriveError::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
+        DriveError::NoProgress => stall_to_io_error(StallError::NoProgress),
     }
 }
 
@@ -38,7 +45,8 @@ fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error
         DriveError::Source(never) => match never {},
         DriveError::Sink(error) => error,
         DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted | DriveError::NoProgress => adapter_contract_violation(),
+        DriveError::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
+        DriveError::NoProgress => stall_to_io_error(StallError::NoProgress),
     }
 }
 
