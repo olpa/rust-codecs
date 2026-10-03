@@ -9,13 +9,21 @@ For each generated input, checks:
   3. Decoding that encoded output via `--readers base64-dec` and via
      `--writers base64-dec` both reproduce the original input, and agree
      with each other.
+  4. Decoding whitespace-laden variants of the encoded output reproduces
+     the original input, again via both `--readers` and `--writers`:
+     - the system `base64` output with its default 76-column line
+       wrapping and final newline;
+     - the encoded output with random whitespace (`\n`, `\r\n`, spaces,
+       tabs) inserted at random positions, including the start and end.
 
 Inputs are random bytes for every length 0..20, plus a fixed set of
 larger lengths chosen to straddle the codec's internal boundaries (the
 3-byte/4-char base64 group, and the 64KiB scratch buffer used by
 CodecReader/CodecWriter). Each length's bytes are drawn from a Random
 seeded with f"{seed}:{length}", so a single failing length can be
-reproduced in isolation with --seed and --only-length.
+reproduced in isolation with --seed and --only-length. The random
+whitespace for check 4 comes from a Random seeded with
+f"{seed}:{label}:ws", so it is also reproducible.
 
 Every check runs once per `--engine` value (default: both `copy` and
 `stream`, the cli's two copy paths -- see `cli --help`), so a codec bug
@@ -57,6 +65,23 @@ def system_base64_encode(data):
     return run(["base64", "-w", "0"], data, cwd=None).rstrip(b"\n")
 
 
+def system_base64_encode_wrapped(data):
+    return run(["base64"], data, cwd=None)
+
+
+WHITESPACE_CHUNKS = [b"\n", b"\r\n", b" ", b"\t", b"\n\n", b"  \n"]
+
+
+def add_random_whitespace(encoded, rng):
+    out = bytearray()
+    for i in range(len(encoded) + 1):
+        if rng.random() < 0.15:
+            out += rng.choice(WHITESPACE_CHUNKS)
+        if i < len(encoded):
+            out.append(encoded[i])
+    return bytes(out)
+
+
 def describe(data, max_len=64):
     hex_str = data[:max_len].hex()
     suffix = "..." if len(data) > max_len else ""
@@ -74,8 +99,10 @@ def check(name, actual, expected, data, failures):
     return True
 
 
-def test_one(crate_dir, data, verbose, engines):
+def test_one(crate_dir, data, verbose, engines, ws_rng):
     failures = []
+    wrapped = system_base64_encode_wrapped(data)
+    sprinkled = add_random_whitespace(system_base64_encode(data), ws_rng)
 
     for engine in engines:
         enc_writer = run(cli_cmd(["--writers", "base64-enc"], engine), data, cwd=crate_dir)
@@ -92,6 +119,16 @@ def test_one(crate_dir, data, verbose, engines):
         check(f"[{engine}] writer-decode vs original", dec_writer, data, data, failures)
 
         check(f"[{engine}] reader-decode vs writer-decode", dec_reader, dec_writer, data, failures)
+
+        for variant, encoded in [("wrapped", wrapped), ("random-whitespace", sprinkled)]:
+            for side in ["readers", "writers"]:
+                name = f"[{engine}] {side}-decode of {variant} vs original"
+                try:
+                    decoded = run(cli_cmd([f"--{side}", "base64-dec"], engine), encoded, cwd=crate_dir)
+                except RuntimeError as err:
+                    failures.append(f"{name} failed for input ({describe(data)}): {str(err).strip()}")
+                    continue
+                check(name, decoded, data, data, failures)
 
     if verbose and not failures:
         print(f"  ok: {describe(data)}")
@@ -151,7 +188,8 @@ def main():
     total_failures = []
     for label, data in cases:
         print(f"testing {label} ...")
-        failures = test_one(crate_dir, data, args.verbose, engines)
+        ws_rng = random.Random(f"{args.seed}:{label}:ws")
+        failures = test_one(crate_dir, data, args.verbose, engines, ws_rng)
         if failures:
             print(f"  FAILED ({len(failures)} check(s)):")
             for f in failures:
