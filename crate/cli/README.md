@@ -21,6 +21,9 @@ bytes, before the result reaches stdout.
 Currently known codec names: `identity`, `rot13`, `base64-enc`,
 `base64-dec`, `json-enc`.
 
+`base64-dec` ignores ASCII whitespace, so it accepts the output of the
+`base64` tool, with its line breaks.
+
 ## Example
 
 ```

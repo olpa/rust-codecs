@@ -6,6 +6,10 @@
 //! This file's code is mostly AI-generated.
 //!
 //! Behind the `base64` feature flag.
+//!
+//! The decoder ignores ASCII whitespace in the input (see
+//! [`u8::is_ascii_whitespace`]). So it accepts the output of the
+//! `base64` tool, and MIME and PEM data with line breaks.
 
 use core::mem::MaybeUninit;
 
@@ -101,7 +105,54 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
 }
 
 impl<E: Engine> Codec for Base64Dec<E> {
+    /// Split `input` into runs without whitespace, and decode each run
+    /// with `process_run`. The whitespace bytes count as consumed.
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        let mut in_pos = 0;
+        let mut out_pos = 0;
+        loop {
+            while in_pos < input.len() && input[in_pos].is_ascii_whitespace() {
+                in_pos += 1;
+            }
+            let run_end = input[in_pos..]
+                .iter()
+                .position(u8::is_ascii_whitespace)
+                .map_or(input.len(), |len| in_pos + len);
+            // Call `process_run` also for an empty run. It writes the
+            // pending output.
+            match self.process_run(&input[in_pos..run_end], &mut output[out_pos..]) {
+                Ok(Progress::InputConsumed { written }) => {
+                    out_pos += written;
+                    in_pos = run_end;
+                }
+                Ok(Progress::OutputFilled { consumed }) => {
+                    return Ok(Progress::OutputFilled {
+                        consumed: in_pos + consumed,
+                    });
+                }
+                Err(error) => {
+                    return Err(Error::new(
+                        error.kind,
+                        in_pos + error.consumed,
+                        out_pos + error.written,
+                    ));
+                }
+            }
+            if in_pos == input.len() {
+                return Ok(Progress::InputConsumed { written: out_pos });
+            }
+        }
+    }
+}
+
+impl<E: Engine> Base64Dec<E> {
+    /// Decode `input` that contains no whitespace. Same contract as
+    /// [`Codec::process`].
+    fn process_run(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<Progress, Error> {
         let mut in_pos = 0;
 
         //
@@ -397,5 +448,86 @@ mod tests {
         let drained = dec.flush(as_uninit_mut(&mut out)).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 2 });
         assert_eq!(&out[..2], b"bc");
+    }
+
+    #[test]
+    fn skips_final_newline() {
+        // The output of `echo hello | base64`.
+        assert_eq!(
+            encode_string(base64_dec(), "aGVsbG8K\n").unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn skips_line_breaks_and_spaces() {
+        let expected = "Hello, World! 123";
+        for encoded in [
+            "SGVs\nbG8s\nIFdv\ncmxk\nISAx\nMjM=\n",
+            "SGVsbG8sIFdv\r\ncmxkISAxMjM=\r\n",
+            "SG Vs\tbG8sIF\ndvcmxkISAxMjM=",
+            "\n\n  SGVsbG8sIFdvcmxkISAxMjM=  \n\n",
+        ] {
+            assert_eq!(encode_string(base64_dec(), encoded).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn skips_whitespace_inside_a_group_split_across_calls() {
+        // "QQ==" is "A". The group is split by whitespace and by the
+        // call boundaries.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 8];
+        let progress = dec.process(b"Q\n", as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 0 });
+        let progress = dec.process(b" Q=", as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 0 });
+        let progress = dec.process(b"\r\n=\n", as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 1 });
+        assert_eq!(out[0], b'A');
+        let drained = dec.finish(as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(drained, DrainProgress::Done { written: 0 });
+    }
+
+    #[test]
+    fn accepts_whitespace_after_padding_but_not_data() {
+        let mut dec = base64_dec();
+        let mut out = [0u8; 8];
+        dec.process(b"QQ==", as_uninit_mut(&mut out)).unwrap();
+        let progress = dec.process(b"\n \n", as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 0 });
+        let error = dec.process(b"\nQQ==", as_uninit_mut(&mut out)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.consumed, 1);
+    }
+
+    #[test]
+    fn counts_whitespace_in_consumed_when_output_fills() {
+        // "YWJj ZGVm" is "abc" and "def". A 4-byte output takes "abc"
+        // and "d". The decoder consumes the first group, the space, and
+        // the second group, and holds "ef".
+        let mut dec = base64_dec();
+        let mut out = [0u8; 8];
+        let progress = dec
+            .process(b"YWJj ZGVm", as_uninit_mut(&mut out[..4]))
+            .unwrap();
+        assert_eq!(progress, Progress::OutputFilled { consumed: 9 });
+        assert_eq!(&out[..4], b"abcd");
+        let drained = dec.finish(as_uninit_mut(&mut out)).unwrap();
+        assert_eq!(drained, DrainProgress::Done { written: 2 });
+        assert_eq!(&out[..2], b"ef");
+    }
+
+    #[test]
+    fn error_counts_include_earlier_runs() {
+        // "YWJj" decodes to "abc". Then "A=BC" is corrupt.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 8];
+        let error = dec
+            .process(b"YWJj\nA=BC", as_uninit_mut(&mut out))
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.consumed, 5);
+        assert_eq!(error.written, 3);
     }
 }
