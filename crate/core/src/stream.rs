@@ -6,7 +6,8 @@ use core::mem::MaybeUninit;
 
 use crate::step::{boundary_aware_step, finish_step, flush_step};
 use crate::{
-    BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, Error, Sink, Source, TransferCounts,
+    BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, Error, ErrorKind, Sink, Source,
+    TransferCounts,
 };
 
 /// Why [`stream_to_stream`] stopped before the codec finished its stream.
@@ -151,6 +152,11 @@ pub struct Pump<C> {
     /// from the source. `true` means `read` drives the codec to its
     /// end.
     finishing: bool,
+    /// Latches the codec error.
+    ///
+    /// After `Err`, the codec state is not defined. So the pump does
+    /// not call the codec again. It returns this error instead.
+    failed: Option<ErrorKind>,
 }
 
 impl<C: BoundaryAwareCodec> Pump<C> {
@@ -159,6 +165,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             codec,
             ended_by_finish: false,
             finishing: false,
+            failed: None,
         }
     }
 
@@ -183,6 +190,35 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// See [`Self::finishing`].
     pub(crate) fn is_finishing(&self) -> bool {
         self.finishing
+    }
+
+    /// The latched codec error, if any. See [`Self::failed`].
+    ///
+    /// The counts are zero: they describe the call that returns the
+    /// error, and that call moves no bytes.
+    pub(crate) fn failure(&self) -> Option<Error> {
+        self.failed.map(|kind| Error::new(kind, 0, 0))
+    }
+
+    /// Return the latched codec error, if any, before a call to the
+    /// codec.
+    fn check_not_failed<EI, EO>(&self) -> Result<(), DriveError<EI, EO>> {
+        match self.failure() {
+            Some(error) => Err(DriveError::Codec(error)),
+            None => Ok(()),
+        }
+    }
+
+    /// Latch a codec error from `result`. Other errors pass through
+    /// without a latch: a source or sink error can be temporary.
+    fn latch_failure<T, EI, EO>(
+        &mut self,
+        result: Result<T, DriveError<EI, EO>>,
+    ) -> Result<T, DriveError<EI, EO>> {
+        if let Err(DriveError::Codec(error)) = &result {
+            self.failed = Some(error.kind);
+        }
+        result
     }
 
     /// Drive the codec by repeatedly pulling chunks from `input` and
@@ -244,7 +280,22 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// moves zero bytes on both sides without ending the stream is
     /// `DriveError::NoProgress`. A codec error still commits whatever
     /// progress it validly reported.
+    ///
+    /// After a codec error, the pump latches it. Later calls return
+    /// the error and do not call the codec.
     pub(crate) fn transfer_step<I: Source, O: Sink>(
+        &mut self,
+        input: &mut I,
+        output: &mut O,
+    ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
+        self.check_not_failed()?;
+        let result = self.unlatched_transfer_step(input, output);
+        self.latch_failure(result)
+    }
+
+    /// The body of [`Pump::transfer_step`], without the codec error
+    /// latch.
+    fn unlatched_transfer_step<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
         output: &mut O,
@@ -362,7 +413,22 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// A call that writes nothing and does not reach `Done` is a
     /// stall (`DriveError::NoProgress`). A codec error still commits
     /// whatever progress it validly reported.
+    ///
+    /// After a codec error, the pump latches it. Later calls return
+    /// the error and do not call the codec.
     fn drain_loop<O: Sink>(
+        &mut self,
+        output: &mut O,
+        step: impl FnMut(&mut Self, &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>,
+    ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
+        self.check_not_failed()?;
+        let result = self.unlatched_drain_loop(output, step);
+        self.latch_failure(result)
+    }
+
+    /// The body of [`Pump::drain_loop`], without the codec error
+    /// latch.
+    fn unlatched_drain_loop<O: Sink>(
         &mut self,
         output: &mut O,
         mut step: impl FnMut(&mut Self, &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>,
@@ -447,7 +513,7 @@ mod tests {
     use core::mem::MaybeUninit;
 
     use super::{Pump, PumpDrain, PumpTransfer};
-    use crate::codecs::test_support::{EndsAtBar, FailsAfterProgress, HoldsOutput, Scripted};
+    use crate::codecs::test_support::{EndsAtBar, FailsAfterInner, HoldsOutput, Scripted};
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::{
         BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError, Error, ErrorKind,
@@ -564,21 +630,61 @@ mod tests {
             bytes: [0; 8],
             written: 0,
         };
-        let mut pump = Pump::new(FailsAfterProgress);
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: HoldsOutput {
+                held: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
         let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
 
-        assert_eq!(input.consumed(), 1);
+        assert_eq!(input.consumed(), 3);
         assert_eq!(output.written, 2);
-        assert_eq!(&output.bytes[..2], b"ok");
+        assert_eq!(&output.bytes[..2], b"XX");
         assert!(matches!(
             error,
             DriveError::Codec(Error {
                 kind: ErrorKind::CorruptStream,
-                consumed: 1,
+                consumed: 3,
                 written: 2
             })
         ));
+    }
+
+    #[test]
+    fn a_process_error_is_latched() {
+        let mut input = SliceSource::new(b"abc");
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: HoldsOutput {
+                held: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        pump.transfer_from(&mut input, &mut output).unwrap_err();
+        assert_eq!(pump.get_ref().calls, 1);
+        assert_eq!(input.consumed(), 3);
+        assert_eq!(output.written, 2);
+
+        // The codec state is not defined after `Err`. A buggy pump
+        // would call the codec again and write more bytes.
+        let latched = Error::new(ErrorKind::CorruptStream, 0, 0);
+        let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
+        assert!(matches!(error, DriveError::Codec(e) if e == latched));
+        let error = pump.flush_to(&mut output).unwrap_err();
+        assert!(matches!(error, DriveError::Codec(e) if e == latched));
+        let error = pump.finish_to(&mut output).unwrap_err();
+        assert!(matches!(error, DriveError::Codec(e) if e == latched));
+
+        assert_eq!(pump.get_ref().calls, 1);
+        assert_eq!(input.consumed(), 3);
+        assert_eq!(output.written, 2);
     }
 
     #[test]
@@ -620,7 +726,13 @@ mod tests {
             bytes: [0; 8],
             written: 0,
         };
-        let mut pump = Pump::new(FailsAfterProgress);
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: HoldsOutput {
+                trailer: b"!",
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
         let error = pump.finish_to(&mut output).unwrap_err();
 
@@ -634,6 +746,36 @@ mod tests {
                 written: 1
             })
         ));
+    }
+
+    #[test]
+    fn a_finish_error_is_latched() {
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: HoldsOutput {
+                trailer: b"!",
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        pump.finish_to(&mut output).unwrap_err();
+        assert_eq!(pump.get_ref().calls, 1);
+        assert_eq!(output.written, 1);
+
+        let error = pump.finish_to(&mut output).unwrap_err();
+        assert!(matches!(
+            error,
+            DriveError::Codec(Error {
+                kind: ErrorKind::CorruptStream,
+                consumed: 0,
+                written: 0
+            })
+        ));
+        assert_eq!(pump.get_ref().calls, 1);
+        assert_eq!(output.written, 1);
     }
 
     #[test]

@@ -68,7 +68,7 @@ mod tests {
     use core::mem::MaybeUninit;
 
     use super::boundary_aware_step;
-    use crate::codecs::test_support::{FailsAfterProgress, Scripted};
+    use crate::codecs::test_support::{FailsAfterInner, HoldsOutput, Scripted};
     use crate::{BoundaryAwareProgress, DrainProgress, Error, ErrorKind};
 
     #[test]
@@ -113,11 +113,17 @@ mod tests {
     fn codec_errors_are_preserved() {
         assert_eq!(
             boundary_aware_step(
-                &mut FailsAfterProgress,
+                &mut FailsAfterInner {
+                    inner: HoldsOutput {
+                        held: 2,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
                 b"abc",
                 &mut [MaybeUninit::uninit(); 5]
             ),
-            Err(Error::new(ErrorKind::CorruptStream, 1, 2))
+            Err(Error::new(ErrorKind::CorruptStream, 3, 2))
         );
     }
 }

@@ -16,18 +16,41 @@ use crate::{BoundaryAwareCodec, DriveError, Source};
 /// function also ends the codec's stream, by running `finish`. This
 /// is an extra responsibility for this function. Rationale: No good
 /// way exists to let the caller do this instead.
+///
+/// A codec error after some bytes reached `buf` gives `Ok(n)`. The
+/// error comes on the next call. Rationale: `Read::read` must not
+/// return `Err` after it read bytes, and POSIX `read(2)` works the
+/// same way. `Pump` latches the error, so every later call returns
+/// it.
 pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     pump: &mut Pump<C>,
     input: &mut I,
     buf: &mut [u8],
 ) -> Result<usize, DriveError<I::Error, Infallible>> {
+    if let Some(error) = pump.failure() {
+        return Err(DriveError::Codec(error));
+    }
     if buf.is_empty() || pump.is_done() {
         return Ok(0);
     }
     let mut output = SliceSink::new(buf);
+    match read_into(pump, input, &mut output) {
+        Ok(()) => Ok(output.written()),
+        Err(DriveError::Codec(_)) if output.written() > 0 => Ok(output.written()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The body of [`boundary_aware_pump_read`], without the deferred
+/// codec error.
+fn read_into<I: Source, C: BoundaryAwareCodec>(
+    pump: &mut Pump<C>,
+    input: &mut I,
+    output: &mut SliceSink<'_>,
+) -> Result<(), DriveError<I::Error, Infallible>> {
     let input_ended = pump.is_finishing()
         || loop {
-            let step = pump.transfer_step(input, &mut output)?;
+            let step = pump.transfer_step(input, output)?;
             match step {
                 PumpTransfer::SourceExhausted(_) | PumpTransfer::InputEnded(_) => break true,
                 PumpTransfer::Progressed(_) if output.written() == 0 => {}
@@ -38,10 +61,9 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
-        pump.finish_to(&mut output)
-            .map_err(DriveError::widen_source)?;
+        pump.finish_to(output).map_err(DriveError::widen_source)?;
     }
-    Ok(output.written())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -269,5 +291,107 @@ mod tests {
             source.count_chunk_calls, chunk_calls_at_the_end,
             "the source must not be polled after the in-band end"
         );
+    }
+
+    #[test]
+    fn returns_the_bytes_before_a_process_error_then_the_error() {
+        use crate::codecs::test_support::{FailsAfterInner, HoldsOutput};
+        use crate::sources_and_sinks::slice::SliceSource;
+        use crate::{DriveError, Error, ErrorKind};
+
+        let mut source = SliceSource::new(b"abc");
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: HoldsOutput {
+                held: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mut buf = [0u8; 8];
+
+        // `Read::read` must not return `Err` after it read bytes, so
+        // the bytes come first.
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"XX");
+
+        let latched = Error::new(ErrorKind::CorruptStream, 0, 0);
+        for _ in 0..2 {
+            let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
+            assert!(matches!(error, DriveError::Codec(e) if e == latched));
+        }
+        // The latched error comes before the empty-buffer `Ok(0)`.
+        let error = boundary_aware_pump_read(&mut pump, &mut source, &mut []).unwrap_err();
+        assert!(matches!(error, DriveError::Codec(e) if e == latched));
+        assert_eq!(pump.get_ref().calls, 1);
+    }
+
+    #[test]
+    fn returns_the_bytes_before_a_finish_error_then_the_error() {
+        use crate::codecs::test_support::{FailsAfterInner, HoldsOutput};
+        use crate::sources_and_sinks::slice::SliceSource;
+        use crate::{DriveError, Error, ErrorKind};
+
+        let mut source = SliceSource::new(b"");
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: HoldsOutput {
+                trailer: b"!",
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mut buf = [0u8; 8];
+
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"!");
+
+        // A buggy read would call `finish` again, because the pump is
+        // still in the finishing mode.
+        let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
+        assert!(matches!(
+            error,
+            DriveError::Codec(e) if e == Error::new(ErrorKind::CorruptStream, 0, 0)
+        ));
+        assert_eq!(pump.get_ref().calls, 1);
+    }
+
+    #[test]
+    fn a_source_error_is_not_latched() {
+        use crate::sources_and_sinks::slice::SliceSource;
+        use crate::DriveError;
+
+        /// Fails the first `chunk` call, like a non-blocking reader
+        /// with no data yet. Then delegates to `inner`.
+        struct FailsOnce<'a> {
+            inner: SliceSource<'a>,
+            failed: bool,
+        }
+
+        impl Source for FailsOnce<'_> {
+            type Error = ();
+
+            fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(());
+                }
+                self.inner.chunk().map_err(|never| match never {})
+            }
+
+            fn consume(&mut self, amount: usize) {
+                self.inner.consume(amount);
+            }
+        }
+
+        let mut source = FailsOnce {
+            inner: SliceSource::new(b"ok"),
+            failed: false,
+        };
+        let mut pump = Pump::new(identity());
+        let mut buf = [0u8; 8];
+
+        let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
+        assert!(matches!(error, DriveError::Source(())));
+        let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"ok");
     }
 }

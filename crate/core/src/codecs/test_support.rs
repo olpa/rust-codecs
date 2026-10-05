@@ -143,29 +143,51 @@ impl BoundaryAwareCodec for Scripted {
     }
 }
 
-/// Writes some bytes, then fails. `process` writes "ok" and reports
-/// 1 byte consumed and 2 bytes written. `finish` writes "!" and
-/// reports 1 byte written.
-pub(crate) struct FailsAfterProgress;
+/// Runs `inner`, then turns its result into an error. The error
+/// carries the counts of the result, so the bytes that `inner` wrote
+/// still count. Fails on every `process`, `flush` and `finish` call.
+///
+/// Counts its calls.
+#[derive(Default)]
+pub(crate) struct FailsAfterInner<C> {
+    pub(crate) inner: C,
+    pub(crate) calls: usize,
+}
 
-impl DrainCodec for FailsAfterProgress {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        Ok(DrainProgress::Done { written: 0 })
-    }
-
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        output[0].write(b'!');
-        Err(Error::new(ErrorKind::CorruptStream, 0, 1))
+impl<C> FailsAfterInner<C> {
+    fn fail_drain(
+        &mut self,
+        output_len: usize,
+        result: Result<DrainProgress, Error>,
+    ) -> Result<DrainProgress, Error> {
+        self.calls += 1;
+        let written = match result? {
+            DrainProgress::Done { written } => written,
+            DrainProgress::OutputFilled => output_len,
+        };
+        Err(Error::new(ErrorKind::CorruptStream, 0, written))
     }
 }
 
-impl Codec for FailsAfterProgress {
-    fn process(
-        &mut self,
-        _input: &[u8],
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<Progress, Error> {
-        output[..2].write_copy_of_slice(b"ok");
-        Err(Error::new(ErrorKind::CorruptStream, 1, 2))
+impl<C: Codec> DrainCodec for FailsAfterInner<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        let result = self.inner.flush(output);
+        self.fail_drain(output.len(), result)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        let result = self.inner.finish(output);
+        self.fail_drain(output.len(), result)
+    }
+}
+
+impl<C: Codec> Codec for FailsAfterInner<C> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        self.calls += 1;
+        let (consumed, written) = match self.inner.process(input, output)? {
+            Progress::InputConsumed { written } => (input.len(), written),
+            Progress::OutputFilled { consumed } => (consumed, output.len()),
+        };
+        Err(Error::new(ErrorKind::CorruptStream, consumed, written))
     }
 }
