@@ -8,7 +8,7 @@ repository = "https://github.com/olpa/rust-codecs"
 
 [dependencies]
 base64 = { version = "0.22", optional = true, default-features = false }
-json-escape = { git = "https://github.com/olpa/json-escape", branch = "feat/escape-bytes-try2", optional = true }
+json-escape = { git = "https://github.com/olpa/json-escape", rev = "f08a2f26d308738a5c48957d8eb151f1e5bdea60", optional = true }
 embedded-io = { version = "0.7.1", optional = true, default-features = false }
 
 [features]
