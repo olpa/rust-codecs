@@ -114,22 +114,23 @@ mod tests {
     /// eintr, real, eintr, ...).
     struct FlakyBytes<'a> {
         remaining: &'a [u8],
-        attempts: usize,
+        interrupt_next: bool,
     }
 
     impl<'a> FlakyBytes<'a> {
         fn new(data: &'a [u8]) -> Self {
             Self {
                 remaining: data,
-                attempts: 0,
+                interrupt_next: false,
             }
         }
 
         fn read_one(&mut self) -> Result<Option<u8>, &'static str> {
-            self.attempts += 1;
-            if self.attempts.is_multiple_of(2) {
+            if self.interrupt_next {
+                self.interrupt_next = false;
                 return Err("eintr");
             }
+            self.interrupt_next = true;
             let Some((&byte, rest)) = self.remaining.split_first() else {
                 return Ok(None);
             };
@@ -156,6 +157,7 @@ mod tests {
     struct FlakyFillBuf<'a> {
         remaining: &'a [u8],
         pending: Option<u8>,
+        interrupt_next: bool,
         attempts: usize,
         one: [u8; 1],
     }
@@ -165,6 +167,7 @@ mod tests {
             Self {
                 remaining: data,
                 pending: None,
+                interrupt_next: false,
                 attempts: 0,
                 one: [0],
             }
@@ -175,9 +178,11 @@ mod tests {
                 Some(byte) => byte,
                 None => {
                     self.attempts += 1;
-                    if self.attempts.is_multiple_of(2) {
+                    if self.interrupt_next {
+                        self.interrupt_next = false;
                         return Err("eintr");
                     }
+                    self.interrupt_next = true;
                     let Some((&byte, rest)) = self.remaining.split_first() else {
                         return Ok(&[]);
                     };
@@ -232,22 +237,23 @@ mod tests {
     /// calls, the same pattern as [`FlakyBytes`].
     struct FlakyWriter {
         written: Collected,
-        attempts: usize,
+        interrupt_next: bool,
     }
 
     impl FlakyWriter {
         fn new() -> Self {
             Self {
                 written: Collected::new(),
-                attempts: 0,
+                interrupt_next: false,
             }
         }
 
         fn write_one(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
-            self.attempts += 1;
-            if self.attempts.is_multiple_of(2) {
+            if self.interrupt_next {
+                self.interrupt_next = false;
                 return Err("eintr");
             }
+            self.interrupt_next = true;
             self.written.extend_from_slice(&buf[..1]);
             Ok(1)
         }
