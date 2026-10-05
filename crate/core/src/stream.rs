@@ -85,12 +85,11 @@ where
     let mut totals = TransferCounts::default();
 
     match pump.transfer_from(input, output)? {
-        PumpTransfer::SinkExhausted(_) => return Err(DriveError::SinkExhausted),
-        PumpTransfer::SourceExhausted(moved) | PumpTransfer::InputEnded(moved) => {
+        PumpStop::SinkExhausted(_) => return Err(DriveError::SinkExhausted),
+        PumpStop::SourceExhausted(moved) | PumpStop::InputEnded(moved) => {
             totals.consumed += moved.consumed;
             totals.written += moved.written;
         }
-        PumpTransfer::Progressed(_) => unreachable!("transfer_from consumes progress internally"),
     }
 
     let drained = pump.finish_to(output).map_err(DriveError::widen_source)?;
@@ -114,6 +113,16 @@ pub(crate) enum PumpTransfer {
     Progressed(TransferCounts),
     /// The codec reported an in-band end. The input of this logical
     /// stream ended. The driver must call `finish_to` next.
+    InputEnded(TransferCounts),
+}
+
+/// A version of [`PumpTransfer`] without `Progressed`, for
+/// [`Pump::transfer_from`]. That method does not return for partial
+/// progress alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PumpStop {
+    SourceExhausted(TransferCounts),
+    SinkExhausted(TransferCounts),
     InputEnded(TransferCounts),
 }
 
@@ -230,16 +239,13 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// - the sink has no more spare space
     /// - the codec signals the end of its input in-band
     ///
-    /// This method must not return for partial progress alone.
-    /// `stream_to_stream` treats that case as `unreachable!()`.
-    ///
     /// A call that moves zero bytes on both sides without ending the
     /// stream is a stall, reported as `DriveError::NoProgress`.
     pub(crate) fn transfer_from<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
         output: &mut O,
-    ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
+    ) -> Result<PumpStop, DriveError<I::Error, O::Error>> {
         let mut consumed = 0;
         let mut written = 0;
         loop {
@@ -254,13 +260,13 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                     written += moved.written;
                 }
                 PumpTransfer::SourceExhausted(moved) => {
-                    return Ok(PumpTransfer::SourceExhausted(total(moved)));
+                    return Ok(PumpStop::SourceExhausted(total(moved)));
                 }
                 PumpTransfer::SinkExhausted(moved) => {
-                    return Ok(PumpTransfer::SinkExhausted(total(moved)));
+                    return Ok(PumpStop::SinkExhausted(total(moved)));
                 }
                 PumpTransfer::InputEnded(moved) => {
-                    return Ok(PumpTransfer::InputEnded(total(moved)));
+                    return Ok(PumpStop::InputEnded(total(moved)));
                 }
             }
         }
@@ -512,7 +518,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 mod tests {
     use core::mem::MaybeUninit;
 
-    use super::{Pump, PumpDrain, PumpTransfer};
+    use super::{Pump, PumpDrain, PumpStop, PumpTransfer};
     use crate::codecs::test_support::{EndsAtBar, FailsAfterInner, HoldsOutput, Scripted};
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::{
@@ -616,7 +622,7 @@ mod tests {
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
         assert_eq!(
             moved,
-            PumpTransfer::SourceExhausted(TransferCounts {
+            PumpStop::SourceExhausted(TransferCounts {
                 consumed: 6,
                 written: 0,
             })
@@ -697,7 +703,7 @@ mod tests {
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
         assert_eq!(
             moved,
-            PumpTransfer::SourceExhausted(TransferCounts {
+            PumpStop::SourceExhausted(TransferCounts {
                 consumed: 6,
                 written: 0,
             })
