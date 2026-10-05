@@ -2,6 +2,7 @@
 name = "rust-codecs-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "Streaming byte codecs with a no_std core."
 license = "MIT"
 repository = "https://github.com/olpa/rust-codecs"
