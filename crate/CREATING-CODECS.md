@@ -143,3 +143,18 @@ running it through `stream_to_stream` end to end.
 Every `Codec` already has a `BoundaryAwareCodec` implementation (it
 never returns `Boundary`). Drivers on the input side (`CodecReader`,
 `stream_to_stream`) accept either kind, without change.
+
+## Helpers for the output buffer
+
+The output buffer is `&mut [MaybeUninit<u8>]`, not `&mut [u8]`. The
+module `rust_codecs_core::uninit` has two helpers for it:
+
+- `copy_to_uninit(dst, src)` copies bytes into the buffer. Use it when
+  a codec copies input to output without a change.
+- `zero_init_mut(dst)` fills the buffer with zeros and returns it as
+  `&mut [u8]`. Use it to pass the buffer to a library that accepts
+  only `&mut [u8]`. The base64 codecs use it for the `base64` crate.
+
+This crate supports Rust versions older than 1.93. So it cannot use
+the standard methods `write_copy_of_slice` and `assume_init_mut`,
+which are stable only since Rust 1.93. The helpers replace them.

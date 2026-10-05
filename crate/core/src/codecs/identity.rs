@@ -2,6 +2,7 @@
 
 use core::mem::MaybeUninit;
 
+use crate::uninit::copy_to_uninit;
 use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 /// Output is identical to input.
@@ -21,7 +22,7 @@ impl DrainCodec for Identity {
 impl Codec for Identity {
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
-        output[..n].write_copy_of_slice(&input[..n]);
+        copy_to_uninit(&mut output[..n], &input[..n]);
         if n == input.len() {
             Ok(Progress::InputConsumed { written: n })
         } else {

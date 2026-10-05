@@ -94,6 +94,7 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
 #[cfg(test)]
 mod tests {
     use super::{RetryingWrite, ScratchSink};
+    use crate::uninit::copy_to_uninit;
     use crate::Sink;
     use core::convert::Infallible;
 
@@ -142,7 +143,7 @@ mod tests {
     fn commit_writes_only_the_committed_prefix_through() {
         let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 8]).unwrap();
         let spare = output.spare().unwrap().unwrap();
-        spare[..5].write_copy_of_slice(b"abcde");
+        copy_to_uninit(&mut spare[..5], b"abcde");
         output.commit(3).unwrap();
         let inner = output.get_ref();
         assert_eq!(&inner.bytes[..inner.written], b"abc");

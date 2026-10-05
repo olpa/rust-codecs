@@ -16,6 +16,7 @@ use core::convert::Infallible;
 
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
+use rust_codecs_core::uninit::copy_to_uninit;
 use rust_codecs_core::{
     stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress,
     DriveError, Error, Source,
@@ -43,7 +44,7 @@ impl BoundaryAwareCodec for QuoteEnd {
         let quote_pos = input.iter().position(|&b| b == b'"');
         let available = quote_pos.unwrap_or(input.len());
         let n = available.min(output.len());
-        output[..n].write_copy_of_slice(&input[..n]);
+        copy_to_uninit(&mut output[..n], &input[..n]);
         if n < available {
             // Output ran out before the quote, or before the end of input.
             Ok(BoundaryAwareProgress::OutputFilled { consumed: n })

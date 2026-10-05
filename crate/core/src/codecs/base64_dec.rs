@@ -17,6 +17,7 @@ use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
 use super::base64_shared::{self, PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
+use crate::uninit::zero_init_mut;
 use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
@@ -214,7 +215,7 @@ impl<E: Engine> Base64Dec<E> {
             // before returning; block-init once to bridge to that
             // foreign API rather than reading through `output`'s
             // `MaybeUninit<u8>` elements one at a time.
-            let dst = base64_shared::zero_init_mut(&mut output[out_pos..out_pos + out_bytes]);
+            let dst = zero_init_mut(&mut output[out_pos..out_pos + out_bytes]);
             let written = self
                 .engine
                 .decode_slice(&input[in_pos..in_pos + in_bytes], dst)

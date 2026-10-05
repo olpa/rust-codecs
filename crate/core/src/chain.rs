@@ -341,7 +341,7 @@ mod tests {
     use crate::rot13::rot13;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
-    use crate::uninit::as_uninit_mut;
+    use crate::uninit::{as_uninit_mut, copy_to_uninit};
     use crate::{
         stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress, Sink,
     };
@@ -491,7 +491,7 @@ mod tests {
 
         fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
             let n = self.buf.len().min(output.len());
-            output[..n].write_copy_of_slice(&self.buf[..n]);
+            copy_to_uninit(&mut output[..n], &self.buf[..n]);
             self.buf.drain(..n);
             if self.buf.is_empty() {
                 Ok(DrainProgress::Done { written: n })
@@ -776,7 +776,7 @@ mod tests {
         ) -> Result<Progress, Error> {
             if !self.failed {
                 self.failed = true;
-                output[..1].write_copy_of_slice(&input[..1]);
+                copy_to_uninit(&mut output[..1], &input[..1]);
                 return Err(Error::new(crate::ErrorKind::CorruptStream, 1, 1));
             }
             self.inner.process(input, output)

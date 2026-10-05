@@ -19,6 +19,7 @@
 
 use core::mem::MaybeUninit;
 
+use crate::uninit::copy_to_uninit;
 use crate::{Error, ErrorKind};
 
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
@@ -29,24 +30,6 @@ use crate::{Error, ErrorKind};
 // no matter which `Engine` a caller plugs in via `with_engine`.
 pub(super) const GROUP: usize = 3;
 pub(super) const ENCODED_GROUP: usize = 4;
-
-/// Block-initialize `dst` (a single bulk write, not a per-element one)
-/// and hand back the now-genuinely-initialized `&mut [u8]` view.
-///
-/// For bridging to a foreign API that only accepts `&mut [u8]` (e.g.
-/// the `base64` crate's `Engine::encode_slice`/`decode_slice`) and
-/// always overwrites every byte of the span it's given before any read
-/// — so the value written here is never observed, only its
-/// initializedness matters.
-pub(super) fn zero_init_mut(dst: &mut [MaybeUninit<u8>]) -> &mut [u8] {
-    // SAFETY: `write_bytes` is a single bulk store establishing that
-    // every byte of `dst` is initialized (to 0), satisfying
-    // `assume_init_mut`'s precondition below.
-    unsafe {
-        core::ptr::write_bytes(dst.as_mut_ptr().cast::<u8>(), 0, dst.len());
-        dst.assume_init_mut()
-    }
-}
 
 /// Holds a transform-unit's worth of input that arrived incomplete, to
 /// be topped up and consumed on a later call. See the module docs for
@@ -165,7 +148,7 @@ impl<const N: usize> PendingOutput<N> {
             return 0;
         }
         let take = (self.len - self.pos).min(out.len());
-        out[..take].write_copy_of_slice(&self.buf[self.pos..self.pos + take]);
+        copy_to_uninit(&mut out[..take], &self.buf[self.pos..self.pos + take]);
         self.pos += take;
         take
     }

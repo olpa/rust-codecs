@@ -2,6 +2,7 @@
 
 use core::mem::MaybeUninit;
 
+use crate::uninit::copy_to_uninit;
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, ErrorKind,
     Progress,
@@ -51,7 +52,7 @@ impl DrainCodec for HoldsOutput {
         let rest = &mut output[n..];
         let left = &self.trailer[self.trailer_written..];
         let m = left.len().min(rest.len());
-        rest[..m].write_copy_of_slice(&left[..m]);
+        copy_to_uninit(&mut rest[..m], &left[..m]);
         self.trailer_written += m;
         if self.trailer_written == self.trailer.len() {
             Ok(DrainProgress::Done { written: n + m })

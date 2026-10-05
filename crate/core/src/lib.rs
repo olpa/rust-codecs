@@ -216,7 +216,7 @@ pub use protocol::{
     Error, ErrorKind, Progress, Sink, Source, StallError, TransferCounts,
 };
 
-mod uninit;
+pub mod uninit;
 
 mod step;
 

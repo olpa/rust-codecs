@@ -9,6 +9,7 @@ use core::mem::MaybeUninit;
 
 use json_escape::explicit::escape_bytes;
 
+use crate::uninit::copy_to_uninit;
 use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// An escape sequence known for the byte right after `pending_literal_len`'s
@@ -49,7 +50,7 @@ impl JsonEnc {
         if let PendingEscape::Started(tail) = self.pending_escape {
             let bytes = tail.as_bytes();
             let n = bytes.len().min(output.len() - written);
-            output[written..written + n].write_copy_of_slice(&bytes[..n]);
+            copy_to_uninit(&mut output[written..written + n], &bytes[..n]);
             written += n;
             if n < bytes.len() {
                 self.pending_escape = PendingEscape::Started(&tail[n..]);
@@ -60,7 +61,7 @@ impl JsonEnc {
 
         if self.pending_literal_len > 0 {
             let n = self.pending_literal_len.min(output.len() - written);
-            output[written..written + n].write_copy_of_slice(&input[..n]);
+            copy_to_uninit(&mut output[written..written + n], &input[..n]);
             written += n;
             consumed += n;
             self.pending_literal_len -= n;
@@ -73,7 +74,7 @@ impl JsonEnc {
             consumed += 1;
             let bytes = s.as_bytes();
             let n = bytes.len().min(output.len() - written);
-            output[written..written + n].write_copy_of_slice(&bytes[..n]);
+            copy_to_uninit(&mut output[written..written + n], &bytes[..n]);
             written += n;
             self.pending_escape = if n < bytes.len() {
                 PendingEscape::Started(&s[n..])
@@ -97,7 +98,7 @@ impl DrainCodec for JsonEnc {
         };
         let bytes = tail.as_bytes();
         let n = bytes.len().min(output.len());
-        output[..n].write_copy_of_slice(&bytes[..n]);
+        copy_to_uninit(&mut output[..n], &bytes[..n]);
         if n < bytes.len() {
             self.pending_escape = PendingEscape::Started(&tail[n..]);
             return Ok(DrainProgress::OutputFilled);
@@ -138,7 +139,7 @@ impl Codec for JsonEnc {
         for chunk in escape_bytes(&input[consumed..]) {
             let literal = chunk.literal();
             let n = literal.len().min(output.len() - written);
-            output[written..written + n].write_copy_of_slice(&literal[..n]);
+            copy_to_uninit(&mut output[written..written + n], &literal[..n]);
             written += n;
             consumed += n;
             if n < literal.len() {
@@ -159,7 +160,7 @@ impl Codec for JsonEnc {
             consumed += 1;
             let bytes = s.as_bytes();
             let n = bytes.len().min(output.len() - written);
-            output[written..written + n].write_copy_of_slice(&bytes[..n]);
+            copy_to_uninit(&mut output[written..written + n], &bytes[..n]);
             written += n;
             if n < bytes.len() {
                 self.pending_escape = PendingEscape::Started(&s[n..]);
