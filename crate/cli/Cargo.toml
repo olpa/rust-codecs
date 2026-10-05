@@ -2,6 +2,9 @@
 name = "cli"
 version = "0.1.0"
 edition = "2021"
+description = "Command-line tool to run codec chains by hand."
+license = "MIT"
+repository = "https://github.com/olpa/rust-codecs"
 
 [dependencies]
 rust-codecs-core = { path = "../core", features = ["rot13", "base64", "json", "embedded-io"] }
