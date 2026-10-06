@@ -2,7 +2,7 @@
 //! string, collecting the result into an in-memory `Vec<u8>`/`String`.
 
 use super::VecSink;
-use crate::{stream_to_stream, BoundaryAwareCodec, DriveError};
+use crate::{stream_to_stream, BoundaryAwareCodec, DriveError, DriveErrorKind};
 
 /// Everything that can go wrong in [`encode_str`]/[`encode_string`].
 #[derive(Debug)]
@@ -14,15 +14,15 @@ pub enum EncodeError {
 
 impl<EI, EO> From<DriveError<EI, EO>> for EncodeError {
     fn from(error: DriveError<EI, EO>) -> Self {
-        match error {
-            DriveError::Source(_) | DriveError::Sink(_) => {
+        match error.kind {
+            DriveErrorKind::Source(_) | DriveErrorKind::Sink(_) => {
                 unreachable!("in-memory source/sink errors are Infallible")
             }
-            DriveError::Codec(error) => Self::Codec(error),
-            DriveError::NoProgress => Self::NoProgress,
+            DriveErrorKind::Codec(error) => Self::Codec(error),
+            DriveErrorKind::NoProgress => Self::NoProgress,
             // VecSink's spare capacity always grows to fit; it can
             // never decline to offer any.
-            DriveError::SinkExhausted => unreachable!("VecSink always has spare capacity"),
+            DriveErrorKind::SinkExhausted => unreachable!("VecSink always has spare capacity"),
         }
     }
 }

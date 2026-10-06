@@ -146,12 +146,16 @@ impl BoundaryAwareCodec for Scripted {
 
 /// Runs `inner`, then turns its result into an error. The error
 /// carries the counts of the result, so the bytes that `inner` wrote
-/// still count. Fails on every `process`, `flush` and `finish` call.
+/// still count.
+///
+/// The first `ok_calls` calls return the result of `inner` without
+/// change. Then every `process`, `flush` and `finish` call fails.
 ///
 /// Counts its calls.
 #[derive(Default)]
 pub(crate) struct FailsAfterInner<C> {
     pub(crate) inner: C,
+    pub(crate) ok_calls: usize,
     pub(crate) calls: usize,
 }
 
@@ -162,6 +166,9 @@ impl<C> FailsAfterInner<C> {
         result: Result<DrainProgress, Error>,
     ) -> Result<DrainProgress, Error> {
         self.calls += 1;
+        if self.calls <= self.ok_calls {
+            return result;
+        }
         let written = match result? {
             DrainProgress::Done { written } => written,
             DrainProgress::OutputFilled => output_len,
@@ -185,7 +192,11 @@ impl<C: Codec> DrainCodec for FailsAfterInner<C> {
 impl<C: Codec> Codec for FailsAfterInner<C> {
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         self.calls += 1;
-        let (consumed, written) = match self.inner.process(input, output)? {
+        let result = self.inner.process(input, output);
+        if self.calls <= self.ok_calls {
+            return result;
+        }
+        let (consumed, written) = match result? {
             Progress::InputConsumed { written } => (input.len(), written),
             Progress::OutputFilled { consumed } => (consumed, output.len()),
         };

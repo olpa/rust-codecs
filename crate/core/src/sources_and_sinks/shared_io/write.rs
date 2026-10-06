@@ -10,7 +10,7 @@ use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSource;
 use crate::stream::{Pump, PumpDrain};
-use crate::{Codec, DriveError, Sink};
+use crate::{Codec, DriveError, DriveErrorKind, Sink, TransferCounts};
 
 /// Drive `pump` from `buf`, writing transformed bytes into `output`.
 /// Returns the number of bytes consumed from `buf`.
@@ -37,7 +37,7 @@ pub fn pump_write<O: Sink, C: Codec>(
 /// # Errors
 ///
 /// - If `output` is full before the codec is done, the function
-///   returns `DriveError::SinkExhausted`.
+///   returns `DriveErrorKind::SinkExhausted`.
 /// - The function returns all errors from `pump` and from `output`
 ///   without change.
 pub fn pump_flush<O: Sink, C: Codec>(
@@ -45,8 +45,16 @@ pub fn pump_flush<O: Sink, C: Codec>(
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.flush_to(output)? {
-        PumpDrain::Done { .. } => output.flush().map_err(DriveError::Sink),
-        PumpDrain::SinkExhausted { .. } => Err(DriveError::SinkExhausted),
+        PumpDrain::Done { written } => output.flush().map_err(|error| {
+            DriveError::new(
+                DriveErrorKind::Sink(error),
+                TransferCounts::only_written(written),
+            )
+        }),
+        PumpDrain::SinkExhausted { written } => Err(DriveError::new(
+            DriveErrorKind::SinkExhausted,
+            TransferCounts::only_written(written),
+        )),
     }
 }
 
@@ -60,7 +68,7 @@ pub fn pump_flush<O: Sink, C: Codec>(
 /// # Errors
 ///
 /// - If `output` is full before the codec is done, the function
-///   returns `DriveError::SinkExhausted`.
+///   returns `DriveErrorKind::SinkExhausted`.
 /// - The function returns all errors from `pump` and from `output`
 ///   without change.
 pub fn pump_finish<O: Sink, C: Codec>(
@@ -68,11 +76,16 @@ pub fn pump_finish<O: Sink, C: Codec>(
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.finish_to(output)? {
-        PumpDrain::Done { .. } => {
-            output.finish().map_err(DriveError::Sink)?;
-            Ok(())
-        }
-        PumpDrain::SinkExhausted { .. } => Err(DriveError::SinkExhausted),
+        PumpDrain::Done { written } => output.finish().map_err(|error| {
+            DriveError::new(
+                DriveErrorKind::Sink(error),
+                TransferCounts::only_written(written),
+            )
+        }),
+        PumpDrain::SinkExhausted { written } => Err(DriveError::new(
+            DriveErrorKind::SinkExhausted,
+            TransferCounts::only_written(written),
+        )),
     }
 }
 
@@ -82,7 +95,7 @@ mod tests {
     use crate::codecs::test_support::HoldsOutput;
     use crate::sources_and_sinks::slice::SliceSink;
     use crate::stream::Pump;
-    use crate::DriveError;
+    use crate::{DriveErrorKind, TransferCounts};
 
     #[test]
     fn reports_sink_exhausted_instead_of_silently_truncating_the_trailer() {
@@ -98,7 +111,15 @@ mod tests {
         // sink holds 1. Draining did not finish. `pump_finish` must
         // report that, not return success.
         let result = pump_finish(&mut pump, &mut sink);
-        assert!(matches!(result, Err(DriveError::SinkExhausted)));
+        let error = result.unwrap_err();
+        assert!(matches!(error.kind, DriveErrorKind::SinkExhausted));
+        assert_eq!(
+            error.moved,
+            TransferCounts {
+                consumed: 0,
+                written: 1,
+            }
+        );
     }
 
     #[test]

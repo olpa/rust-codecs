@@ -8,7 +8,8 @@ use crate::sources_and_sinks::shared_io::{
 };
 use crate::stream::Pump;
 use crate::{
-    BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind, StallError,
+    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, Error, ErrorKind,
+    StallError,
 };
 
 use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
@@ -25,25 +26,25 @@ pub enum EmbeddedError<E> {
 }
 
 fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> EmbeddedError<E> {
-    match error {
-        DriveError::Source(error) => EmbeddedError::Io(error),
-        DriveError::Sink(never) => match never {},
-        DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
-        DriveError::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
+    match error.kind {
+        DriveErrorKind::Source(error) => EmbeddedError::Io(error),
+        DriveErrorKind::Sink(never) => match never {},
+        DriveErrorKind::Codec(error) => EmbeddedError::Codec(error),
+        DriveErrorKind::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
+        DriveErrorKind::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
     }
 }
 
 fn writer_error_to_embedded_error<E>(
     error: DriveError<Infallible, WriteError<E>>,
 ) -> EmbeddedError<E> {
-    match error {
-        DriveError::Source(never) => match never {},
-        DriveError::Sink(WriteError::Io(error)) => EmbeddedError::Io(error),
-        DriveError::Sink(WriteError::ZeroWrite) => EmbeddedError::Stall(StallError::ZeroWrite),
-        DriveError::Codec(error) => EmbeddedError::Codec(error),
-        DriveError::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
-        DriveError::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
+    match error.kind {
+        DriveErrorKind::Source(never) => match never {},
+        DriveErrorKind::Sink(WriteError::Io(error)) => EmbeddedError::Io(error),
+        DriveErrorKind::Sink(WriteError::ZeroWrite) => EmbeddedError::Stall(StallError::ZeroWrite),
+        DriveErrorKind::Codec(error) => EmbeddedError::Codec(error),
+        DriveErrorKind::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
+        DriveErrorKind::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
     }
 }
 

@@ -284,6 +284,24 @@ pub struct TransferCounts {
     pub written: usize,
 }
 
+impl TransferCounts {
+    /// Make counts with `written` bytes written and no bytes consumed.
+    pub(crate) fn only_written(written: usize) -> Self {
+        Self {
+            consumed: 0,
+            written,
+        }
+    }
+
+    /// Make counts with `consumed` bytes consumed and no bytes written.
+    pub(crate) fn only_consumed(consumed: usize) -> Self {
+        Self {
+            consumed,
+            written: 0,
+        }
+    }
+}
+
 // ----
 // Boxing support
 // ----

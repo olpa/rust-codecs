@@ -221,7 +221,7 @@ pub mod uninit;
 mod step;
 
 mod stream;
-pub use stream::{stream_to_stream, DriveError, Pump};
+pub use stream::{stream_to_stream, DriveError, DriveErrorKind, Pump};
 
 mod chain;
 pub use chain::Chain;

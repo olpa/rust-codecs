@@ -187,7 +187,7 @@ mod tests {
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{encode_string, VecSink, VecSource};
     use crate::uninit::as_uninit_mut;
-    use crate::{Codec, DrainCodec, DrainProgress, DriveError, ErrorKind, Progress};
+    use crate::{Codec, DrainCodec, DrainProgress, DriveErrorKind, ErrorKind, Progress};
 
     #[test]
     fn round_trip() {
@@ -212,8 +212,8 @@ mod tests {
         let mut input = VecSource::new(b"\xff\xfe".to_vec());
         let mut output = VecSink::default();
         crate::stream_to_stream(&mut input, json_enc(), &mut output)
-            .map_err(|error| match error {
-                DriveError::Codec(error) => error,
+            .map_err(|error| match error.kind {
+                DriveErrorKind::Codec(error) => error,
                 _ => unreachable!("infallible Vec adapter"),
             })
             .unwrap();

@@ -2,7 +2,7 @@ use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSink;
 use crate::stream::{Pump, PumpTransfer};
-use crate::{BoundaryAwareCodec, DriveError, Source};
+use crate::{BoundaryAwareCodec, DriveError, DriveErrorKind, Source, TransferCounts};
 
 /// This is the transport-independent core of a `Read::read`
 /// implementation. In the normal case, one pull from `input` makes
@@ -28,7 +28,10 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     buf: &mut [u8],
 ) -> Result<usize, DriveError<I::Error, Infallible>> {
     if let Some(error) = pump.failure() {
-        return Err(DriveError::Codec(error));
+        return Err(DriveError::new(
+            DriveErrorKind::Codec(error),
+            TransferCounts::default(),
+        ));
     }
     if buf.is_empty() || pump.is_done() {
         return Ok(0);
@@ -36,7 +39,10 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     let mut output = SliceSink::new(buf);
     match read_into(pump, input, &mut output) {
         Ok(()) => Ok(output.written()),
-        Err(DriveError::Codec(_)) if output.written() > 0 => Ok(output.written()),
+        Err(DriveError {
+            kind: DriveErrorKind::Codec(_),
+            ..
+        }) if output.written() > 0 => Ok(output.written()),
         Err(error) => Err(error),
     }
 }
@@ -48,9 +54,18 @@ fn read_into<I: Source, C: BoundaryAwareCodec>(
     input: &mut I,
     output: &mut SliceSink<'_>,
 ) -> Result<(), DriveError<I::Error, Infallible>> {
+    let mut moved = TransferCounts::default();
     let input_ended = pump.is_finishing()
         || loop {
-            let step = pump.transfer_step(input, output)?;
+            let step = pump
+                .transfer_step(input, output)
+                .map_err(|error| error.after(moved))?;
+            let (PumpTransfer::SourceExhausted(step_moved)
+            | PumpTransfer::SinkExhausted(step_moved)
+            | PumpTransfer::Progressed(step_moved)
+            | PumpTransfer::InputEnded(step_moved)) = step;
+            moved.consumed += step_moved.consumed;
+            moved.written += step_moved.written;
             match step {
                 PumpTransfer::SourceExhausted(_) | PumpTransfer::InputEnded(_) => break true,
                 PumpTransfer::Progressed(_) if output.written() == 0 => {}
@@ -61,7 +76,8 @@ fn read_into<I: Source, C: BoundaryAwareCodec>(
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
-        pump.finish_to(output).map_err(DriveError::widen_source)?;
+        pump.finish_to(output)
+            .map_err(|error| error.widen_source().after(moved))?;
     }
     Ok(())
 }
@@ -297,7 +313,7 @@ mod tests {
     fn returns_the_bytes_before_a_process_error_then_the_error() {
         use crate::codecs::test_support::{FailsAfterInner, HoldsOutput};
         use crate::sources_and_sinks::slice::SliceSource;
-        use crate::{DriveError, Error, ErrorKind};
+        use crate::{DriveErrorKind, Error, ErrorKind};
 
         let mut source = SliceSource::new(b"abc");
         let mut pump = Pump::new(FailsAfterInner {
@@ -317,11 +333,11 @@ mod tests {
         let latched = Error::new(ErrorKind::CorruptStream, 0, 0);
         for _ in 0..2 {
             let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
-            assert!(matches!(error, DriveError::Codec(e) if e == latched));
+            assert!(matches!(error.kind, DriveErrorKind::Codec(e) if e == latched));
         }
         // The latched error comes before the empty-buffer `Ok(0)`.
         let error = boundary_aware_pump_read(&mut pump, &mut source, &mut []).unwrap_err();
-        assert!(matches!(error, DriveError::Codec(e) if e == latched));
+        assert!(matches!(error.kind, DriveErrorKind::Codec(e) if e == latched));
         assert_eq!(pump.get_ref().calls, 1);
     }
 
@@ -329,7 +345,7 @@ mod tests {
     fn returns_the_bytes_before_a_finish_error_then_the_error() {
         use crate::codecs::test_support::{FailsAfterInner, HoldsOutput};
         use crate::sources_and_sinks::slice::SliceSource;
-        use crate::{DriveError, Error, ErrorKind};
+        use crate::{DriveErrorKind, Error, ErrorKind};
 
         let mut source = SliceSource::new(b"");
         let mut pump = Pump::new(FailsAfterInner {
@@ -348,8 +364,8 @@ mod tests {
         // still in the finishing mode.
         let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
         assert!(matches!(
-            error,
-            DriveError::Codec(e) if e == Error::new(ErrorKind::CorruptStream, 0, 0)
+            error.kind,
+            DriveErrorKind::Codec(e) if e == Error::new(ErrorKind::CorruptStream, 0, 0)
         ));
         assert_eq!(pump.get_ref().calls, 1);
     }
@@ -357,7 +373,7 @@ mod tests {
     #[test]
     fn a_source_error_is_not_latched() {
         use crate::sources_and_sinks::slice::SliceSource;
-        use crate::DriveError;
+        use crate::DriveErrorKind;
 
         /// Fails the first `chunk` call, like a non-blocking reader
         /// with no data yet. Then delegates to `inner`.
@@ -390,7 +406,7 @@ mod tests {
         let mut buf = [0u8; 8];
 
         let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
-        assert!(matches!(error, DriveError::Source(())));
+        assert!(matches!(error.kind, DriveErrorKind::Source(())));
         let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"ok");
     }

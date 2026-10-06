@@ -7,7 +7,8 @@ use crate::sources_and_sinks::shared_io::{
 };
 use crate::stream::Pump;
 use crate::{
-    BoundaryAwareCodec, Codec, DriveError, EmptyBufferError, Error, ErrorKind, StallError,
+    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, Error, ErrorKind,
+    StallError,
 };
 
 use super::adapter::{BufReadSource, StdSink, StdSource};
@@ -31,22 +32,22 @@ fn stall_to_io_error(error: StallError) -> io::Error {
 }
 
 fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error {
-    match err {
-        DriveError::Source(error) => error,
-        DriveError::Sink(never) => match never {},
-        DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
-        DriveError::NoProgress => stall_to_io_error(StallError::NoProgress),
+    match err.kind {
+        DriveErrorKind::Source(error) => error,
+        DriveErrorKind::Sink(never) => match never {},
+        DriveErrorKind::Codec(error) => to_io_error(error),
+        DriveErrorKind::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
+        DriveErrorKind::NoProgress => stall_to_io_error(StallError::NoProgress),
     }
 }
 
 fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error {
-    match err {
-        DriveError::Source(never) => match never {},
-        DriveError::Sink(error) => error,
-        DriveError::Codec(error) => to_io_error(error),
-        DriveError::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
-        DriveError::NoProgress => stall_to_io_error(StallError::NoProgress),
+    match err.kind {
+        DriveErrorKind::Source(never) => match never {},
+        DriveErrorKind::Sink(error) => error,
+        DriveErrorKind::Codec(error) => to_io_error(error),
+        DriveErrorKind::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
+        DriveErrorKind::NoProgress => stall_to_io_error(StallError::NoProgress),
     }
 }
 
