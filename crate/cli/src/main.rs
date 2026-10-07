@@ -62,10 +62,12 @@ Codecs: {names}
 wraps the chain in CodecReader/CodecWriter and drives it with
 std::io::copy; `stream` drives the same chain directly via
 stream_to_stream over StdSource/StdSink, with no Read/Write adapter
-in between. CodecReader's read() always returns as soon as one pull
-from the wrapped reader made progress, instead of chasing a full
-buffer — so it never stalls an interactive pipe (e.g. a terminal)
-waiting for enough input to fill std::io::copy's buffer.
+in between. CodecReader's read() returns as soon as a pull from the
+wrapped reader produced output, instead of chasing a full buffer. So
+it does not wait for enough input to fill std::io::copy's buffer on
+an interactive pipe (e.g. a terminal). A codec that holds bytes back,
+for example base64 with an incomplete group, can still delay its
+output until more input arrives.
 
 Reader codecs apply in the order listed (first listed runs on the raw
 bytes first). Writer codecs also apply in the order listed (first
