@@ -6,6 +6,10 @@
 use core::mem::MaybeUninit;
 
 pub(crate) fn as_uninit_mut(bytes: &mut [u8]) -> &mut [MaybeUninit<u8>] {
+    // SAFETY: `MaybeUninit<u8>` has the same size and alignment as
+    // `u8`, so the cast keeps the layout. The cast does not stop the
+    // caller from writing uninitialized bytes into `bytes`. This is
+    // an open problem: see issue #19.
     unsafe { &mut *(bytes as *mut [u8] as *mut [MaybeUninit<u8>]) }
 }
 

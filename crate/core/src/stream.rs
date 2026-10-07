@@ -363,12 +363,9 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         input: &mut I,
         output: &mut O,
     ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
-        // AI review agents detect a potential problem here:
-        //
-        // > A blocking `Source` transport can stall here. Drain
-        // > available codec output before requesting more input.
-        //
-        // Two independent cases produce "available codec output":
+        // Design note: this step reads input before it drains codec
+        // output. A blocking `Source` transport can stall here. Two
+        // independent cases produce "available codec output":
         //
         // - The `output` buffer is smaller than `input`. Should not
         //   happen: `Source::chunk`'s doc tells implementors to
