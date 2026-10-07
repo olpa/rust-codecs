@@ -27,7 +27,7 @@
 //! unchanged.
 //!
 //! ```
-//! # #[cfg(feature = "json")]
+//! # #[cfg(all(feature = "json", feature = "std"))]
 //! # {
 //! use std::io::Write;
 //!
@@ -91,7 +91,7 @@
 //! a `Vec<u8>`.
 //!
 //! ```
-//! # #[cfg(feature = "rot13")]
+//! # #[cfg(all(feature = "rot13", feature = "alloc"))]
 //! # {
 //! use rust_codecs_core::rot13::rot13;
 //! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
@@ -129,7 +129,7 @@
 //! [`Chain`] composes two codecs into one.
 //!
 //! ```
-//! # #[cfg(all(feature = "base64", feature = "rot13"))]
+//! # #[cfg(all(feature = "base64", feature = "rot13", feature = "alloc"))]
 //! # {
 //! use rust_codecs_core::base64_enc::base64_enc;
 //! use rust_codecs_core::rot13::rot13;
