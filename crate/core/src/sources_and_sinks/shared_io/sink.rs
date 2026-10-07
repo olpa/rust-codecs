@@ -71,11 +71,12 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
     }
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
-        assert!(
+        debug_assert!(
             amount <= self.offered,
             "commit({amount}) exceeds the {} bytes offered by spare()",
             self.offered
         );
+        let amount = amount.min(self.offered);
         self.inner
             .retrying_write_all(&self.buffer.as_mut()[..amount])?;
         self.offered = 0;
@@ -150,11 +151,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic]
-    fn commit_more_than_offered_panics() {
+    fn commit_more_than_offered_panics_in_debug() {
         let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 4]).unwrap();
         output.spare().unwrap();
         output.commit(5).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn commit_more_than_offered_clamps_in_release() {
+        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 4]).unwrap();
+        output.spare().unwrap();
+        output.commit(5).unwrap();
+        let inner = output.get_ref();
+        assert_eq!(inner.written, 4);
     }
 
     #[test]

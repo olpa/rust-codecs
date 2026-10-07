@@ -44,6 +44,10 @@ impl Source for VecSource {
         Ok((self.pos < self.inner.len()).then_some(&self.inner[self.pos..]))
     }
     fn consume(&mut self, amount: usize) {
+        debug_assert!(
+            amount <= self.inner.len() - self.pos,
+            "consume({amount}) exceeds the remaining bytes"
+        );
         self.pos += amount.min(self.inner.len() - self.pos);
     }
 }
@@ -114,6 +118,11 @@ impl Sink for VecSink {
     // FIXME: Safe commit relies on caller-provided initialization.
     // Track the output API safety fix: https://github.com/olpa/rust-codecs/issues/19
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
+        debug_assert!(
+            amount <= self.offered,
+            "commit({amount}) exceeds the {} bytes offered by spare()",
+            self.offered
+        );
         let amount = amount.min(self.offered);
         unsafe { self.inner.set_len(self.inner.len() + amount) };
         self.offered = 0;

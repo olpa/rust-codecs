@@ -85,11 +85,11 @@ impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
 
     fn consume(&mut self, amount: usize) {
         let remaining = self.len - self.pos;
-        assert!(
+        debug_assert!(
             amount <= remaining,
             "consume({amount}) exceeds the {remaining} bytes remaining in the current chunk"
         );
-        self.pos += amount;
+        self.pos += amount.min(remaining);
     }
 }
 
@@ -311,11 +311,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic]
-    fn consume_more_than_available_panics() {
+    fn consume_more_than_available_panics_in_debug() {
         let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]).unwrap();
         input.chunk().unwrap();
         input.consume(3);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn consume_more_than_available_clamps_in_release() {
+        let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]).unwrap();
+        input.chunk().unwrap();
+        input.consume(3);
+        assert_eq!(input.chunk().unwrap(), None);
     }
 
     #[test]

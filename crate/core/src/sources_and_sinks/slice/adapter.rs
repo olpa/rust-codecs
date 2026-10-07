@@ -27,6 +27,10 @@ impl Source for SliceSource<'_> {
         Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..]))
     }
     fn consume(&mut self, amount: usize) {
+        debug_assert!(
+            amount <= self.bytes.len() - self.pos,
+            "consume({amount}) exceeds the remaining bytes"
+        );
         self.pos += amount.min(self.bytes.len() - self.pos);
     }
 }
@@ -54,6 +58,10 @@ impl Sink for SliceSink<'_> {
         Ok((self.pos < self.bytes.len()).then_some(as_uninit_mut(&mut self.bytes[self.pos..])))
     }
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
+        debug_assert!(
+            amount <= self.bytes.len() - self.pos,
+            "commit({amount}) exceeds the space offered by spare()"
+        );
         self.pos += amount.min(self.bytes.len() - self.pos);
         Ok(())
     }

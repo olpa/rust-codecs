@@ -22,12 +22,15 @@ pub trait Source {
 
     /// Consume the first `amount` bytes of the current chunk.
     ///
-    /// Returns no error; it only updates accounting. Any fallible
-    /// work belongs in `chunk`.
+    /// This method returns no error. It only updates accounting. Put any
+    /// fallible work in `chunk`.
     ///
-    /// A caller must not consume more bytes than the current chunk
-    /// holds; behavior on violation is implementation-defined (may
-    /// panic).
+    /// The caller must give a correct `amount`. The implementation
+    /// trusts it and cannot check most errors.
+    ///
+    /// One error is visible: an `amount` larger than the chunk. The
+    /// sources in this crate check it with `debug_assert!`. They also
+    /// clamp the amount to the chunk length.
     fn consume(&mut self, amount: usize);
 }
 
@@ -42,14 +45,19 @@ pub trait Sink {
     /// committed may be overwritten.
     fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error>;
 
-    /// Commit the first `amount` bytes of the space returned by `spare`.
+    /// Commit the first `amount` bytes of the space that `spare` returned.
     ///
-    /// Returns an error on failure. Unlike `Source::consume`, I/O is
-    /// possible here.
+    /// This method returns an error on failure. Unlike `Source::consume`,
+    /// it can do I/O.
     ///
-    /// A caller must not commit a byte it did not initialize, nor
-    /// commit more bytes than the space returned by `spare` holds;
-    /// behavior on violation is implementation-defined (may panic).
+    /// The caller must give a correct `amount`. It must initialize each
+    /// byte that it commits. The implementation trusts the caller. It
+    /// cannot check the initialization or most other errors.
+    ///
+    /// One error is visible: an `amount` larger than the space that
+    /// `spare` returned. The sinks in this crate check it with
+    /// `debug_assert!`. They also clamp the amount to the length of that
+    /// space.
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
 
     /// Complete the destination after the codec stream has ended.
