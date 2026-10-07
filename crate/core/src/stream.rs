@@ -197,8 +197,9 @@ pub struct Pump<C> {
     codec: C,
     /// Persistent flag for `finish`.
     ///
-    /// Does not guard transfer steps. The `Codec` contract allows
-    /// `process` after `finish`, so we skip that extra work.
+    /// Does not guard transfer steps, because a guard is extra work and
+    /// nothing requires it. The `Codec` contract leaves `process` after
+    /// `finish` to the codec. It can continue, or it can return `Err`.
     ended_by_finish: bool,
     /// Latches when `finish_to` is entered.
     ///

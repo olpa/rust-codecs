@@ -60,13 +60,13 @@ pub trait Sink {
     /// space.
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
 
-    /// Complete the destination after the codec stream has ended.
-    fn finish(&mut self) -> Result<(), Self::Error> {
+    /// Flush this sink so that all buffered data reaches its destination.
+    fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    /// Flush this sink so that all buffered data reaches its destination.
-    fn flush(&mut self) -> Result<(), Self::Error> {
+    /// Complete the destination after the codec stream has ended.
+    fn finish(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 }

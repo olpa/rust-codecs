@@ -1,15 +1,14 @@
 # cli
 
 A small command-line tool for exercising codec chains by hand, without
-writing any Rust. It wires a `--readers` list into a chain of
-[`CodecReader`](../core/README.md)s around stdin, a `--writers` list into
-a chain of `CodecWriter`s around stdout, and copies bytes from one to the
-other.
+writing any Rust. It folds the `--readers` list into one `Chain` and the
+`--writers` list into another. It then copies stdin through the reader
+chain and the writer chain to stdout.
 
 ## Usage
 
 ```
-cargo run -p cli -- [--readers <name>...] [--writers <name>...]
+cargo run -p cli -- [--engine copy|stream] [--readers <name>...] [--writers <name>...]
 ```
 
 Both lists are optional and each codec name may repeat. Reader codecs
@@ -17,6 +16,11 @@ apply in the order listed — the first name runs on the raw stdin bytes
 first, the next runs on its output, and so on. Writer codecs also apply
 in the order listed — the first name runs first, closest to the incoming
 bytes, before the result reaches stdout.
+
+`--engine` selects how the tool drives the chains. The default, `copy`,
+wraps each chain in a [`CodecReader`](../core/README.md) or `CodecWriter`
+and calls `std::io::copy`. The option `stream` calls `stream_to_stream`
+directly, with no `Read` or `Write` adapter in between.
 
 Currently known codec names: `identity`, `rot13`, `base64-enc`,
 `base64-dec`, `json-enc`.

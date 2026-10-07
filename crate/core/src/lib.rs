@@ -128,21 +128,23 @@
 //!
 //! [`Chain`] composes two codecs into one.
 //!
-//! TODO: implement example gzip + base64 after we have gzip (from `compcol`).
-//!
-//! ```ignore
-//! // TODO: gzip_enc() doesn't exist yet.
+//! ```
+//! # #[cfg(all(feature = "base64", feature = "rot13"))]
+//! # {
 //! use rust_codecs_core::base64_enc::base64_enc;
-//! use rust_codecs_core::gzip::gzip_enc;
+//! use rust_codecs_core::rot13::rot13;
 //! use rust_codecs_core::Chain;
 //! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 //! use rust_codecs_core::sources_and_sinks::vec::VecSink;
 //! use rust_codecs_core::stream_to_stream;
 //!
-//! let chain = Chain::new(gzip_enc(), base64_enc(), vec![0u8; 64]).unwrap();
+//! let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]).unwrap();
+//!
 //! let mut source = SliceSource::new(b"hello");
 //! let mut sink = VecSink::default();
 //! stream_to_stream(&mut source, chain, &mut sink).unwrap();
+//! assert_eq!(sink.into_inner(), b"nTIfoT8=");
+//! # }
 //! ```
 //!
 //! ## Parsing using early-stop codecs

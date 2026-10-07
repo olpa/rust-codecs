@@ -1,5 +1,10 @@
 //! JSON string-content escaping codec, built on the [`json_escape`] crate.
 //!
+//! The codec works on bytes. It does not check that the input is
+//! valid UTF-8. Bytes that are not valid UTF-8 pass through
+//! unchanged, so the output can be invalid JSON. Check the input
+//! first if you need valid JSON.
+//!
 //! This codec belongs in its own crate eventually. See the crate
 //! docs' note on why it lives here for now.
 //!
