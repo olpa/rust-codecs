@@ -344,17 +344,25 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         output: &mut O,
     ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
         self.check_not_failed()?;
-        // Design note: this step reads input before it drains codec
-        // output. A blocking `Source` transport can stall here. Two
-        // independent cases produce "available codec output":
+        // Design note: this step must call `input.chunk()` before
+        // `output.spare()`. Only the source can tell end of input from
+        // more input. If the sink were checked first, a sink that the
+        // output fills exactly could report `SinkExhausted` instead of
+        // success, or it could allocate memory that nobody uses.
         //
+        // The cost: a blocking `Source` transport can stall here while
+        // the output side already decides the result.
+        //
+        // - The sink is full. The drive waits for one read, then
+        //   reports `SinkExhausted`. No data is lost.
         // - The `output` buffer is smaller than `input`. Should not
         //   happen: `Source::chunk`'s doc tells implementors to
         //   return available data instead of reading more.
         // - The codec buffers bytes internally, for example atomic
         //   units in the base64 codec. With large buffers, the worst
         //   case is a one-read delay at each atomic-unit boundary.
-        //   This delay is tolerable. We do not plan to fix it.
+        //
+        // These delays are tolerable. We do not plan to fix them.
         let Some(chunk) = input.chunk().map_err(|error| {
             DriveError::new(DriveErrorKind::Source(error), TransferCounts::default())
         })?

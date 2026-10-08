@@ -102,13 +102,15 @@ arbitrary, and it would break valid codecs with very large output. The
 docs of `flush` and `finish` say "call again until `Done`", which
 assumes that the codec ends.
 
-### The reader asks for input before it drains held codec output
+### The step asks for input before it looks at the output side
 
-`Pump::transfer_step` reads input before it drains the codec. A
-blocking source can stall here. This happens for example when a codec
-holds an incomplete base64 group. The delay is one read at each
-boundary of an atomic unit. We accept it and do not plan to fix it.
-A design note in `stream.rs` explains why.
+`Pump::transfer_step` calls `input.chunk()` first. A blocking source
+can stall there in two cases.
+
+**Case 1: the codec holds output.** For example, the codec holds an
+incomplete base64 group. The output waits for the next read. The
+delay is one read at each boundary of an atomic unit. We accept it
+and do not plan to fix it. A design note in `stream.rs` explains why.
 
 To see the delay, run this in a terminal and type single-letter lines:
 `cargo run -q -p cli -- --readers base64-enc --writers base64-dec`.
@@ -116,6 +118,15 @@ The `--help` text of the CLI describes the limit.
 
 Issue #24 describes an effect that we can see in the CLI. It might be
 caused by this limit. We have not confirmed it.
+
+**Case 2: the sink is full.** In `stream_to_stream`, the sink can be
+full while the source has no buffered bytes. The drive waits for one
+read, and then it reports `SinkExhausted`. No data is lost.
+
+We accept it and do not plan to fix it. If the step calls
+`output.spare()` first, it cannot tell end of input from more input.
+Then a sink that the output fills exactly can report `SinkExhausted`
+instead of success, or it can allocate memory that nobody uses.
 
 ### `CodecWriter` has no `Drop` impl and no `#[must_use]` (decided 2026-10-07)
 
