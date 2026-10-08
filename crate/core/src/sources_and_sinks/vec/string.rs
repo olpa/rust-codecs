@@ -1,6 +1,8 @@
 //! Convenience combinators for running a codec over a borrowed
 //! string, collecting the result into an in-memory `Vec<u8>`/`String`.
 
+use core::convert::Infallible;
+
 use super::VecSink;
 use crate::{stream_to_stream, BoundaryAwareCodec, DriveError, DriveErrorKind};
 
@@ -12,18 +14,14 @@ pub enum EncodeError {
     Utf8(alloc::string::FromUtf8Error),
 }
 
-impl<EI, EO> From<DriveError<EI, EO>> for EncodeError {
-    fn from(error: DriveError<EI, EO>) -> Self {
-        match error.kind {
-            DriveErrorKind::Source(_) | DriveErrorKind::Sink(_) => {
-                unreachable!("in-memory source/sink errors are Infallible")
-            }
-            DriveErrorKind::Codec(error) => Self::Codec(error),
-            DriveErrorKind::NoProgress => Self::NoProgress,
-            // VecSink's spare capacity always grows to fit; it can
-            // never decline to offer any.
-            DriveErrorKind::SinkExhausted => unreachable!("VecSink always has spare capacity"),
-        }
+fn from_drive_error(error: DriveError<Infallible, Infallible>) -> EncodeError {
+    match error.kind {
+        DriveErrorKind::Source(never) | DriveErrorKind::Sink(never) => match never {},
+        DriveErrorKind::Codec(error) => EncodeError::Codec(error),
+        DriveErrorKind::NoProgress => EncodeError::NoProgress,
+        // VecSink's spare capacity always grows to fit; it can
+        // never decline to offer any.
+        DriveErrorKind::SinkExhausted => unreachable!("VecSink always has spare capacity"),
     }
 }
 
@@ -67,7 +65,7 @@ pub fn encode_str(
     let input = input.as_ref().as_bytes();
     let mut source = crate::sources_and_sinks::slice::SliceSource::new(input);
     let mut sink = VecSink::new(alloc::vec::Vec::with_capacity(input.len()));
-    stream_to_stream(&mut source, codec, &mut sink)?;
+    stream_to_stream(&mut source, codec, &mut sink).map_err(from_drive_error)?;
     Ok(sink.into_inner())
 }
 
