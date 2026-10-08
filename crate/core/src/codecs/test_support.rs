@@ -1,12 +1,23 @@
 //! Test-only codecs shared by more than one module of the crate.
 
+use core::fmt::Debug;
 use core::mem::MaybeUninit;
 
 use crate::uninit::copy_to_uninit;
 use crate::{
-    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, ErrorKind,
-    Progress,
+    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveErrorKind,
+    Error, ErrorKind, Progress,
 };
+
+/// Check that `kind` is a latched codec error. A latched error has
+/// the kind from `FailsAfterInner` and zero counts.
+pub(crate) fn assert_latched<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
+    let latched = Error::new(ErrorKind::CorruptStream, 0, 0);
+    assert!(
+        matches!(kind, DriveErrorKind::Codec(e) if *e == latched),
+        "expected the latched codec error, got {kind:?}",
+    );
+}
 
 /// A codec that holds output:
 /// - At the start, holds `held` of 'X'.

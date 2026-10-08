@@ -311,9 +311,8 @@ mod tests {
 
     #[test]
     fn returns_the_bytes_before_a_process_error_then_the_error() {
-        use crate::codecs::test_support::{FailsAfterInner, HoldsOutput};
+        use crate::codecs::test_support::{assert_latched, FailsAfterInner, HoldsOutput};
         use crate::sources_and_sinks::slice::SliceSource;
-        use crate::{DriveErrorKind, Error, ErrorKind};
 
         let mut source = SliceSource::new(b"abc");
         let mut pump = Pump::new(FailsAfterInner {
@@ -330,14 +329,13 @@ mod tests {
         let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"XX");
 
-        let latched = Error::new(ErrorKind::CorruptStream, 0, 0);
         for _ in 0..2 {
             let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
-            assert!(matches!(error.kind, DriveErrorKind::Codec(e) if e == latched));
+            assert_latched(&error.kind);
         }
         // The latched error comes before the empty-buffer `Ok(0)`.
         let error = boundary_aware_pump_read(&mut pump, &mut source, &mut []).unwrap_err();
-        assert!(matches!(error.kind, DriveErrorKind::Codec(e) if e == latched));
+        assert_latched(&error.kind);
         assert_eq!(pump.get_ref().calls, 1);
     }
 
