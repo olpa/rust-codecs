@@ -241,16 +241,24 @@ fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
 ///
 /// Without a caught handler, `SIGUSR1`'s default disposition is to
 /// terminate the process, so it would never reach the retry logic at
-/// all — installing a handler, even one that does nothing, is what
-/// makes the interrupted syscall return `EINTR` instead of killing the
-/// process.
+/// all.
+///
+/// The handler is installed with `sigaction` and without
+/// `SA_RESTART`. glibc's `signal()` sets `SA_RESTART`, and then the
+/// kernel restarts the interrupted `read` itself, so user space never
+/// sees `EINTR`.
 #[cfg(unix)]
 fn install_sigusr1_handler() {
     extern "C" fn no_op(_signum: libc::c_int) {}
-    // SAFETY: registers a plain C function pointer that does nothing;
-    // safe to run in a signal handler context.
+    // SAFETY: `action` is zeroed, then its mask is set to empty and its
+    // handler to a plain C function that does nothing, which is safe to
+    // run in a signal handler context. `sa_flags` stays 0, so no
+    // `SA_RESTART`.
     unsafe {
-        libc::signal(libc::SIGUSR1, no_op as *const () as libc::sighandler_t);
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = no_op as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut());
     }
 }
 
