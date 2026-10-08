@@ -128,6 +128,17 @@ We accept it and do not plan to fix it. If the step calls
 Then a sink that the output fills exactly can report `SinkExhausted`
 instead of success, or it can allocate memory that nobody uses.
 
+### A flush between two `finish` calls
+
+The `DrainCodec` contract does not define `flush` after a `finish`
+that returned `OutputFilled`. The drivers in this crate never make
+this call. A direct caller can.
+
+`Chain` then skips `first` if `first.finish` has reported `Done`.
+It still calls `second.flush`, although `second.finish` may have
+returned `OutputFilled`. We do not add more guards, because the
+caller has already left the contract.
+
 ### `CodecWriter` has no `Drop` impl and no `#[must_use]` (decided 2026-10-07)
 
 If the caller drops a `CodecWriter` without `finish`, the trailer is

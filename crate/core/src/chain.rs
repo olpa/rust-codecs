@@ -48,7 +48,8 @@ pub struct Chain<A, B, S> {
     /// Bytes in `staging[..stage_len]` are valid: produced by `first`,
     /// not drained by `second`.
     stage_len: usize,
-    /// Persistent flag for `finish`. Does not affect `process`: the
+    /// Set when `first.finish` reports `Done`. Then `flush` and
+    /// `finish` skip `first`. Does not affect `process`: the
     /// `Codec` contract does not specify `process` after `finish`,
     /// so we skip that work.
     first_done: bool,
@@ -156,14 +157,14 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// still upstream of it.
     ///
     /// Flushing the chain follows the same order, with `flush` instead
-    /// of `finish`. A flush does not read or set `first_done`.
+    /// of `finish`.
     fn drain_through(
         &mut self,
         output: &mut [MaybeUninit<u8>],
         mode: DrainMode,
     ) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
-        let mut first_done = mode == DrainMode::Finish && self.first_done;
+        let mut first_done = self.first_done;
 
         loop {
             if !first_done {
