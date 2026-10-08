@@ -144,6 +144,42 @@ Every `Codec` already has a `BoundaryAwareCodec` implementation (it
 never returns `Boundary`). Drivers on the input side (`CodecReader`,
 `stream_to_stream`) accept either kind, without change.
 
+## Lending a codec as `&mut`
+
+A driver takes ownership of the codec that it gets. To keep the
+codec, the caller lends it as `&mut`:
+
+```rust
+let mut checksum = ChecksumCodec::default();
+stream_to_stream(&mut source, &mut checksum, &mut sink)?;
+let value = checksum.value();
+```
+
+For a plain `Codec`, you do not need to do anything. The crate
+implements `Codec` and `DrainCodec` for `&mut C`.
+
+The crate cannot provide a `BoundaryAwareCodec` impl for `&mut C`. It
+would conflict with the blanket impl that makes every `Codec` a
+`BoundaryAwareCodec`.
+
+For a `BoundaryAwareCodec`, add this forwarding impl to your crate:
+
+```rust
+impl BoundaryAwareCodec for &mut MyBoundaryAwareCodec {
+    fn process(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        (**self).process(input, output)
+    }
+}
+```
+
+If you forget the impl, the compiler error can mislead you. It says
+that `Codec` is not implemented for `MyBoundaryAwareCodec`. Do not
+implement `Codec`. Add the forwarding impl instead.
+
 ## Helpers for the output buffer
 
 The output buffer is `&mut [MaybeUninit<u8>]`, not `&mut [u8]`. The

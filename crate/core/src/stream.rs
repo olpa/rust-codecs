@@ -853,6 +853,26 @@ mod tests {
     }
 
     #[test]
+    fn stream_to_stream_accepts_a_borrowed_codec() {
+        let mut input = SliceSource::new(b"ab");
+        let mut output = OneByteWindowSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut codec = HoldsOutput {
+            per_input: 1,
+            trailer: b"TAIL",
+            ..Default::default()
+        };
+
+        super::stream_to_stream(&mut input, &mut codec, &mut output).unwrap();
+
+        // The caller still owns the codec and can read its state.
+        assert_eq!(&output.bytes[..output.written], b"XXTAIL");
+        assert_eq!(codec.trailer_written, 4);
+    }
+
+    #[test]
     fn a_pair_that_truly_cannot_progress_reports_no_progress() {
         let mut input = SliceSource::new(b"x");
         let mut output = NullSink;

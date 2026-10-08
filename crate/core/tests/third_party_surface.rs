@@ -1,8 +1,9 @@
 //! This file proves that `rust_codecs_core`'s public traits form a
 //! usable surface from outside the crate. A third party can implement
 //! `Source`, `Sink`, `Codec`, and `BoundaryAwareCodec`. It can also
-//! drive them through `Pump` and `shared_io`, using only the public
-//! API.
+//! drive them through `Pump`, `shared_io`, and `stream_to_stream`,
+//! using only the public API. It can lend a codec as `&mut` and keep
+//! it after the drive.
 //!
 //! This is not a correctness test. It builds real objects and makes
 //! one call on each. Each call sits behind `black_box`, so the
@@ -17,8 +18,8 @@ use rust_codecs_core::sources_and_sinks::shared_io::{
     boundary_aware_pump_read, pump_finish, pump_write,
 };
 use rust_codecs_core::{
-    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveError, Error,
-    Progress, Pump, Sink, Source,
+    stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress,
+    DriveError, Error, Progress, Pump, Sink, Source,
 };
 
 const DUMMY: &[u8] = b"dummy";
@@ -105,6 +106,21 @@ impl BoundaryAwareCodec for DummyBoundaryCodec {
             consumed: input.len(),
             written: 0,
         })
+    }
+}
+
+/// Lets a caller lend `DummyBoundaryCodec` as `&mut`. The crate gives
+/// `&mut C` a `Codec` impl, but it cannot give `&mut C` a
+/// `BoundaryAwareCodec` impl, because of the blanket impl. So the
+/// author of a `BoundaryAwareCodec`-only type writes this forwarding
+/// impl. The `DrainCodec` part comes from the crate.
+impl BoundaryAwareCodec for &mut DummyBoundaryCodec {
+    fn process(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        (**self).process(input, output)
     }
 }
 
@@ -242,4 +258,28 @@ fn public_interfaces_are_instantiatable() {
     let mut writer = DummyWriterWrapper::new(DummyWriter::new(), DummyCodec);
     black_box(writer.write(DUMMY).unwrap());
     black_box(writer.finish().unwrap());
+}
+
+#[test]
+fn a_codec_can_be_lent_as_mut() {
+    let mut out = [0u8; DUMMY.len()];
+
+    let mut plain_codec = DummyCodec;
+    let mut writer = DummyWriterWrapper::new(DummyWriter::new(), &mut plain_codec);
+    black_box(writer.write(DUMMY).unwrap());
+    black_box(writer.finish().unwrap());
+    black_box(&mut plain_codec);
+
+    let mut boundary_codec = DummyBoundaryCodec;
+    let mut reader = DummyReaderWrapper::new(DummyReader::new(), &mut boundary_codec);
+    black_box(reader.read(&mut out).unwrap());
+    black_box(
+        stream_to_stream(
+            &mut DummyReader::new(),
+            &mut boundary_codec,
+            &mut DummyWriter::new(),
+        )
+        .unwrap(),
+    );
+    black_box(&mut boundary_codec);
 }

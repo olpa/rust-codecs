@@ -311,8 +311,26 @@ impl TransferCounts {
 }
 
 // ----
-// Boxing support
+// Borrowing and boxing support
 // ----
+
+// Lets a `&mut C` stand in anywhere a `Codec` is expected, so the
+// caller keeps the codec.
+impl<C: DrainCodec + ?Sized> DrainCodec for &mut C {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        (**self).flush(output)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        (**self).finish(output)
+    }
+}
+
+impl<C: Codec + ?Sized> Codec for &mut C {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        (**self).process(input, output)
+    }
+}
 
 // Lets a `Box<dyn Codec>` stand in anywhere a `Codec` is expected.
 #[cfg(feature = "alloc")]
