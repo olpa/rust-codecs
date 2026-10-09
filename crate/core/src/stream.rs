@@ -536,6 +536,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                     let progress = match step(self, &mut []) {
                         Ok(progress) => progress,
                         Err(error) => {
+                            let error = error.validated(0, 0).unwrap_or_else(|violation| violation);
                             self.latch_failure(&error);
                             return Err(DriveError::new(
                                 DriveErrorKind::Codec(error),
