@@ -237,10 +237,6 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
         self.0.commit(amount)
     }
 
-    fn finish(&mut self) -> Result<(), Self::Error> {
-        self.0.finish()
-    }
-
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.0.flush()
     }

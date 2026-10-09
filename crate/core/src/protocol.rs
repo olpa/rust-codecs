@@ -64,11 +64,6 @@ pub trait Sink {
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
-
-    /// Complete the destination.
-    fn finish(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
 }
 
 // ----

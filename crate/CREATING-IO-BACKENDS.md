@@ -21,7 +21,6 @@ pub trait Sink {
     fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error>;
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
     fn flush(&mut self) -> Result<(), Self::Error> { Ok(()) }
-    fn finish(&mut self) -> Result<(), Self::Error> { Ok(()) }
 }
 ```
 
@@ -38,8 +37,8 @@ not committed may be overwritten.
 there is no room left. Neither returns `Some` of an empty slice. Return
 `None` instead.
 
-`Sink::flush` and `Sink::finish` default to a no-op. Override them
-if your transport buffers data.
+`Sink::flush` defaults to a no-op. Override it if your transport
+buffers data.
 
 A custom `Source`/`Sink` can be a thin wrapper over `shared_io`'s
 template implementation, which provides:

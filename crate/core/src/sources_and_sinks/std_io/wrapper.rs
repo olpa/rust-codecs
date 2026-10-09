@@ -224,8 +224,8 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// `DrainProgress::Done`. This writes any remaining trailer,
     /// checksum, or padding bytes.
     ///
-    /// Then call [`Sink::finish`](crate::Sink::finish), which flushes
-    /// the wrapped writer, and return ownership of the writer.
+    /// Then flush the wrapped writer, and return ownership of the
+    /// writer.
     ///
     /// You must call this method to complete the output. Dropping a
     /// `CodecWriter` without calling `finish` loses any remaining

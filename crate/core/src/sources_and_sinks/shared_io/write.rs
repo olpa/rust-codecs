@@ -59,7 +59,7 @@ pub fn pump_flush<O: Sink, C: Codec>(
 }
 
 /// Drain all the bytes that the codec must still write into
-/// `output`. Then finish `output`. The codec stream ends. The
+/// `output`. Then flush `output`. The codec stream ends. The
 /// function does not close `output`.
 ///
 /// This is the transport-independent core of a `finish` method.
@@ -76,7 +76,7 @@ pub fn pump_finish<O: Sink, C: Codec>(
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.finish_to(output)? {
-        PumpDrain::Done { written } => output.finish().map_err(|error| {
+        PumpDrain::Done { written } => output.flush().map_err(|error| {
             DriveError::new(
                 DriveErrorKind::Sink(error),
                 TransferCounts::only_written(written),
