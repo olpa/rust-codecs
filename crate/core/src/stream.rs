@@ -194,10 +194,11 @@ pub(crate) enum PumpDrain {
 /// on top of
 /// [`sources_and_sinks::shared_io`](crate::sources_and_sinks::shared_io),
 /// whose functions must name `Pump` in their signatures.
-///
-/// `C` is generic rather than fixed to [`BoundaryAwareCodec`], since a
-/// trait is not a sized type a field can hold. A caller who wants a
-/// boxed codec can still use `Pump<Box<dyn Codec>>`.
+//
+// Design note: `C` is generic instead of `dyn BoundaryAwareCodec`,
+// because a trait has no fixed size, so a field cannot hold it. A caller
+// who activated the `alloc` feature can generalize with a box:
+// `Pump<Box<dyn Codec>>`.
 pub struct Pump<C> {
     codec: C,
     /// Persistent flag for `finish`.
