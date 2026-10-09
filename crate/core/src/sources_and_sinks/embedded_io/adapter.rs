@@ -184,10 +184,6 @@ impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
             || WriteError::ZeroWrite,
         )
     }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush().map_err(WriteError::Io)
-    }
 }
 
 /// A `Sink` over `embedded_io::Write`, staging writes in an owned
@@ -235,10 +231,6 @@ impl<W: Write, S: AsMut<[u8]>> Sink for EmbeddedSink<W, S> {
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         self.0.commit(amount)
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush()
     }
 }
 

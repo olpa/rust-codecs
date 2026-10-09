@@ -185,7 +185,9 @@ fn run_io<R: BufRead, W: Write>(
         CodecWriter::new(output, writer_codec, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
-    writer.finish().map_err(|e| e.to_string())
+    let mut output = writer.finish().map_err(|e| e.to_string())?;
+    output.flush().map_err(|e| e.to_string())?;
+    Ok(output)
 }
 
 /// Same end-to-end behavior as `run_io`, but drives the composed chain
@@ -209,7 +211,9 @@ fn run_io_stream<R: BufRead, W: Write>(
     let mut sink = StdSink::new(output, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
     stream_to_stream(&mut source, codec, &mut sink).map_err(|e| error_chain(&e))?;
-    Ok(sink.into_inner())
+    let mut output = sink.into_inner();
+    output.flush().map_err(|e| e.to_string())?;
+    Ok(output)
 }
 
 /// Print an error and all its sources, separated by ": ".

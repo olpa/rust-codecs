@@ -142,10 +142,6 @@ impl<W: Write> RetryingWrite for StdWriter<W> {
     fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
         self.0.write_all(buf)
     }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush()
-    }
 }
 
 /// A `Sink` over `std::io::Write`, staging writes in an owned scratch
@@ -193,10 +189,6 @@ impl<W: Write, S: AsMut<[u8]>> Sink for StdSink<W, S> {
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         self.0.commit(amount)
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush()
     }
 }
 

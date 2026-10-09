@@ -59,11 +59,6 @@ pub trait Sink {
     /// `debug_assert!`. They also clamp the amount to the length of that
     /// space.
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
-
-    /// Flush this sink so that all buffered data reaches its destination.
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
 }
 
 // ----

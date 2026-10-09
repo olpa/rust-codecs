@@ -10,8 +10,6 @@ pub trait RetryingWrite {
     type Error;
 
     fn retrying_write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error>;
-
-    fn flush(&mut self) -> Result<(), Self::Error>;
 }
 
 /// A `Sink` over any [`RetryingWrite`], staging writes in an owned
@@ -82,10 +80,6 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
         self.offered = 0;
         Ok(())
     }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.inner.flush()
-    }
 }
 
 #[cfg(test)]
@@ -95,15 +89,13 @@ mod tests {
     use crate::Sink;
     use core::convert::Infallible;
 
-    /// A writer double that records the bytes it gets and counts the
-    /// `flush` calls on it, to prove that `ScratchSink` actually
-    /// reaches the wrapped writer. Panics if a test writes more than
-    /// 32 bytes.
+    /// A writer double that records the bytes it gets, to prove that
+    /// `ScratchSink` actually reaches the wrapped writer. Panics if a
+    /// test writes more than 32 bytes.
     #[derive(Default)]
     struct RecordingWriter {
         bytes: [u8; 32],
         written: usize,
-        flushes: usize,
     }
 
     impl RetryingWrite for RecordingWriter {
@@ -113,11 +105,6 @@ mod tests {
             let end = self.written + buf.len();
             self.bytes[self.written..end].copy_from_slice(buf);
             self.written = end;
-            Ok(())
-        }
-
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.flushes += 1;
             Ok(())
         }
     }
@@ -163,12 +150,5 @@ mod tests {
         output.commit(5).unwrap();
         let inner = output.get_ref();
         assert_eq!(inner.written, 4);
-    }
-
-    #[test]
-    fn flush_flushes_the_inner_writer() {
-        let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 4]).unwrap();
-        output.flush().unwrap();
-        assert_eq!(output.get_ref().flushes, 1);
     }
 }

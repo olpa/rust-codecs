@@ -1,10 +1,10 @@
 // The functions here are trivial.
 // - Technical goal: a caller forwards execution to one of them, so
-//   that the body of a caller (a `Write::write`/`finish`/`flush`
+//   that the codec part of a caller (a `Write::write`/`finish`/`flush`
 //   method) is only one line.
 // - Reason: implementors of an io backend don't need to learn the
 //   gory details of what to call in which order, and don't need to
-//   copy-paste the drain/finalize/sync sequencing across backends.
+//   copy-paste the drain/finalize sequencing across backends.
 
 use core::convert::Infallible;
 
@@ -29,8 +29,7 @@ pub fn pump_write<O: Sink, C: Codec>(
 }
 
 /// Flush the codec into `output`. The codec decides how much of its
-/// held output to write. Then flush `output`. The codec stream does
-/// not end.
+/// held output to write. The codec stream does not end.
 ///
 /// This is the transport-independent core of a `Write::flush` impl.
 ///
@@ -45,12 +44,7 @@ pub fn pump_flush<O: Sink, C: Codec>(
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.flush_to(output)? {
-        PumpDrain::Done { written } => output.flush().map_err(|error| {
-            DriveError::new(
-                DriveErrorKind::Sink(error),
-                TransferCounts::only_written(written),
-            )
-        }),
+        PumpDrain::Done { .. } => Ok(()),
         PumpDrain::SinkExhausted { written } => Err(DriveError::new(
             DriveErrorKind::SinkExhausted,
             TransferCounts::only_written(written),
@@ -59,8 +53,7 @@ pub fn pump_flush<O: Sink, C: Codec>(
 }
 
 /// Drain all the bytes that the codec must still write into
-/// `output`. Then flush `output`. The codec stream ends. The
-/// function does not close `output`.
+/// `output`. The codec stream ends.
 ///
 /// This is the transport-independent core of a `finish` method.
 /// That method consumes the wrapper and gives back its endpoint.
@@ -76,12 +69,7 @@ pub fn pump_finish<O: Sink, C: Codec>(
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.finish_to(output)? {
-        PumpDrain::Done { written } => output.flush().map_err(|error| {
-            DriveError::new(
-                DriveErrorKind::Sink(error),
-                TransferCounts::only_written(written),
-            )
-        }),
+        PumpDrain::Done { .. } => Ok(()),
         PumpDrain::SinkExhausted { written } => Err(DriveError::new(
             DriveErrorKind::SinkExhausted,
             TransferCounts::only_written(written),
@@ -146,9 +134,8 @@ mod tests {
             // at the same position.
             let mut sink = SliceSink::new(&mut bytes);
 
-            // Regression: `pump_flush` only flushed the transport.
-            // It must also drain the codec's held output, without
-            // finalizing it.
+            // `pump_flush` must drain the codec's held output,
+            // without finalizing it.
             pump_flush(&mut pump, &mut sink).unwrap();
         }
         assert_eq!(bytes, *b"XXXaaaaa");

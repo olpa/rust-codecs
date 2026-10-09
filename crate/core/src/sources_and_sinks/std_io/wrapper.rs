@@ -224,8 +224,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// `DrainProgress::Done`. This writes any remaining trailer,
     /// checksum, or padding bytes.
     ///
-    /// Then flush the wrapped writer, and return ownership of the
-    /// writer.
+    /// Then return ownership of the writer.
     ///
     /// You must call this method to complete the output. Dropping a
     /// `CodecWriter` without calling `finish` loses any remaining
@@ -250,6 +249,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)?;
+        self.output.get_mut().flush()
     }
 }

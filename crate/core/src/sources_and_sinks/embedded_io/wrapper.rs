@@ -242,8 +242,8 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         self.pump.get_mut()
     }
 
-    /// Drain the codec, flush the sink, and hand back ownership of
-    /// the writer. Same behavior as
+    /// Drain the codec and hand back ownership of the writer. Same
+    /// behavior as
     /// [`std_io::CodecWriter::finish`](crate::sources_and_sinks::std_io::CodecWriter::finish).
     pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
         pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
@@ -268,6 +268,7 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
+        self.output.get_mut().flush().map_err(EmbeddedError::Io)
     }
 }
