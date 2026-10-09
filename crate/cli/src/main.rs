@@ -16,7 +16,7 @@ use std::io::{self, BufRead, Write};
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
 };
-use rust_codecs_core::{stream_to_stream, Chain, Codec};
+use rust_codecs_core::{stream_to_stream, Chain, Codec, Sink};
 
 /// Staging buffer size for each link in a `--readers`/`--writers` chain.
 const STAGING: usize = 4 * 1024;
@@ -209,6 +209,7 @@ fn run_io_stream<R: BufRead, W: Write>(
     let mut sink = StdSink::new(output, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
     stream_to_stream(&mut source, codec, &mut sink).map_err(|e| error_chain(&e))?;
+    sink.finish().map_err(|e| e.to_string())?;
     Ok(sink.into_inner())
 }
 
