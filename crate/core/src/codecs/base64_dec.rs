@@ -115,10 +115,18 @@ impl<E: Engine> Codec for Base64Dec<E> {
             while in_pos < input.len() && input[in_pos].is_ascii_whitespace() {
                 in_pos += 1;
             }
-            let run_end = input[in_pos..]
+            // Scan only the input that the free output can take, plus
+            // two groups for a partial group and pending output.
+            // Otherwise, each call with a small output scans the full
+            // remaining input, and the total time is quadratic. A run
+            // that stops at the window end is not a problem: the next
+            // loop iteration continues it.
+            let window = ((output.len() - out_pos) / GROUP + 2) * ENCODED_GROUP;
+            let scan_end = input.len().min(in_pos + window);
+            let run_end = input[in_pos..scan_end]
                 .iter()
                 .position(u8::is_ascii_whitespace)
-                .map_or(input.len(), |len| in_pos + len);
+                .map_or(scan_end, |len| in_pos + len);
             // Call `process_run` also for an empty run. It writes the
             // pending output.
             match self.process_run(&input[in_pos..run_end], &mut output[out_pos..]) {
