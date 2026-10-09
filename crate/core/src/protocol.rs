@@ -65,7 +65,7 @@ pub trait Sink {
         Ok(())
     }
 
-    /// Complete the destination after the codec stream has ended.
+    /// Complete the destination.
     fn finish(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }

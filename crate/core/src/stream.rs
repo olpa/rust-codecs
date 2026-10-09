@@ -112,6 +112,9 @@ where
 ///
 /// Returns the bytes consumed from `input` and written to `output`.
 /// On failure, the [`DriveError`] has these counts too.
+///
+/// After a successful drive, the function calls [`Sink::flush`] on
+/// `output`. It does not call [`Sink::finish`].
 pub fn stream_to_stream<I, O, C>(
     input: &mut I,
     codec: C,
@@ -139,8 +142,10 @@ where
     };
     match drained {
         PumpDrain::Done { .. } => {
+            // Do not call `finish`. Only the caller knows when the
+            // output is complete. More drives can follow.
             output
-                .finish()
+                .flush()
                 .map_err(|error| DriveError::new(DriveErrorKind::Sink(error), moved))?;
             Ok(moved)
         }
