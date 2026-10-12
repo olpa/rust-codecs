@@ -227,18 +227,22 @@ impl<E: Engine> Base64Dec<E> {
             // foreign API rather than reading through `output`'s
             // `MaybeUninit<u8>` elements one at a time.
             let dst = zero_init_mut(&mut output[out_pos..out_pos + out_bytes]);
-            let written = self
+            // If the block is corrupt, do not report an error yet. The
+            // group loop below decodes the valid groups again, one by
+            // one, and reports the error at the corrupt group.
+            if let Ok(written) = self
                 .engine
                 .decode_slice(&input[in_pos..in_pos + in_bytes], dst)
-                .map_err(|_| Error::new(ErrorKind::CorruptStream, in_pos, out_pos))?;
-            out_pos += written;
-            in_pos += in_bytes;
-            if written < out_bytes {
-                self.done = true;
-                if in_pos < input.len() {
-                    return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
+            {
+                out_pos += written;
+                in_pos += in_bytes;
+                if written < out_bytes {
+                    self.done = true;
+                    if in_pos < input.len() {
+                        return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
+                    }
+                    return Ok(Progress::InputConsumed { written: out_pos });
                 }
-                return Ok(Progress::InputConsumed { written: out_pos });
             }
         }
 
@@ -246,7 +250,8 @@ impl<E: Engine> Base64Dec<E> {
         // output's remainder is under one decoded group (decode
         // through pending_output to fill it completely) -- or, once
         // one of them turns out to carry padding, because the rest
-        // needs to be checked for trailing input instead of decoded.
+        // needs to be checked for trailing input instead of decoded
+        // -- or because the bulk block was corrupt.
         while input.len() - in_pos >= ENCODED_GROUP {
             let next_group: [u8; ENCODED_GROUP] =
                 input[in_pos..in_pos + ENCODED_GROUP].try_into().unwrap();
@@ -541,5 +546,22 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.consumed, 5);
         assert_eq!(error.written, 3);
+    }
+
+    #[test]
+    fn error_counts_include_earlier_groups_of_the_same_run() {
+        // "YWJj" decodes to "abc". Then "A=BC" is corrupt.
+        // The decoder tries to decode both groups as one block. The error
+        // must report the counts as close to the corrupt group as possible,
+        // not the counts from before the block.
+        let mut dec = base64_dec();
+        let mut out = [0u8; 8];
+        let error = dec
+            .process(b"YWJjA=BC", as_uninit_mut(&mut out))
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.consumed, 4);
+        assert_eq!(error.written, 3);
+        assert_eq!(&out[..3], b"abc");
     }
 }
