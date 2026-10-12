@@ -365,16 +365,15 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         else {
             return Ok(PumpTransfer::SourceExhausted(TransferCounts::default()));
         };
-        let Some(spare) = output.spare().map_err(|error| {
+        let spare = output.spare().map_err(|error| {
             DriveError::new(DriveErrorKind::Sink(error), TransferCounts::default())
-        })?
-        else {
-            return Ok(PumpTransfer::SinkExhausted(TransferCounts::default()));
-        };
+        })?;
         // A call may still progress with an empty `spare` (e.g. a
         // codec that only consumes input). So an empty slice is not
         // rejected up front, zero bytes moved on both sides without
         // ending the stream is what marks a genuine stall.
+        let sink_full = spare.is_none();
+        let spare = spare.unwrap_or(&mut []);
         let progress = match boundary_aware_step(&mut self.codec, chunk, spare) {
             Ok(progress) => progress,
             Err(error) => {
@@ -421,6 +420,9 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             }
         };
         if moved.consumed == 0 && moved.written == 0 && !boundary {
+            if sink_full {
+                return Ok(PumpTransfer::SinkExhausted(TransferCounts::default()));
+            }
             return Err(DriveError::new(
                 DriveErrorKind::NoProgress,
                 TransferCounts::default(),
@@ -611,10 +613,10 @@ mod tests {
         HoldsOutput, Scripted,
     };
     use crate::identity::identity;
-    use crate::sources_and_sinks::slice::SliceSource;
+    use crate::sources_and_sinks::slice::{SliceSink, SliceSource};
     use crate::{
         BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveErrorKind, Error, ErrorKind,
-        Progress, Sink, TransferCounts,
+        Progress, Sink, Source, TransferCounts,
     };
 
     /// A `Sink` that always offers a zero-length slice and never
@@ -726,6 +728,27 @@ mod tests {
             self.ok_commits -= 1;
             self.written += amount;
             Ok(())
+        }
+    }
+
+    /// A `Source` that gives a maximum of `chunk_size` bytes in each
+    /// chunk.
+    struct SplitSource<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+        chunk_size: usize,
+    }
+
+    impl Source for SplitSource<'_> {
+        type Error = core::convert::Infallible;
+
+        fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+            let end = (self.pos + self.chunk_size).min(self.bytes.len());
+            Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..end]))
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.pos += amount;
         }
     }
 
@@ -1226,6 +1249,37 @@ mod tests {
                 written: 6,
             }
         );
+    }
+
+    #[test]
+    fn stream_to_stream_finds_an_in_band_end_when_the_output_fills_the_sink() {
+        for chunk_size in [3, 2] {
+            let mut input = SplitSource {
+                bytes: b"ab|",
+                pos: 0,
+                chunk_size,
+            };
+            let mut bytes = [0; 2];
+            let mut output = SliceSink::new(&mut bytes);
+            let codec = EndsAtBar {
+                inner: identity(),
+                finish_calls: 0,
+            };
+
+            let counts = super::stream_to_stream(&mut input, codec, &mut output)
+                .unwrap_or_else(|error| panic!("chunk_size {chunk_size}: {error:?}"));
+
+            // "ab" fills the sink. The "|" needs no room in the sink,
+            // so the result must not depend on where the chunk ends.
+            assert_eq!(
+                counts,
+                TransferCounts {
+                    consumed: 3,
+                    written: 2,
+                }
+            );
+            assert_eq!(&bytes, b"ab");
+        }
     }
 
     #[test]
