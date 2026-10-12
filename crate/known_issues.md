@@ -79,6 +79,12 @@ a rewrite there. Check both cases again when you rewrite it.
 `JsonEnc` also passes invalid UTF-8 through unchanged. The output can
 be invalid JSON. The module docs say so.
 
+### `Base64Dec` ignores whitespace with every engine
+
+`Base64Dec` ignores whitespace for every engine. An alphabet with a
+space does not work with it. No common alphabet uses a space, so we
+document the limit and do not add an option.
+
 ### The drivers trust byte counts
 
 The drivers trust the counts that a codec, a source, or a sink reports.

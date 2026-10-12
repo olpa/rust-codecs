@@ -33,6 +33,9 @@ pub struct Base64Dec<E: Engine = GeneralPurpose> {
 impl<E: Engine> Base64Dec<E> {
     /// Build a [`Base64Dec`] that decodes with a caller-supplied `Engine`
     /// (e.g. `base64::engine::general_purpose::URL_SAFE_NO_PAD`).
+    ///
+    /// The decoder ignores ASCII whitespace. Do not use an alphabet
+    /// that contains a space.
     pub fn with_engine(engine: E) -> Self {
         Self {
             engine,
