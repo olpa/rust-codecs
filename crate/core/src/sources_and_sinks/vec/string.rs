@@ -4,7 +4,7 @@
 use core::convert::Infallible;
 
 use super::VecSink;
-use crate::{stream_to_stream, BoundaryAwareCodec, DriveError, DriveErrorKind};
+use crate::{stream_to_stream, Codec, DriveError, DriveErrorKind};
 
 /// Everything that can go wrong in [`encode_str`]/[`encode_string`].
 #[derive(Debug)]
@@ -59,7 +59,7 @@ impl From<alloc::string::FromUtf8Error> for EncodeError {
 ///
 /// Behind the `alloc` feature flag.
 pub fn encode_str(
-    codec: impl BoundaryAwareCodec,
+    codec: impl Codec,
     input: impl AsRef<str>,
 ) -> Result<alloc::vec::Vec<u8>, EncodeError> {
     let input = input.as_ref().as_bytes();
@@ -75,7 +75,7 @@ pub fn encode_str(
 ///
 /// Behind the `alloc` feature flag.
 pub fn encode_string(
-    codec: impl BoundaryAwareCodec,
+    codec: impl Codec,
     input: impl AsRef<str>,
 ) -> Result<alloc::string::String, EncodeError> {
     Ok(alloc::string::String::from_utf8(encode_str(codec, input)?)?)
