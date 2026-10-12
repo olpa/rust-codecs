@@ -389,6 +389,17 @@ mod tests {
         assert!(err.contains("bogus"));
     }
 
+    #[test]
+    fn compose_handles_one_name_and_no_names() {
+        let input = b"Hello, World! 123";
+
+        let one = compose(&names(&["rot13"])).unwrap();
+        assert_eq!(collect(one, input), collect(rot13(), input));
+
+        let none = compose(&[]).unwrap();
+        assert_eq!(collect(none, input), input);
+    }
+
     /// A `Write` sink that shares its buffer via `Rc<RefCell<_>>`, so a
     /// clone kept by the test can inspect what's arrived without going
     /// through `CodecWriter::finish` (which consumes the writer).
@@ -408,10 +419,13 @@ mod tests {
     #[test]
     fn writer_stack_is_interactive() {
         // `--writers rot13 identity` runs through a `Chain` in
-        // `compose`. Writing one line and flushing must
-        // deliver the transformed bytes to the sink right away — the
-        // return-clean guarantee `Chain` provides — without ever
-        // calling `finish`.
+        // `compose`. After one write and a flush, the sink has the
+        // transformed bytes, and `finish` was not called.
+        //
+        // `rot13` holds no bytes back, so the write alone delivers them.
+        // This test does not show that `flush` delivers held bytes. The
+        // core test `flush_delivers_already_produced_output_without_finalizing_the_codec`
+        // checks that.
         let writer_codec = compose(&names(&["rot13", "identity"])).unwrap();
         let sink = SharedSink::default();
         let mut writer = rust_codecs_core::sources_and_sinks::std_io::CodecWriter::new(
