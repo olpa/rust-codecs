@@ -183,9 +183,9 @@ impl<R: BufRead, C: BoundaryAwareCodec> Read for BufReadCodecReader<R, C> {
 /// The caller must explicitly call [`finish`](CodecWriter::finish) to
 /// finalize the codec.
 ///
-/// Each call to `write` sends the codec output to the wrapped writer
-/// immediately. Performance can decrease if the calls are small and
-/// the wrapped writer has no buffer.
+/// `CodecWriter` sends the codec output to the wrapped writer at each
+/// call to `write`. If the calls are small and the wrapped writer has
+/// no buffer, performance can decrease.
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,
     pump: Pump<C>,
