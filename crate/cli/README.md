@@ -18,9 +18,12 @@ in the order listed — the first name runs first, closest to the incoming
 bytes, before the result reaches stdout.
 
 `--engine` selects how the tool drives the chains. The default, `copy`,
-wraps each chain in a [`CodecReader`](../core/README.md) or `CodecWriter`
-and calls `std::io::copy`. The option `stream` calls `stream_to_stream`
-directly, with no `Read` or `Write` adapter in between.
+wraps the reader chain in a [`BufReadCodecReader`](../README.md) over the
+locked stdin, and the writer chain in a `CodecWriter`. Then it calls
+`std::io::copy`. The `BufReadCodecReader` reads from the stdin buffer
+directly, so it needs no buffer of its own. The option `stream` calls
+`stream_to_stream` directly, over a `BufReadSource` and a `StdSink`,
+with no `Read` or `Write` adapter in between.
 
 Currently known codec names: `identity`, `rot13`, `base64-enc`,
 `base64-dec`, `json-enc`.

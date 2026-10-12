@@ -28,9 +28,9 @@ runnable examples:
 
 ## Trying it from the command line
 
-The [`cli`](./cli/README.md) crate wires named codecs into a
-`CodecReader`/`CodecWriter` chain over stdin/stdout. Use it to try
-a chain without writing Rust code:
+The [`cli`](./cli/README.md) crate folds named codecs into chains. It
+runs them through a `BufReadCodecReader` and a `CodecWriter` over
+stdin and stdout. Use it to try a chain without writing Rust code:
 
 ```
 echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
