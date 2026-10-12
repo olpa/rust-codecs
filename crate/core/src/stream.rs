@@ -607,7 +607,8 @@ mod tests {
 
     use super::{Pump, PumpDrain, PumpStop, PumpTransfer};
     use crate::codecs::test_support::{
-        assert_latched, EndsAtBar, FailsAfterInner, HoldsOutput, Scripted,
+        assert_latched, assert_overclaim_rejected, EndsAtBar, FailsAfterInner, FailsWithOverclaim,
+        HoldsOutput, Scripted,
     };
     use crate::identity::identity;
     use crate::sources_and_sinks::slice::SliceSource;
@@ -837,6 +838,23 @@ mod tests {
         let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
         assert_latched(&error.kind);
         assert_eq!(pump.get_ref().calls, 1);
+        assert_eq!(output.written, 0);
+    }
+
+    #[test]
+    fn a_process_error_with_an_overclaim_moves_no_bytes() {
+        let mut input = SliceSource::new(b"abc");
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsWithOverclaim);
+
+        let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
+
+        assert_overclaim_rejected(&error.kind);
+        assert_eq!(error.moved, TransferCounts::default());
+        assert_eq!(input.consumed(), 0);
         assert_eq!(output.written, 0);
     }
 
@@ -1074,6 +1092,36 @@ mod tests {
         assert_latched(&error.kind);
         assert_eq!(pump.get_ref().calls, 1);
         assert_eq!(output.written, 0);
+    }
+
+    #[test]
+    fn a_flush_error_with_an_overclaim_is_rejected_when_the_sink_has_room() {
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsWithOverclaim);
+
+        let error = pump.flush_to(&mut output).unwrap_err();
+
+        assert_overclaim_rejected(&error.kind);
+        assert_eq!(error.moved, TransferCounts::default());
+        assert_eq!(output.written, 0);
+    }
+
+    #[test]
+    fn a_flush_error_with_an_overclaim_is_rejected_when_the_sink_has_no_room() {
+        // The sink is full, so the codec gets an empty slice.
+        let mut output = OneByteWindowSink {
+            bytes: [0; 8],
+            written: 8,
+        };
+        let mut pump = Pump::new(FailsWithOverclaim);
+
+        let error = pump.flush_to(&mut output).unwrap_err();
+
+        assert_overclaim_rejected(&error.kind);
+        assert_eq!(error.moved, TransferCounts::default());
     }
 
     // ----

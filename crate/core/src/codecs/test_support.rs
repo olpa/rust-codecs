@@ -19,6 +19,16 @@ pub(crate) fn assert_latched<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>
     );
 }
 
+/// Check that `kind` is the error that replaces an overclaim:
+/// `ByteCountClaim` with zero counts.
+pub(crate) fn assert_overclaim_rejected<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
+    let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
+    assert!(
+        matches!(kind, DriveErrorKind::Codec(e) if *e == violation),
+        "expected ByteCountClaim with zero counts, got {kind:?}",
+    );
+}
+
 /// A codec that holds output:
 /// - At the start, holds `held` of 'X'.
 /// - For each input byte, adds `per_input` of 'X' to hold.
@@ -152,6 +162,35 @@ impl BoundaryAwareCodec for Scripted {
         _output: &mut [MaybeUninit<u8>],
     ) -> Result<BoundaryAwareProgress, Error> {
         Ok(self.process)
+    }
+}
+
+/// Fails every call. The error claims more bytes than the buffers of
+/// the call hold:
+/// - `process` claims 1 byte more than the input and 1 byte more
+///   than the output.
+/// - `flush` and `finish` claim 1 byte more than the output.
+///
+/// A driver must replace this error with `ByteCountClaim`.
+pub(crate) struct FailsWithOverclaim;
+
+impl DrainCodec for FailsWithOverclaim {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Err(Error::new(ErrorKind::CorruptStream, 0, output.len() + 1))
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Err(Error::new(ErrorKind::CorruptStream, 0, output.len() + 1))
+    }
+}
+
+impl Codec for FailsWithOverclaim {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        Err(Error::new(
+            ErrorKind::CorruptStream,
+            input.len() + 1,
+            output.len() + 1,
+        ))
     }
 }
 

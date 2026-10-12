@@ -337,14 +337,15 @@ mod tests {
     use super::Chain;
     use crate::base64_dec::base64_dec;
     use crate::base64_enc::base64_enc;
-    use crate::codecs::test_support::HoldsOutput;
+    use crate::codecs::test_support::{FailsWithOverclaim, HoldsOutput};
     use crate::identity::{identity, Identity};
     use crate::rot13::rot13;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::{as_uninit_mut, copy_to_uninit};
     use crate::{
-        stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress, Sink,
+        stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, ErrorKind,
+        Progress, Sink,
     };
 
     const INPUT: &str = "Hello, World! 123";
@@ -747,6 +748,39 @@ mod tests {
         let mut output = [0u8; 8];
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
         assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
+    }
+
+    #[test]
+    fn an_overclaim_in_an_error_of_first_is_rejected() {
+        let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
+        let mut output = [0u8; 8];
+
+        let mut chain = Chain::new(FailsWithOverclaim, identity(), vec![0u8; 4]).unwrap();
+        let error = chain
+            .process(b"abc", as_uninit_mut(&mut output))
+            .unwrap_err();
+        assert_eq!(error, violation);
+
+        let mut chain = Chain::new(FailsWithOverclaim, identity(), vec![0u8; 4]).unwrap();
+        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        assert_eq!(error, violation);
+    }
+
+    #[test]
+    fn an_overclaim_in_an_error_of_second_is_rejected() {
+        let mut output = [0u8; 8];
+
+        // `first` moves the 3 input bytes to staging. So the chain
+        // reports them as consumed, but `second` writes nothing.
+        let mut chain = Chain::new(identity(), FailsWithOverclaim, vec![0u8; 4]).unwrap();
+        let error = chain
+            .process(b"abc", as_uninit_mut(&mut output))
+            .unwrap_err();
+        assert_eq!(error, Error::new(ErrorKind::ByteCountClaim, 3, 0));
+
+        let mut chain = Chain::new(identity(), FailsWithOverclaim, vec![0u8; 4]).unwrap();
+        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        assert_eq!(error, Error::new(ErrorKind::ByteCountClaim, 0, 0));
     }
 
     /// Fails once, echoing 1 byte of real input in the error, then
