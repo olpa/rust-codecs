@@ -619,9 +619,9 @@ mod tests {
         Progress, Sink, Source, TransferCounts,
     };
 
-    /// A `Sink` that always offers a zero-length slice and never
-    /// reports exhaustion. Stands in for an endpoint that needs no
-    /// output room.
+    /// A `Sink` that always gives an empty slice and never reports a
+    /// full sink. This sink does not obey the `Sink::spare` contract.
+    /// The tests use this sink to cause a stall.
     struct NullSink;
 
     impl Sink for NullSink {

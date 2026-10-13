@@ -40,9 +40,13 @@ pub trait Sink {
 
     /// Return writable space, or `None` when the destination is full.
     ///
-    /// A caller may call this again without committing anything; the
-    /// same span may come back again, so bytes written but not
-    /// committed may be overwritten.
+    /// The space must not be empty. When there is no space, return
+    /// `None`. The drivers report an empty slice as a stall
+    /// (`NoProgress`), not as a full sink (`SinkExhausted`).
+    ///
+    /// A caller can call this function again before it commits bytes.
+    /// Then the function can return the same space again. The caller
+    /// can then write over the bytes that it did not commit.
     fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error>;
 
     /// Commit the first `amount` bytes of the space that `spare` returned.
