@@ -130,8 +130,8 @@ because the encoding needs padding.
 
 ## Boundary-aware codecs
 
-A `BoundaryAwareCodec` is a `Codec` whose `process` can also report
-`BoundaryAwareProgress::Boundary`. This means the input of the logical
+A `BoundaryAwareCodec` is like a `Codec`, but its `process` can also
+report `BoundaryAwareProgress::Boundary`. This means the input of the logical
 stream ended right here, inside this `input` slice. Bytes past that
 point belong to whatever comes next.
 
