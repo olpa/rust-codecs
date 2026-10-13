@@ -38,6 +38,12 @@ The fix direction is to keep the uncommitted output in the sink, return
 `Ok(consumed)`, and report the error on the next call. `Pump` already
 has a latch for codec errors that the fix can use.
 
+The same problem affects `CodecWriter::finish`. Its error gives back
+the `CodecWriter`, but a second `finish` after a sink error loses the
+trailer bytes of the failed commit. The doc of
+`std_io::CodecWriter::finish` warns about this. Remove the warning
+after the fix.
+
 ### The minimum Rust version is 1.87, the goal is 1.81 (issue #23)
 
 `json-escape` blocks the goal. It uses edition 2024, and it comes from

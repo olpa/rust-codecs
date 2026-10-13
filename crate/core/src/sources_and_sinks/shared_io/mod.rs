@@ -7,6 +7,9 @@ pub use read::boundary_aware_pump_read;
 mod write;
 pub use write::{pump_finish, pump_flush, pump_write};
 
+mod codec_writer_finish_error;
+pub use codec_writer_finish_error::CodecWriterFinishError;
+
 mod sink;
 pub use sink::{RetryingWrite, ScratchSink};
 

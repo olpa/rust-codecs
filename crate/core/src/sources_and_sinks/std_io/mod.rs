@@ -22,3 +22,5 @@ mod wrapper;
 
 pub use adapter::{BufReadSource, StdSink, StdSource};
 pub use wrapper::{BufReadCodecReader, CodecReader, CodecWriter};
+
+pub use super::shared_io::CodecWriterFinishError;

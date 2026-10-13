@@ -7,3 +7,5 @@ mod wrapper;
 
 pub use adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
 pub use wrapper::{BufReadCodecReader, CodecReader, CodecWriter, EmbeddedError};
+
+pub use super::shared_io::CodecWriterFinishError;

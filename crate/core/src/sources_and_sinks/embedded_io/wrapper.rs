@@ -4,7 +4,7 @@ use core::fmt;
 use embedded_io::{BufRead, ErrorType, Read, Write};
 
 use crate::sources_and_sinks::shared_io::{
-    boundary_aware_pump_read, pump_finish, pump_flush, pump_write,
+    boundary_aware_pump_read, pump_finish, pump_flush, pump_write, CodecWriterFinishError,
 };
 use crate::stream::Pump;
 use crate::{
@@ -78,6 +78,12 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
             }
             Self::Stall(StallError::NoProgress) => embedded_io::ErrorKind::Other,
         }
+    }
+}
+
+impl<E, T> From<CodecWriterFinishError<EmbeddedError<E>, T>> for EmbeddedError<E> {
+    fn from(error: CodecWriterFinishError<EmbeddedError<E>, T>) -> Self {
+        error.into_error()
     }
 }
 
@@ -245,9 +251,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// Drain the codec and hand back ownership of the writer. Same
     /// behavior as
     /// [`std_io::CodecWriter::finish`](crate::sources_and_sinks::std_io::CodecWriter::finish).
-    pub fn finish(mut self) -> Result<W, EmbeddedError<W::Error>> {
-        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
-        Ok(self.output.into_inner())
+    pub fn finish(mut self) -> Result<W, CodecWriterFinishError<EmbeddedError<W::Error>, Self>> {
+        match pump_finish(&mut self.pump, &mut self.output) {
+            Ok(()) => Ok(self.output.into_inner()),
+            Err(error) => Err(CodecWriterFinishError::new(
+                writer_error_to_embedded_error(error),
+                self,
+            )),
+        }
     }
 
     /// Reclaim the writer, the codec, and the scratch buffer. If the
@@ -270,5 +281,38 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn flush(&mut self) -> Result<(), Self::Error> {
         pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
         self.output.get_mut().flush().map_err(EmbeddedError::Io)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use embedded_io::ErrorType;
+
+    use super::{CodecWriter, EmbeddedError};
+    use crate::codecs::test_support::FailsAfterInner;
+    use crate::identity::{identity, Identity};
+    use crate::ErrorKind;
+
+    #[test]
+    fn question_mark_turns_a_finish_error_into_an_embedded_error() {
+        fn run(bytes: &mut [u8]) -> Result<(), EmbeddedError<<&mut [u8] as ErrorType>::Error>> {
+            let codec: FailsAfterInner<Identity> = FailsAfterInner {
+                inner: identity(),
+                ok_calls: 0,
+                calls: 0,
+            };
+            let writer = CodecWriter::new(bytes, codec, [0u8; 8]).unwrap();
+
+            // Act: the `?` operator calls the `From` impl.
+            writer.finish()?;
+
+            Ok(())
+        }
+
+        let mut bytes = [0u8; 8];
+        assert!(matches!(
+            run(&mut bytes),
+            Err(EmbeddedError::Codec(e)) if e.kind == ErrorKind::CorruptStream
+        ));
     }
 }

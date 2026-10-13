@@ -3,7 +3,7 @@ use std::io::{self, BufRead, Read, Write};
 use core::convert::Infallible;
 
 use crate::sources_and_sinks::shared_io::{
-    boundary_aware_pump_read, pump_finish, pump_flush, pump_write,
+    boundary_aware_pump_read, pump_finish, pump_flush, pump_write, CodecWriterFinishError,
 };
 use crate::stream::Pump;
 use crate::{
@@ -230,9 +230,16 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// `CodecWriter` without calling `finish` loses any remaining
     /// trailer, checksum, or padding bytes. This produces no compiler
     /// warning or runtime error.
-    pub fn finish(mut self) -> io::Result<W> {
-        pump_finish(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)?;
-        Ok(self.output.into_inner())
+    ///
+    /// If the wrapped writer reports an error, do not call `finish` again.
+    pub fn finish(mut self) -> Result<W, CodecWriterFinishError<io::Error, Self>> {
+        match pump_finish(&mut self.pump, &mut self.output) {
+            Ok(()) => Ok(self.output.into_inner()),
+            Err(error) => Err(CodecWriterFinishError::new(
+                writer_error_to_io_error(error),
+                self,
+            )),
+        }
     }
 
     /// Reclaim the writer, the codec, and the scratch buffer. If the
@@ -251,5 +258,37 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn flush(&mut self) -> io::Result<()> {
         pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)?;
         self.output.get_mut().flush()
+    }
+}
+
+impl<T> From<CodecWriterFinishError<io::Error, T>> for io::Error {
+    fn from(error: CodecWriterFinishError<io::Error, T>) -> Self {
+        error.into_error()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::CodecWriter;
+    use crate::codecs::test_support::FailsAfterInner;
+    use crate::identity::identity;
+
+    #[test]
+    fn question_mark_turns_a_finish_error_into_an_io_error() {
+        fn run() -> io::Result<Vec<u8>> {
+            let codec = FailsAfterInner {
+                inner: identity(),
+                ok_calls: 0,
+                calls: 0,
+            };
+            let writer = CodecWriter::new(Vec::new(), codec, [0u8; 8]).unwrap();
+
+            // Act: the `?` operator calls the `From` impl.
+            Ok(writer.finish()?)
+        }
+
+        assert_eq!(run().unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 }
