@@ -31,16 +31,16 @@ pub fn copy_to_uninit(dst: &mut [MaybeUninit<u8>], src: &[u8]) {
         src.len(),
         "source and destination lengths differ"
     );
-    for (d, s) in dst.iter_mut().zip(src) {
-        d.write(*s);
-    }
+    // SAFETY: `MaybeUninit<u8>` has the same layout as `u8`. Every
+    // initialized byte is a valid `MaybeUninit<u8>`.
+    let src = unsafe { &*(src as *const [u8] as *const [MaybeUninit<u8>]) };
+    dst.copy_from_slice(src);
 }
 
 /// Fill `dst` with zeros and return it as `&mut [u8]`.
 ///
 /// Use it to pass a codec's output buffer to a function that accepts
-/// only `&mut [u8]`, for example `base64::Engine::encode_slice`. The
-/// cost is one `memset`.
+/// only `&mut [u8]`, for example `base64::Engine::encode_slice`.
 ///
 /// ```
 /// use core::mem::MaybeUninit;
