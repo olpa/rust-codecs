@@ -45,9 +45,10 @@ pub struct Chain<A, B, S> {
     first: A,
     second: B,
     staging: S,
-    /// Bytes in `staging[..stage_len]` are valid: produced by `first`,
-    /// not drained by `second`.
-    stage_len: usize,
+    /// Bytes in `staging[stage_start..stage_end]` are valid: produced
+    /// by `first`, not drained by `second`.
+    stage_start: usize,
+    stage_end: usize,
     /// Set when `first.finish` reports `Done`. Then `flush` and
     /// `finish` skip `first`. Does not affect `process`: the
     /// `Codec` contract does not specify `process` after `finish`,
@@ -69,7 +70,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             first,
             second,
             staging,
-            stage_len: 0,
+            stage_start: 0,
+            stage_end: 0,
             first_done: false,
         })
     }
@@ -93,19 +95,25 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         Error::new(error.kind, consumed, pre_out_pos + error.written)
     }
 
-    /// Drop the first `consumed` bytes of `staging` by moving the
-    /// rest to the front, and update `stage_len` to match.
-    fn compact_staging(&mut self, consumed: usize) {
-        let leftover = self.stage_len - consumed;
-        if leftover > 0 {
-            let staging = self.staging.as_mut();
-            staging.copy_within(consumed..self.stage_len, 0);
+    fn is_staging_empty(&self) -> bool {
+        self.stage_start == self.stage_end
+    }
+
+    /// Drop the first `consumed` valid bytes of `staging`. If none are
+    /// left, reset both indexes to 0. `consumed` must not be more than
+    /// the number of valid bytes.
+    fn drop_staged(&mut self, consumed: usize) {
+        self.stage_start += consumed;
+        debug_assert!(self.stage_start <= self.stage_end);
+        if self.stage_start == self.stage_end {
+            self.stage_start = 0;
+            self.stage_end = 0;
         }
-        self.stage_len = leftover;
     }
 
     /// Convert as much data as possible from `staging` to `output`.
-    /// Move any leftover bytes to the front of `staging`.
+    /// Keep the remaining bytes where they are. The next pass or the
+    /// next call drains them before `first` runs again.
     /// Return the number of bytes written to `output`.
     /// Do nothing if `staging` is empty.
     /// `caller_consumed_so_far` is used for the error position rebasing.
@@ -119,22 +127,23 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         out_pos: usize,
         caller_consumed_so_far: usize,
     ) -> Result<usize, Error> {
-        if self.stage_len == 0 {
+        if self.is_staging_empty() {
             return Ok(0);
         }
         let staging = self.staging.as_mut();
+        let staged_len = self.stage_end - self.stage_start;
         let output_len = output.len() - out_pos;
         let moved = match codec_step(
             &mut self.second,
-            &staging[..self.stage_len],
+            &staging[self.stage_start..self.stage_end],
             &mut output[out_pos..],
         ) {
             Ok(moved) => moved,
             Err(error) => {
                 let error = error
-                    .validated(self.stage_len, output_len)
+                    .validated(staged_len, output_len)
                     .unwrap_or_else(|violation| violation);
-                self.compact_staging(error.consumed);
+                self.drop_staged(error.consumed);
                 return Err(Self::rebase_second_failed(
                     error,
                     caller_consumed_so_far,
@@ -142,7 +151,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 ));
             }
         };
-        self.compact_staging(moved.consumed);
+        self.drop_staged(moved.consumed);
         Ok(moved.written)
     }
 
@@ -150,11 +159,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     ///
     /// Finishing the chain means finishing both inner codecs, in
     /// pipeline order. Each one may still hold buffered bytes after
-    /// the caller stops feeding input. So this finishes `first` into
-    /// `staging`, drains `staging` into `second`, and repeats. Only
-    /// once `first` and `staging` are both empty does it run
-    /// `second`'s own finish. `second` must not finish while data is
-    /// still upstream of it.
+    /// the caller stops feeding input. So this drains `staging` into
+    /// `second`. Then it finishes `first` into the empty `staging`.
+    /// It repeats these steps. It runs the finish of `second` only
+    /// when `first` and `staging` are both empty. `second` must not
+    /// finish while data is still upstream of it.
     ///
     /// Flushing the chain follows the same order, with `flush` instead
     /// of `finish`.
@@ -167,42 +176,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         let mut first_done = self.first_done;
 
         loop {
-            if !first_done {
-                //
-                // Drain `first` into `staging`.
-                //
-                let staging = self.staging.as_mut();
-                let moved = match mode.step(
-                    &mut self.first,
-                    as_uninit_mut(&mut staging[self.stage_len..]),
-                ) {
-                    Ok(moved) => moved,
-                    Err(error) => {
-                        let error = error
-                            .validated(0, staging.len() - self.stage_len)
-                            .unwrap_or_else(|violation| violation);
-                        self.stage_len += error.written;
-                        return Err(Self::rebase_first_failed(error, 0, out_pos));
-                    }
-                };
-                match moved {
-                    DrainProgress::OutputFilled => self.stage_len = staging.len(),
-                    DrainProgress::Done { written } => {
-                        self.stage_len += written;
-                        first_done = true;
-                        if mode == DrainMode::Finish {
-                            self.first_done = true;
-                        }
-                    }
-                }
-            }
-
             //
-            // Drain `staging` to `output`
+            // Drain `staging` into `output`.
             //
+            // A drain has no input, so the input consumed so far is 0.
             out_pos += self.drain_staging_into(output, out_pos, 0)?;
 
-            if first_done && self.stage_len == 0 {
+            if first_done && self.is_staging_empty() {
                 //
                 // At this point, `first` is done and `staging` is empty.
                 // Drain `second`.
@@ -223,12 +203,40 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     },
                 });
             }
+
             if out_pos == output.len() {
                 return Ok(DrainProgress::OutputFilled);
             }
             // `out_pos != output.len()` here, so by
             // `drain_staging_into`'s postcondition, `staging` is
-            // empty. `first` isn't done yet, therefore run another pass.
+            // empty. `first` is not done yet.
+            debug_assert_eq!(self.stage_start, 0);
+            debug_assert_eq!(self.stage_end, 0);
+
+            //
+            // Drain `first` into `staging`.
+            //
+            let staging = self.staging.as_mut();
+            let moved = match mode.step(&mut self.first, as_uninit_mut(staging)) {
+                Ok(moved) => moved,
+                Err(error) => {
+                    let error = error
+                        .validated(0, staging.len())
+                        .unwrap_or_else(|violation| violation);
+                    self.stage_end = error.written;
+                    return Err(Self::rebase_first_failed(error, 0, out_pos));
+                }
+            };
+            match moved {
+                DrainProgress::OutputFilled => self.stage_end = staging.len(),
+                DrainProgress::Done { written } => {
+                    self.stage_end = written;
+                    first_done = true;
+                    if mode == DrainMode::Finish {
+                        self.first_done = true;
+                    }
+                }
+            }
         }
     }
 }
@@ -268,43 +276,23 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
-    /// Push `input` through `first` into `staging`, then drain
-    /// `staging` through `second` into `output`.
+    /// Push `input` through the chain into `output`.
+    ///
+    /// Repeat these steps:
+    ///
+    /// 1. Drain `staging` through `second` into `output`.
+    /// 2. Push `input` through `first` into the empty `staging`.
+    ///
+    /// `second` sets the pace: `first` runs only after `second` has
+    /// taken all the bytes in `staging`.
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
 
-        // `first` runs only while `input` remains. A pass ends the
-        // loop once `input` is fully consumed or `output` is fully
-        // filled. Otherwise the loop runs again.
+        // A pass drains `staging` first. The loop stops when all of
+        // `input` is consumed or `output` is full. If not, `first`
+        // runs, and the loop starts a new pass.
         loop {
-            // Once `input` is exhausted, calling `first` again would
-            // just feed an empty slice.
-            if in_pos < input.len() {
-                //
-                // Push `input` through `first` into `staging`.
-                //
-                let staging = self.staging.as_mut();
-                let input_len = input.len() - in_pos;
-                let output_len = staging.len() - self.stage_len;
-                let moved = match codec_step(
-                    &mut self.first,
-                    &input[in_pos..],
-                    as_uninit_mut(&mut staging[self.stage_len..]),
-                ) {
-                    Ok(moved) => moved,
-                    Err(error) => {
-                        let error = error
-                            .validated(input_len, output_len)
-                            .unwrap_or_else(|violation| violation);
-                        self.stage_len += error.written;
-                        return Err(Self::rebase_first_failed(error, in_pos, out_pos));
-                    }
-                };
-                in_pos += moved.consumed;
-                self.stage_len += moved.written;
-            }
-
             //
             // Drain `staging` into `output`.
             //
@@ -312,7 +300,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
 
             // Case: input fully consumed, and nothing is left waiting
             // in staging for `second`.
-            if in_pos == input.len() && self.stage_len == 0 {
+            if in_pos == input.len() && self.is_staging_empty() {
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
             // Case: output fully filled.
@@ -321,8 +309,29 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             }
             // `out_pos != output.len()` here, so by
             // `drain_staging_into`'s postcondition, `staging` is
-            // empty. Neither `input` nor `output` is finished. Run
-            // another pass.
+            // empty. So `input` is not finished.
+            debug_assert_eq!(self.stage_start, 0);
+            debug_assert_eq!(self.stage_end, 0);
+
+            //
+            // Push `input` through `first` into `staging`.
+            //
+            let staging = self.staging.as_mut();
+            let input_len = input.len() - in_pos;
+            let output_len = staging.len();
+            let moved = match codec_step(&mut self.first, &input[in_pos..], as_uninit_mut(staging))
+            {
+                Ok(moved) => moved,
+                Err(error) => {
+                    let error = error
+                        .validated(input_len, output_len)
+                        .unwrap_or_else(|violation| violation);
+                    self.stage_end = error.written;
+                    return Err(Self::rebase_first_failed(error, in_pos, out_pos));
+                }
+            };
+            in_pos += moved.consumed;
+            self.stage_end = moved.written;
         }
     }
 }
@@ -743,7 +752,7 @@ mod tests {
         // Same property as `lying_inner_codec_is_an_error_not_index_corruption`,
         // but for a `finish` overclaim instead of a `process` overclaim:
         // `finish_step` validates the count before `drain_through`
-        // ever uses it to advance `stage_len`.
+        // ever uses it to set `stage_end`.
         let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]).unwrap();
         let mut output = [0u8; 8];
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
@@ -786,7 +795,7 @@ mod tests {
     /// Fails once, echoing 1 byte of real input in the error, then
     /// behaves like a plain `Identity`. Shared by both positions:
     /// the exact byte count it fakes on failure doesn't matter to
-    /// either test, only that `Chain` rebases and retains/compacts
+    /// either test, only that `Chain` rebases and keeps or drops bytes in
     /// staging correctly around it.
     struct FailsOnce {
         failed: bool,
@@ -842,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn second_codec_error_progress_compacts_staging() {
+    fn second_codec_error_progress_is_dropped_from_staging() {
         let mut chain = Chain::new(
             identity(),
             FailsOnce {
