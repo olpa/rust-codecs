@@ -198,14 +198,18 @@ impl<E: Engine> Base64Dec<E> {
             let produced = self.stage_group(&group, in_pos, out_pos)?;
             if produced < GROUP {
                 self.done = true;
-                if in_pos < input.len() {
-                    return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
-                }
             }
+            // Write the decoded bytes of the padded group before the
+            // error for trailing input. If the output is full, the
+            // next call reports the error. So the output before the
+            // error does not depend on the output size.
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
                 debug_assert_eq!(out_pos, output.len());
                 return Ok(Progress::OutputFilled { consumed: in_pos });
+            }
+            if self.done && in_pos < input.len() {
+                return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
             }
         }
 
@@ -262,14 +266,16 @@ impl<E: Engine> Base64Dec<E> {
             in_pos += ENCODED_GROUP;
             if produced < GROUP {
                 self.done = true;
-                if in_pos < input.len() {
-                    return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
-                }
             }
+            // As above: write the decoded bytes before the error for
+            // trailing input.
             out_pos += self.pending_output.drain(&mut output[out_pos..]);
             if !self.pending_output.is_empty() {
                 debug_assert_eq!(out_pos, output.len());
                 return Ok(Progress::OutputFilled { consumed: in_pos });
+            }
+            if self.done && in_pos < input.len() {
+                return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
             }
         }
 
@@ -444,12 +450,79 @@ mod tests {
     #[test]
     fn decode_tail_loop_padded_group_rejects_trailing_input_same_call() {
         // Same as above, but a further group follows the padded one
-        // within the same call.
+        // within the same call. The output is full before the decoder
+        // writes "o". So it does not report the error yet. The next
+        // call writes "o" and then reports the error.
         let mut dec = base64_dec();
         let mut out = [0u8; 4];
-        assert!(dec
+        let outcome = dec
             .process(b"SGVsbG8=SGVs", as_uninit_mut(&mut out))
-            .is_err());
+            .unwrap();
+        assert_eq!(outcome, Progress::OutputFilled { consumed: 8 });
+        assert_eq!(&out[..4], b"Hell");
+        let mut out = [0u8; 16];
+        let error = dec.process(b"SGVs", as_uninit_mut(&mut out)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.consumed, 0);
+        assert_eq!(error.written, 1);
+        assert_eq!(&out[..1], b"o");
+    }
+
+    /// Feed `chunks` to `dec` with an output of `out_size` bytes. Call
+    /// `process` again while the output fills. Stop at the first
+    /// error. Return the output before the error and the error
+    /// position in the whole input.
+    fn decode_until_error(
+        mut dec: impl Codec,
+        chunks: &[&[u8]],
+        out_size: usize,
+    ) -> (Vec<u8>, usize) {
+        let mut decoded = Vec::new();
+        let mut out = vec![0u8; out_size];
+        let mut offset = 0;
+        for chunk in chunks {
+            let mut pos = 0;
+            loop {
+                match dec.process(&chunk[pos..], as_uninit_mut(&mut out)) {
+                    Ok(Progress::OutputFilled { consumed }) => {
+                        decoded.extend_from_slice(&out);
+                        pos += consumed;
+                    }
+                    Ok(Progress::InputConsumed { written }) => {
+                        decoded.extend_from_slice(&out[..written]);
+                        break;
+                    }
+                    Err(error) => {
+                        assert_eq!(error.kind, ErrorKind::CorruptStream);
+                        decoded.extend_from_slice(&out[..error.written]);
+                        return (decoded, offset + pos + error.consumed);
+                    }
+                }
+            }
+            offset += chunk.len();
+        }
+        panic!("no error for {chunks:?}");
+    }
+
+    #[test]
+    fn output_before_trailing_input_error_does_not_depend_on_output_size() {
+        // "QUI=" decodes to "AB" and ends the stream. "QUJD" after it
+        // is corrupt. The decoder must write "AB" and then report the
+        // error at position 4, for each output size and each split of
+        // the input.
+        let splits: [&[&[u8]]; 4] = [
+            &[b"QUI=QUJD"],
+            &[b"QU", b"I=QUJD"],
+            &[b"QUI=", b"QUJD"],
+            &[b"QUI=Q", b"UJD"],
+        ];
+        for chunks in splits {
+            for out_size in 1..=8 {
+                let (decoded, position) = decode_until_error(base64_dec(), chunks, out_size);
+                assert_eq!(decoded, b"AB", "chunks {chunks:?}, output size {out_size}");
+                assert_eq!(position, 4, "chunks {chunks:?}, output size {out_size}");
+            }
+        }
     }
 
     #[test]
