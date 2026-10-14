@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! Provides a stream interface for rewriting input and output byte
 //! streams. The core is `no_std`-compatible, runs incrementally, and
@@ -230,6 +231,7 @@ pub use chain::Chain;
 
 pub mod sources_and_sinks;
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 #[doc(inline)]
 pub use sources_and_sinks::vec::{encode_str, encode_string, EncodeError};
 

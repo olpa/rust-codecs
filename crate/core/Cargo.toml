@@ -21,6 +21,10 @@ base64 = ["dep:base64"]
 json = ["dep:json-escape"]
 embedded-io = ["dep:embedded-io"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lib]
 name = "rust_codecs_core"
 path = "src/lib.rs"

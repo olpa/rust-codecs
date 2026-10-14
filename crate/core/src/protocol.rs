@@ -331,6 +331,7 @@ impl<C: Codec + ?Sized> Codec for &mut C {
 use alloc::boxed::Box;
 
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         (**self).flush(output)
@@ -342,6 +343,7 @@ impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
 }
 
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 impl<C: Codec + ?Sized> Codec for Box<C> {
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         (**self).process(input, output)
