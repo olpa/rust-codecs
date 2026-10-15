@@ -36,7 +36,7 @@ impl DrainCodec for QuoteEnd {
 }
 
 impl BoundaryAwareCodec for QuoteEnd {
-    fn process(
+    fn process_bounded(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],

@@ -130,7 +130,7 @@ because the encoding needs padding.
 
 ## Boundary-aware codecs
 
-A `BoundaryAwareCodec` is like a `Codec`, but its `process` can also
+A `BoundaryAwareCodec` is like a `Codec`, but its `process_bounded` can also
 report `BoundaryAwareProgress::Boundary`. This means the input of the logical
 stream ended right here, inside this `input` slice. Bytes past that
 point belong to whatever comes next.
@@ -166,12 +166,12 @@ For a `BoundaryAwareCodec`, add this forwarding impl to your crate:
 
 ```rust
 impl BoundaryAwareCodec for &mut MyBoundaryAwareCodec {
-    fn process(
+    fn process_bounded(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
     ) -> Result<BoundaryAwareProgress, Error> {
-        (**self).process(input, output)
+        (**self).process_bounded(input, output)
     }
 }
 ```

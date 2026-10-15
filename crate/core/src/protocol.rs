@@ -135,11 +135,12 @@ pub trait Codec: DrainCodec {
 /// blanket implementation.
 pub trait BoundaryAwareCodec: DrainCodec {
     /// This trait follows [`Codec::process`]'s contract, with one addition:
-    /// a successful `process` call may also resolve to
+    /// a successful `process_bounded` call may also resolve to
     /// [`BoundaryAwareProgress::Boundary`].
     ///
-    /// Once `process` reaches [`Boundary`](BoundaryAwareProgress::Boundary), a
-    /// driver must stop calling `process` for the current logical
+    /// Once `process_bounded` reaches
+    /// [`Boundary`](BoundaryAwareProgress::Boundary), a driver must stop
+    /// calling `process_bounded` for the current logical
     /// stream. Then the driver must call [`finish`](DrainCodec::finish)
     /// until it reports [`Done`](DrainProgress::Done).
     ///
@@ -149,13 +150,13 @@ pub trait BoundaryAwareCodec: DrainCodec {
     /// stream; another may have entered a permanently terminal internal
     /// state.
     ///
-    /// If EOF arrives before `process` reports
+    /// If EOF arrives before `process_bounded` reports
     /// [`Boundary`](BoundaryAwareProgress::Boundary), `finish` decides what that
     /// means. If the format requires an in-band terminator, `finish` may
     /// report [`ErrorKind::UnexpectedEnd`]. If the format treats EOF
     /// itself as a valid end, `finish` may instead return
     /// [`Done`](DrainProgress::Done).
-    fn process(
+    fn process_bounded(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
@@ -163,7 +164,7 @@ pub trait BoundaryAwareCodec: DrainCodec {
 }
 
 impl<C: Codec> BoundaryAwareCodec for C {
-    fn process(
+    fn process_bounded(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
@@ -192,7 +193,7 @@ pub enum Progress {
     OutputFilled { consumed: usize },
 }
 
-/// Progress of one [`BoundaryAwareCodec::process`] call: everything
+/// Progress of one [`BoundaryAwareCodec::process_bounded`] call: everything
 /// [`Progress`] can report, plus [`Boundary`](BoundaryAwareProgress::Boundary),
 /// an in-band signal that the logical stream ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,7 +247,7 @@ impl Progress {
 
 impl BoundaryAwareProgress {
     /// The [`Progress::validated`] counterpart for
-    /// [`BoundaryAwareCodec::process`].
+    /// [`BoundaryAwareCodec::process_bounded`].
     pub fn validated(
         self,
         input_len: usize,

@@ -97,7 +97,7 @@ impl DrainCodec for DummyBoundaryCodec {
 }
 
 impl BoundaryAwareCodec for DummyBoundaryCodec {
-    fn process(
+    fn process_bounded(
         &mut self,
         input: &[u8],
         _output: &mut [MaybeUninit<u8>],
@@ -115,12 +115,12 @@ impl BoundaryAwareCodec for DummyBoundaryCodec {
 /// author of a `BoundaryAwareCodec`-only type writes this forwarding
 /// impl. The `DrainCodec` part comes from the crate.
 impl BoundaryAwareCodec for &mut DummyBoundaryCodec {
-    fn process(
+    fn process_bounded(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
     ) -> Result<BoundaryAwareProgress, Error> {
-        (**self).process(input, output)
+        (**self).process_bounded(input, output)
     }
 }
 

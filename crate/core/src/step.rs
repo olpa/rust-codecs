@@ -43,7 +43,7 @@ pub(crate) fn boundary_aware_step<C: BoundaryAwareCodec + ?Sized>(
     output: &mut [MaybeUninit<u8>],
 ) -> Result<BoundaryAwareProgress, Error> {
     codec
-        .process(input, output)?
+        .process_bounded(input, output)?
         .validated(input.len(), output.len())
 }
 

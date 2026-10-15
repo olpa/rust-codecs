@@ -119,7 +119,7 @@ impl<C: Codec> DrainCodec for EndsAtBar<C> {
 }
 
 impl<C: Codec> BoundaryAwareCodec for EndsAtBar<C> {
-    fn process(
+    fn process_bounded(
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
@@ -156,7 +156,7 @@ impl DrainCodec for Scripted {
 }
 
 impl BoundaryAwareCodec for Scripted {
-    fn process(
+    fn process_bounded(
         &mut self,
         _input: &[u8],
         _output: &mut [MaybeUninit<u8>],
