@@ -609,14 +609,14 @@ mod tests {
 
     use super::{Pump, PumpDrain, PumpStop, PumpTransfer};
     use crate::codecs::test_support::{
-        assert_latched, assert_overclaim_rejected, EndsAtBar, FailsAfterInner, FailsWithOverclaim,
-        HoldsOutput, Scripted,
+        assert_latched, assert_overclaim_rejected, DropEverything, EndsAtBar, FailsAfterInner,
+        FailsWithOverclaim, HoldsOutput, Scripted, SplitSource,
     };
     use crate::identity::identity;
     use crate::sources_and_sinks::slice::{SliceSink, SliceSource};
     use crate::{
-        BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveErrorKind, Error, ErrorKind,
-        Progress, Sink, Source, TransferCounts,
+        BoundaryAwareProgress, DrainProgress, DriveErrorKind, Error, ErrorKind, Sink,
+        TransferCounts,
     };
 
     /// A `Sink` that always gives an empty slice and never reports a
@@ -679,30 +679,6 @@ mod tests {
         }
     }
 
-    /// Consumes everything, writes nothing, like a checksum pass
-    /// with no output stream.
-    struct DropEverything;
-
-    impl DrainCodec for DropEverything {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
-        }
-
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-            Ok(DrainProgress::Done { written: 0 })
-        }
-    }
-
-    impl Codec for DropEverything {
-        fn process(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
-            Ok(Progress::InputConsumed { written: 0 })
-        }
-    }
-
     /// Like `OneByteWindowSink`, but each `spare` call offers a
     /// maximum of 2 bytes. It accepts `ok_commits` commits, then fails
     /// every commit.
@@ -728,27 +704,6 @@ mod tests {
             self.ok_commits -= 1;
             self.written += amount;
             Ok(())
-        }
-    }
-
-    /// A `Source` that gives a maximum of `chunk_size` bytes in each
-    /// chunk.
-    struct SplitSource<'a> {
-        bytes: &'a [u8],
-        pos: usize,
-        chunk_size: usize,
-    }
-
-    impl Source for SplitSource<'_> {
-        type Error = core::convert::Infallible;
-
-        fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-            let end = (self.pos + self.chunk_size).min(self.bytes.len());
-            Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..end]))
-        }
-
-        fn consume(&mut self, amount: usize) {
-            self.pos += amount;
         }
     }
 
@@ -886,8 +841,8 @@ mod tests {
     fn pump_accepts_a_boxed_trait_object_codec() {
         let mut input = SliceSource::new(b"abcdef");
         let mut output = NullSink;
-        let boxed: alloc::boxed::Box<dyn Codec> = alloc::boxed::Box::new(DropEverything);
-        let mut pump: Pump<alloc::boxed::Box<dyn Codec>> = Pump::new(boxed);
+        let boxed: alloc::boxed::Box<dyn crate::Codec> = alloc::boxed::Box::new(DropEverything);
+        let mut pump: Pump<alloc::boxed::Box<dyn crate::Codec>> = Pump::new(boxed);
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
         assert_eq!(
             moved,

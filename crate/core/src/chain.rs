@@ -306,13 +306,22 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             if in_pos == input.len() && self.is_staging_empty() {
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
-            // Case: output fully filled.
-            if out_pos == output.len() {
+            // Case: output fully filled, and `second` still has bytes
+            // waiting in staging.
+            if out_pos == output.len() && !self.is_staging_empty() {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
-            // `out_pos != output.len()` here, so by
-            // `drain_staging_into`'s postcondition, `staging` is
-            // empty. So `input` is not finished.
+            // `staging` is empty here. There are two cases:
+            // - `out_pos != output.len()`. Then the postcondition of
+            //   `drain_staging_into` says that `staging` is empty.
+            // - `out_pos == output.len()`. Then the check above did
+            //   not return, so `staging` was already empty.
+            // The check for consumed input did not return either, so
+            // `input` is not finished.
+            //
+            // With a full `output`, `first` still runs. The bytes
+            // that it writes into `staging` go to `second` in the next
+            // pass. `second` may take them without producing output.
             debug_assert_eq!(self.stage_start, 0);
             debug_assert_eq!(self.stage_end, 0);
 
@@ -349,7 +358,9 @@ mod tests {
     use super::Chain;
     use crate::base64_dec::base64_dec;
     use crate::base64_enc::base64_enc;
-    use crate::codecs::test_support::{FailsWithOverclaim, HoldsOutput};
+    use crate::codecs::test_support::{
+        DropEverything, FailsWithOverclaim, HoldsOutput, SplitSource,
+    };
     use crate::identity::{identity, Identity};
     use crate::rot13::rot13;
     use crate::sources_and_sinks::slice::{SliceSink, SliceSource};
@@ -905,6 +916,47 @@ mod tests {
         .unwrap();
         assert_eq!(counts.written, 5);
         assert_eq!(&buffer, input);
+    }
+
+    #[test]
+    fn process_consumes_input_that_needs_no_output_when_output_is_empty() {
+        // A plain `DropEverything` accepts the input with no room in
+        // `output`. A chain with `DropEverything` as `first` must too.
+        let mut chain = Chain::new(DropEverything, identity(), vec![0u8; 16]).unwrap();
+        assert_eq!(
+            chain.process(b"abc", &mut []),
+            Ok(Progress::InputConsumed { written: 0 })
+        );
+    }
+
+    #[test]
+    fn process_consumes_input_that_second_drops_when_output_is_empty() {
+        // `DropEverything` is `second`. `first` is `identity`, so it
+        // writes the input into `staging`. `second` takes those bytes
+        // and writes no output, so it needs no room in `output`. The
+        // chain must consume the input.
+        let mut chain = Chain::new(identity(), DropEverything, vec![0u8; 16]).unwrap();
+        assert_eq!(
+            chain.process(b"abc", &mut []),
+            Ok(Progress::InputConsumed { written: 0 })
+        );
+    }
+
+    #[test]
+    fn a_full_sink_does_not_exhaust_a_chain_that_needs_no_output() {
+        let chain = Chain::new(DropEverything, identity(), vec![0u8; 16]).unwrap();
+        let counts = stream_to_stream(
+            &mut SplitSource {
+                bytes: b"abcdef",
+                pos: 0,
+                chunk_size: 2,
+            },
+            chain,
+            &mut SliceSink::new(&mut []),
+        )
+        .unwrap();
+        assert_eq!(counts.consumed, 6);
+        assert_eq!(counts.written, 0);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use core::mem::MaybeUninit;
 use crate::uninit::copy_to_uninit;
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveErrorKind,
-    Error, ErrorKind, Progress,
+    Error, ErrorKind, Progress, Source,
 };
 
 /// Check that `kind` is a latched codec error. A latched error has
@@ -251,5 +251,50 @@ impl<C: Codec> Codec for FailsAfterInner<C> {
             Progress::OutputFilled { consumed } => (consumed, output.len()),
         };
         Err(Error::new(ErrorKind::CorruptStream, consumed, written))
+    }
+}
+
+/// Consumes everything and writes nothing, like a checksum pass with
+/// no output stream.
+pub(crate) struct DropEverything;
+
+impl DrainCodec for DropEverything {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+}
+
+impl Codec for DropEverything {
+    fn process(
+        &mut self,
+        _input: &[u8],
+        _output: &mut [MaybeUninit<u8>],
+    ) -> Result<Progress, Error> {
+        Ok(Progress::InputConsumed { written: 0 })
+    }
+}
+
+/// A `Source` that gives a maximum of `chunk_size` bytes in each
+/// chunk.
+pub(crate) struct SplitSource<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) pos: usize,
+    pub(crate) chunk_size: usize,
+}
+
+impl Source for SplitSource<'_> {
+    type Error = core::convert::Infallible;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        let end = (self.pos + self.chunk_size).min(self.bytes.len());
+        Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..end]))
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.pos += amount;
     }
 }
