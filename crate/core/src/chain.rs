@@ -904,6 +904,30 @@ mod tests {
     }
 
     #[test]
+    fn flush_into_empty_output_is_done_when_nothing_is_pending() {
+        // A plain codec answers `Done` to `flush(&mut [])` when it
+        // holds nothing. A chain must give the same answer.
+        assert_eq!(
+            identity().flush(&mut []),
+            Ok(DrainProgress::Done { written: 0 })
+        );
+        let mut chain = Chain::new(identity(), identity(), vec![0u8; 16]).unwrap();
+        assert_eq!(chain.flush(&mut []), Ok(DrainProgress::Done { written: 0 }));
+    }
+
+    #[test]
+    fn flush_into_empty_output_is_done_when_second_dropped_the_input() {
+        // `second` takes the bytes of `first` without producing
+        // output. So nothing is pending, and `flush` needs no room.
+        let mut chain = Chain::new(identity(), DropEverything, vec![0u8; 16]).unwrap();
+        assert_eq!(
+            chain.process(b"abc", &mut []),
+            Ok(Progress::InputConsumed { written: 0 })
+        );
+        assert_eq!(chain.flush(&mut []), Ok(DrainProgress::Done { written: 0 }));
+    }
+
+    #[test]
     fn a_sink_that_the_output_fills_exactly_is_not_exhausted() {
         let input = b"hello";
         let mut buffer = [0u8; 5];
