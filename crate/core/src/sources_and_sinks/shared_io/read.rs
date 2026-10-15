@@ -64,8 +64,8 @@ fn read_into<I: Source, C: BoundaryAwareCodec>(
             | PumpTransfer::SinkExhausted(step_moved)
             | PumpTransfer::Progressed(step_moved)
             | PumpTransfer::InputEnded(step_moved)) = step;
-            moved.consumed += step_moved.consumed;
-            moved.written += step_moved.written;
+            moved.consumed = moved.consumed.wrapping_add(step_moved.consumed);
+            moved.written = moved.written.wrapping_add(step_moved.written);
             match step {
                 PumpTransfer::SourceExhausted(_) | PumpTransfer::InputEnded(_) => break true,
                 PumpTransfer::Progressed(_) if output.written() == 0 => {}
