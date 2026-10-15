@@ -186,6 +186,16 @@ Some private comments in `base64_shared.rs`, `base64_dec.rs`,
 semicolons, and dashes. We do not rewrite them. Only readers of the
 source see them. Do not report them. Public docs follow a plain style.
 
+### The "Why this matters" paragraph in `CREATING-CODECS.md` mentions an earlier `Progress`
+
+The section "The contract: fully consume, or fully fill" says that
+`Progress` once had two fields, `consumed` and `written`, and that the
+drivers became too complicated. This is design rationale, not history
+for its own sake. A reader who asks "why not report both counts?" learns
+that the crate tried it and why it failed. We keep the paragraph. Do not
+report it as text that only makes sense to someone who knew the old
+behavior.
+
 ### `Base64Dec` latches `done`, `Base64Enc` does not
 
 `process` after `finish` on `Base64Enc` emits padding in the middle of

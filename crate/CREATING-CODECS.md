@@ -4,7 +4,7 @@
 
 A codec is a `struct` with two trait implementations:
 
-- `Codec` for`process`, and
+- `Codec` for `process`, and
 - `DrainCodec` for `flush` and `finish`.
 
 In the simplest case, a transform has no internal state and no trailer
