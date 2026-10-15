@@ -280,6 +280,11 @@ impl DrainProgress {
 }
 
 /// Byte counts produced by a codec call or accumulated across a transfer.
+///
+/// The fields are `usize`. On a target with 32-bit `usize`, a transfer
+/// of more than 4 GiB overflows the totals. The totals wrap around.
+/// Each total is then the real total modulo 2^32. The transfer
+/// continues without error.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransferCounts {
     pub consumed: usize,

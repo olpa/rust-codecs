@@ -61,8 +61,8 @@ impl<EI, EO> DriveError<EI, EO> {
     /// before it. Then `moved` counts the whole drive.
     pub(crate) fn after(self, earlier: TransferCounts) -> Self {
         let moved = TransferCounts {
-            consumed: earlier.consumed + self.moved.consumed,
-            written: earlier.written + self.moved.written,
+            consumed: earlier.consumed.wrapping_add(self.moved.consumed),
+            written: earlier.written.wrapping_add(self.moved.written),
         };
         Self::new(self.kind, moved)
     }
@@ -135,7 +135,7 @@ where
     let (PumpDrain::Done { written } | PumpDrain::SinkExhausted { written }) = drained;
     let moved = TransferCounts {
         consumed: transferred.consumed,
-        written: transferred.written + written,
+        written: transferred.written.wrapping_add(written),
     };
     match drained {
         PumpDrain::Done { .. } => Ok(moved),
@@ -289,20 +289,20 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         input: &mut I,
         output: &mut O,
     ) -> Result<PumpStop, DriveError<I::Error, O::Error>> {
-        let mut consumed = 0;
-        let mut written = 0;
+        let mut consumed = 0usize;
+        let mut written = 0usize;
         loop {
             let total = |moved: TransferCounts| TransferCounts {
-                consumed: consumed + moved.consumed,
-                written: written + moved.written,
+                consumed: consumed.wrapping_add(moved.consumed),
+                written: written.wrapping_add(moved.written),
             };
             let step = self
                 .transfer_step(input, output)
                 .map_err(|error| error.after(total(TransferCounts::default())))?;
             match step {
                 PumpTransfer::Progressed(moved) => {
-                    consumed += moved.consumed;
-                    written += moved.written;
+                    consumed = consumed.wrapping_add(moved.consumed);
+                    written = written.wrapping_add(moved.written);
                 }
                 PumpTransfer::SourceExhausted(moved) => {
                     return Ok(PumpStop::SourceExhausted(total(moved)));
@@ -526,7 +526,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                                 )
                             })?;
                         }
-                        let all = TransferCounts::only_written(written + error.written);
+                        let all = TransferCounts::only_written(written.wrapping_add(error.written));
                         return Err(DriveError::new(DriveErrorKind::Codec(error), all));
                     }
                 },
@@ -556,7 +556,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                     )
                 })?;
             }
-            written += step_written;
+            written = written.wrapping_add(step_written);
             if done {
                 return Ok(PumpDrain::Done { written });
             }
