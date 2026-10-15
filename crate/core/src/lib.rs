@@ -253,7 +253,8 @@ mod feature_coverage {
             feature = "std",
             feature = "base64",
             feature = "json",
-            feature = "embedded-io"
+            feature = "embedded-io",
+            feature = "rot13"
         )),
         ignore = "some optional features are disabled — run `cargo test --all-features`"
     )]
@@ -262,6 +263,7 @@ mod feature_coverage {
         assert!(cfg!(feature = "std"), "feature \"std\" is off");
         assert!(cfg!(feature = "base64"), "feature \"base64\" is off");
         assert!(cfg!(feature = "json"), "feature \"json\" is off");
+        assert!(cfg!(feature = "rot13"), "feature \"rot13\" is off");
         assert!(
             cfg!(feature = "embedded-io"),
             "feature \"embedded-io\" is off"
