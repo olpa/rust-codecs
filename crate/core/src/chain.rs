@@ -204,12 +204,15 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 });
             }
 
-            if out_pos == output.len() {
+            if out_pos == output.len() && !self.is_staging_empty() {
                 return Ok(DrainProgress::OutputFilled);
             }
-            // `out_pos != output.len()` here, so by
-            // `drain_staging_into`'s postcondition, `staging` is
-            // empty. `first` is not done yet.
+            // `staging` is empty here. There are two cases:
+            // - `out_pos != output.len()`. Then the postcondition of
+            //   `drain_staging_into` says that `staging` is empty.
+            // - `out_pos == output.len()`. Then the check above did not
+            //   return, so `staging` was already empty.
+            // `first` is not done yet.
             debug_assert_eq!(self.stage_start, 0);
             debug_assert_eq!(self.stage_end, 0);
 
@@ -349,12 +352,12 @@ mod tests {
     use crate::codecs::test_support::{FailsWithOverclaim, HoldsOutput};
     use crate::identity::{identity, Identity};
     use crate::rot13::rot13;
-    use crate::sources_and_sinks::slice::SliceSource;
+    use crate::sources_and_sinks::slice::{SliceSink, SliceSource};
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::{as_uninit_mut, copy_to_uninit};
     use crate::{
-        stream_to_stream, Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, ErrorKind,
-        Progress, Sink,
+        stream_to_stream, Codec, DrainCodec, DrainProgress, DriveErrorKind, EmptyBufferError,
+        Error, ErrorKind, Progress, Sink,
     };
 
     const INPUT: &str = "Hello, World! 123";
@@ -872,6 +875,63 @@ mod tests {
         let progress = chain.process(b"", as_uninit_mut(&mut output)).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 2 });
         assert_eq!(&output[..2], b"bc");
+    }
+
+    #[test]
+    fn finish_into_empty_output_is_done_when_nothing_is_pending() {
+        // A plain codec answers `Done` to `finish(&mut [])` when it
+        // holds nothing. A chain must give the same answer.
+        assert_eq!(
+            identity().finish(&mut []),
+            Ok(DrainProgress::Done { written: 0 })
+        );
+        let mut chain = Chain::new(identity(), identity(), vec![0u8; 16]).unwrap();
+        assert_eq!(
+            chain.finish(&mut []),
+            Ok(DrainProgress::Done { written: 0 })
+        );
+    }
+
+    #[test]
+    fn a_sink_that_the_output_fills_exactly_is_not_exhausted() {
+        let input = b"hello";
+        let mut buffer = [0u8; 5];
+        let chain = Chain::new(identity(), identity(), vec![0u8; 16]).unwrap();
+        let counts = stream_to_stream(
+            &mut SliceSource::new(input),
+            chain,
+            &mut SliceSink::new(&mut buffer),
+        )
+        .unwrap();
+        assert_eq!(counts.written, 5);
+        assert_eq!(&buffer, input);
+    }
+
+    #[test]
+    fn finish_into_empty_output_is_output_filled_when_first_holds_a_trailer() {
+        let first = HoldsOutput {
+            trailer: b"END",
+            ..HoldsOutput::default()
+        };
+        let mut chain = Chain::new(first, identity(), vec![0u8; 16]).unwrap();
+        assert_eq!(chain.finish(&mut []), Ok(DrainProgress::OutputFilled));
+    }
+
+    #[test]
+    fn a_sink_too_small_for_the_trailer_of_first_is_exhausted() {
+        let first = HoldsOutput {
+            trailer: b"END",
+            ..HoldsOutput::default()
+        };
+        let chain = Chain::new(first, identity(), vec![0u8; 16]).unwrap();
+        let mut buffer = [0u8; 2];
+        let error = stream_to_stream(
+            &mut SliceSource::new(b"hello"),
+            chain,
+            &mut SliceSink::new(&mut buffer),
+        )
+        .unwrap_err();
+        assert!(matches!(error.kind, DriveErrorKind::SinkExhausted));
     }
 
     #[test]
