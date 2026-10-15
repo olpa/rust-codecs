@@ -9,11 +9,11 @@ A codec is a `struct` with two trait implementations:
 
 In the simplest case, a transform has no internal state and no trailer
 to write. Then `process` does the work, and `flush` and `finish` are no-ops.
-`core/src/codecs/rot13.rs` is exactly that:
+`core/src/codecs/rot13.rs` is essentially that:
 
 ```rust
 use core::mem::MaybeUninit;
-use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
+use rust_codecs_core::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 fn rot13_byte(b: u8) -> u8 {
     match b {
