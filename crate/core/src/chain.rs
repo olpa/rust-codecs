@@ -7,7 +7,7 @@ use core::mem::MaybeUninit;
 
 use crate::step::{codec_step, finish_step, flush_step};
 use crate::uninit::as_uninit_mut;
-use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, Progress};
+use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, ErrorKind, Progress};
 
 /// Compose two codecs into a single [`Codec`].
 ///
@@ -54,6 +54,12 @@ pub struct Chain<A, B, S> {
     /// `Codec` contract does not specify `process` after `finish`,
     /// so we skip that work.
     first_done: bool,
+    /// Set when `first` fails. The valid bytes that `first` wrote
+    /// before the failure are in `staging`. The chain passes them
+    /// through `second` first. It returns this error only when
+    /// `staging` is empty. If `second` fails on these bytes, its error
+    /// comes first in the data, and the chain returns it instead.
+    first_error: Option<ErrorKind>,
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
@@ -73,6 +79,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             stage_start: 0,
             stage_end: 0,
             first_done: false,
+            first_error: None,
         })
     }
 
@@ -82,12 +89,15 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         (self.first, self.second, self.staging)
     }
 
-    /// Rebase a validated failure from `first` onto the chain's
-    /// position from just before this step ran. `pre_in_pos` grows by
-    /// the real input `first` consumed. `out_pos` stays the same:
-    /// whatever `first` wrote landed in `staging`, not in `output`.
-    fn rebase_first_failed(error: Error, pre_in_pos: usize, out_pos: usize) -> Error {
-        Error::new(error.kind, pre_in_pos + error.consumed, out_pos)
+    /// The error of `first`, when it is time to return it: `first`
+    /// failed, and `staging` is empty. `consumed` and `out_pos` are the
+    /// bytes that this call has consumed and written.
+    fn first_error_if_staging_is_empty(&self, consumed: usize, out_pos: usize) -> Option<Error> {
+        if !self.is_staging_empty() {
+            return None;
+        }
+        self.first_error
+            .map(|kind| Error::new(kind, consumed, out_pos))
     }
 
     /// Mirrors `rebase_first_failed`, but for `second`.
@@ -182,6 +192,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             // A drain has no input, so the input consumed so far is 0.
             out_pos += self.drain_staging_into(output, out_pos, 0)?;
 
+            if let Some(error) = self.first_error_if_staging_is_empty(0, out_pos) {
+                return Err(error);
+            }
+
             if first_done && self.is_staging_empty() {
                 //
                 // At this point, `first` is done and `staging` is empty.
@@ -226,8 +240,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     let error = error
                         .validated(0, staging.len())
                         .unwrap_or_else(|violation| violation);
+                    // The next pass drains the bytes of `first`. Then
+                    // it returns the error.
                     self.stage_end = error.written;
-                    return Err(Self::rebase_first_failed(error, 0, out_pos));
+                    self.first_error = Some(error.kind);
+                    continue;
                 }
             };
             match moved {
@@ -288,6 +305,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     ///
     /// `second` sets the pace: `first` runs only after `second` has
     /// taken all the bytes in `staging`.
+    ///
+    /// If `first` fails, the chain still passes the bytes that `first`
+    /// wrote before the failure through `second`. It returns the error
+    /// of `first` after that, even if this needs several calls. If
+    /// `second` fails on these bytes, the chain returns the error of
+    /// `second`.
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
@@ -301,6 +324,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             //
             out_pos += self.drain_staging_into(output, out_pos, in_pos)?;
 
+            // Case: `first` failed, and `second` has taken all of its
+            // bytes. The error of `first` comes last in the data.
+            if let Some(error) = self.first_error_if_staging_is_empty(in_pos, out_pos) {
+                return Err(error);
+            }
             // Case: input fully consumed, and nothing is left waiting
             // in staging for `second`.
             if in_pos == input.len() && self.is_staging_empty() {
@@ -338,8 +366,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     let error = error
                         .validated(input_len, output_len)
                         .unwrap_or_else(|violation| violation);
+                    // The next pass drains the bytes of `first`. Then
+                    // it returns the error. The error reports the
+                    // input that `first` consumed.
                     self.stage_end = error.written;
-                    return Err(Self::rebase_first_failed(error, in_pos, out_pos));
+                    self.first_error = Some(error.kind);
+                    in_pos += error.consumed;
+                    continue;
                 }
             };
             in_pos += moved.consumed;
@@ -355,7 +388,7 @@ mod tests {
 
     use alloc::{boxed::Box, vec, vec::Vec};
 
-    use super::Chain;
+    use super::{Chain, DrainMode};
     use crate::base64_dec::base64_dec;
     use crate::base64_enc::base64_enc;
     use crate::codecs::test_support::{
@@ -367,8 +400,8 @@ mod tests {
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
     use crate::uninit::{as_uninit_mut, copy_to_uninit};
     use crate::{
-        stream_to_stream, Codec, DrainCodec, DrainProgress, DriveErrorKind, EmptyBufferError,
-        Error, ErrorKind, Progress, Sink,
+        stream_to_stream, Codec, DrainCodec, DrainProgress, DriveError, DriveErrorKind,
+        EmptyBufferError, Error, ErrorKind, Progress, Pump, Sink,
     };
 
     const INPUT: &str = "Hello, World! 123";
@@ -841,27 +874,215 @@ mod tests {
         }
     }
 
+    /// Copies the input up to the first `marker`. At the marker, it
+    /// fails with `kind` and reports the copied bytes, like
+    /// `Base64Dec` does at a corrupt group. Tests use different kinds
+    /// to tell the error of `first` from the error of `second`.
+    struct FailsAtByte {
+        marker: u8,
+        kind: ErrorKind,
+    }
+
+    impl FailsAtByte {
+        fn corrupt_at(marker: u8) -> Self {
+            Self {
+                marker,
+                kind: ErrorKind::CorruptStream,
+            }
+        }
+
+        fn unexpected_end_at(marker: u8) -> Self {
+            Self {
+                marker,
+                kind: ErrorKind::UnexpectedEnd,
+            }
+        }
+    }
+
+    impl DrainCodec for FailsAtByte {
+        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
+        }
+
+        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            Ok(DrainProgress::Done { written: 0 })
+        }
+    }
+
+    impl Codec for FailsAtByte {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            let good = input
+                .iter()
+                .position(|&b| b == self.marker)
+                .unwrap_or(input.len());
+            let n = good.min(output.len());
+            copy_to_uninit(&mut output[..n], &input[..n]);
+            if n == good && n < input.len() {
+                return Err(Error::new(self.kind, n, n));
+            }
+            if n == input.len() {
+                Ok(Progress::InputConsumed { written: n })
+            } else {
+                Ok(Progress::OutputFilled { consumed: n })
+            }
+        }
+    }
+
+    /// Writes `text` in `flush` or in `finish`, then fails in the call
+    /// that writes the last byte. It reports the bytes of that call,
+    /// like `Base64Dec` does at a corrupt end.
+    struct FailsWhileDraining {
+        text: &'static [u8],
+        emitted: usize,
+    }
+
+    impl FailsWhileDraining {
+        fn drain(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            let left = &self.text[self.emitted..];
+            let n = left.len().min(output.len());
+            copy_to_uninit(&mut output[..n], &left[..n]);
+            self.emitted += n;
+            if self.emitted == self.text.len() {
+                return Err(Error::new(ErrorKind::CorruptStream, 0, n));
+            }
+            Ok(DrainProgress::OutputFilled)
+        }
+    }
+
+    impl DrainCodec for FailsWhileDraining {
+        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.drain(output)
+        }
+
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.drain(output)
+        }
+    }
+
+    impl Codec for FailsWhileDraining {
+        fn process(
+            &mut self,
+            _input: &[u8],
+            _output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            Ok(Progress::InputConsumed { written: 0 })
+        }
+    }
+
+    const DRAIN_MODES: [(DrainMode, &str); 2] =
+        [(DrainMode::Flush, "flush"), (DrainMode::Finish, "finish")];
+
+    /// Drives the chain until it fails. `sink` takes one byte per call.
+    /// So the chain needs several calls to deliver the bytes, and must
+    /// keep the error until then.
+    ///
+    /// The tests use `Pump` only to save code: it already calls the
+    /// codec in a loop, commits the bytes of an error and sums the
+    /// counts. The tests do not check `Pump`.
+    fn process_until_error<A: Codec, B: Codec>(
+        chain: Chain<A, B, Vec<u8>>,
+        input: &[u8],
+        sink: &mut OneByteAtATimeSink,
+    ) -> DriveError<Infallible, Infallible> {
+        Pump::new(chain)
+            .transfer_from(&mut SliceSource::new(input), sink)
+            .unwrap_err()
+    }
+
+    /// As `process_until_error`, but the chain is flushed or finished.
+    /// `Pump` is used only to save code here too.
+    fn drain_until_error<A: Codec, B: Codec>(
+        chain: Chain<A, B, Vec<u8>>,
+        mode: DrainMode,
+        sink: &mut OneByteAtATimeSink,
+    ) -> DriveError<Infallible, Infallible> {
+        let mut pump = Pump::new(chain);
+        match mode {
+            DrainMode::Flush => pump.flush_to(sink).unwrap_err(),
+            DrainMode::Finish => pump.finish_to(sink).unwrap_err(),
+        }
+    }
+
+    fn codec_error_kind(error: &DriveError<Infallible, Infallible>) -> ErrorKind {
+        match &error.kind {
+            DriveErrorKind::Codec(error) => error.kind,
+            other => panic!("not a codec error: {other:?}"),
+        }
+    }
+
+    // The four tests that follow cover two cases (an error of `first`,
+    // and an error of `second` that comes before it) on two code paths
+    // of `Chain` (`process`, and `flush`/`finish`). The paths are
+    // separate, so each has its own test.
+    //
+    // In all four, `staging` holds all the valid bytes, but the sink
+    // takes one byte per call.
+
+    /// `first` fails in `process` after it wrote valid bytes. The chain
+    /// passes these bytes through `second` before it reports the error.
     #[test]
-    fn first_codec_error_progress_is_retained_in_staging() {
-        let mut chain = Chain::new(
-            FailsOnce {
-                failed: false,
-                inner: identity(),
-            },
-            identity(),
-            vec![0; 8],
-        )
-        .unwrap();
-        let mut output = [0; 8];
+    fn process_passes_output_of_first_through_before_the_error_of_first() {
+        let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), identity(), vec![0u8; 64]).unwrap();
+        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+        let error = process_until_error(chain, b"abcde!!!!", &mut sink);
+        assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream);
+        assert_eq!(sink.bytes, b"abcde");
+        assert_eq!(error.moved.consumed, 5);
+    }
 
-        let error = chain
-            .process(b"abc", as_uninit_mut(&mut output))
-            .unwrap_err();
-        assert_eq!(error, Error::new(crate::ErrorKind::CorruptStream, 1, 0));
+    /// Like `process_passes_output_of_first_through_before_the_error_of_first`,
+    /// but `first` fails in `flush` or `finish`.
+    #[test]
+    fn drain_passes_output_of_first_through_before_the_error_of_first() {
+        for (mode, name) in DRAIN_MODES {
+            let first = FailsWhileDraining {
+                text: b"01234",
+                emitted: 0,
+            };
+            let chain = Chain::new(first, identity(), vec![0u8; 64]).unwrap();
+            let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+            let error = drain_until_error(chain, mode, &mut sink);
+            assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream, "{name}");
+            assert_eq!(sink.bytes, b"01234", "{name}");
+            assert_eq!(error.moved.consumed, 0, "{name}");
+        }
+    }
 
-        let progress = chain.process(b"bc", as_uninit_mut(&mut output)).unwrap();
-        assert_eq!(progress, Progress::InputConsumed { written: 3 });
-        assert_eq!(&output[..3], b"abc");
+    /// `second` fails in `process` on the bytes of `first`, before the
+    /// point where `first` fails. The error that comes first in the
+    /// data wins: the chain reports the error of `second`, and the
+    /// output holds the bytes that `second` wrote before it failed.
+    #[test]
+    fn process_reports_the_error_of_second_when_it_comes_before_the_error_of_first() {
+        let second = FailsAtByte::unexpected_end_at(b'e');
+        let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), second, vec![0u8; 64]).unwrap();
+        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+        let error = process_until_error(chain, b"abcdef!!!!", &mut sink);
+        assert_eq!(codec_error_kind(&error), ErrorKind::UnexpectedEnd);
+        assert_eq!(sink.bytes, b"abcd");
+    }
+
+    /// Like
+    /// `process_reports_the_error_of_second_when_it_comes_before_the_error_of_first`,
+    /// but the errors come in `flush` or `finish`.
+    #[test]
+    fn drain_reports_the_error_of_second_when_it_comes_before_the_error_of_first() {
+        for (mode, name) in DRAIN_MODES {
+            let first = FailsWhileDraining {
+                text: b"012345",
+                emitted: 0,
+            };
+            let second = FailsAtByte::unexpected_end_at(b'4');
+            let chain = Chain::new(first, second, vec![0u8; 64]).unwrap();
+            let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+            let error = drain_until_error(chain, mode, &mut sink);
+            assert_eq!(codec_error_kind(&error), ErrorKind::UnexpectedEnd, "{name}");
+            assert_eq!(sink.bytes, b"0123", "{name}");
+        }
     }
 
     #[test]
