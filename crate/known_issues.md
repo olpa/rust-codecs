@@ -203,6 +203,17 @@ the output. The `Codec` contract leaves `process` after `finish` to the
 codec. A codec can continue, or it can return `Err`. Nobody can rely on
 either behavior.
 
+### No randomized test compares the drivers and the buffer sizes (decided 2026-10-16)
+
+A review proposed a randomized test. It would run random chains of the
+bundled codecs through all drivers with small random buffers. It would
+compare each result with a one-shot run. We do not add this test.
+
+The test is not worth the effort. A generic test does not trigger the
+errors on the error paths. Only a concrete test triggers them, so we
+write a concrete test for each error path. On the happy paths, a driver
+and the one-shot run would give different results only after a critical
+defect in the core. The core tests catch such a defect.
 
 ## Known limits that we do not plan to fix
 
