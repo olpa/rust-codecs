@@ -111,7 +111,8 @@ pub trait Codec: DrainCodec {
     ///
     /// The codec does not remember a "leftover" position from the previous call.
     /// If a call did not consume all of `input`, the caller must retain those
-    /// bytes and supply them again.
+    /// bytes and supply them again, together, at the start of the `input` of
+    /// the next call.
     ///
     /// 3) The codec state after `Err` is not defined. A later call can fail
     ///    again or make normal progress.
