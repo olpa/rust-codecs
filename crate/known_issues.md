@@ -236,6 +236,13 @@ We add no bytes variant. A client that needs bytes builds the pipeline
 with its own wrapper. The name "encode" for a decoder call such as
 `encode_string(base64_dec(), ...)` stays. Do not report it.
 
+### Local `cargo doc` warns about four links (decided in 592acf2)
+
+With the default features, `cargo doc` reports unresolved links to
+`rot13`, `base64_enc`, `base64_dec` and `json_enc`. docs.rs builds
+with all features, so the published docs are correct. Use
+`cargo doc --all-features` locally. Do not report it.
+
 ## Known limits that we do not plan to fix
 
 - A third-party codec cannot report its own error detail. It must
