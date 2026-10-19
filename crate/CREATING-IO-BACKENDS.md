@@ -24,17 +24,30 @@ pub trait Sink {
 ```
 
 `chunk` and `spare` return a borrowed window into storage that the
-adapter itself owns. A caller calls `consume`/`commit` to say how much
-of the window it used. The next call then returns at least the
-unconsumed remainder, possibly with more data appended.
+adapter itself owns.
+
+### `chunk`/`consume`
+
+A caller calls `consume` to say how many bytes of the chunk it used.
+The next `chunk` returns at least the unconsumed bytes. More data can
+follow them.
+
+`chunk` returns `None` at the end of input. It never returns `Some` of
+an empty slice. Return `None` instead.
+
+### `spare`/`commit`
+
+A caller calls `commit` to say how many bytes of the space it filled.
+The next `spare` returns space for new bytes.
 
 A caller can call `spare` again without committing first. The adapter
 may then return the same span again. Bytes already written into it but
 not committed may be overwritten.
 
-`chunk` returns `None` at the end of input. `spare` returns `None` when
-there is no room left. Neither returns `Some` of an empty slice. Return
-`None` instead.
+`spare` returns `None` when there is no room left. It never returns
+`Some` of an empty slice. Return `None` instead.
+
+### `shared_io`
 
 A custom `Source`/`Sink` can be a thin wrapper over `shared_io`'s
 template implementation, which provides:
