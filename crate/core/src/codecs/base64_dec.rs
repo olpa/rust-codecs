@@ -195,7 +195,9 @@ impl<E: Engine> Base64Dec<E> {
                 return Ok(Progress::InputConsumed { written: out_pos });
             }
             let group = self.pending_input.take();
-            let produced = self.stage_group(&group, in_pos, out_pos)?;
+            // The group started in an earlier call. An error in it
+            // reports no input of this call as consumed.
+            let produced = self.stage_group(&group, 0, out_pos)?;
             if produced < GROUP {
                 self.done = true;
             }
@@ -522,6 +524,28 @@ mod tests {
                 assert_eq!(decoded, b"AB", "chunks {chunks:?}, output size {out_size}");
                 assert_eq!(position, 4, "chunks {chunks:?}, output size {out_size}");
             }
+        }
+    }
+
+    #[test]
+    fn corrupt_group_completed_in_a_later_call_is_not_consumed() {
+        // "QU=!" is a corrupt group. The first call keeps "QU" as
+        // pending input. The call that completes the group reports the
+        // error at the start of the run of input that completes it, as
+        // the other paths report it at the start of the corrupt
+        // group. The call never reports the bytes of that run as
+        // consumed. Whitespace before the run counts as consumed.
+        for (completion, position) in [(&b"=!"[..], 0), (b"=!xx", 0), (b"\n=\n!\n", 3)] {
+            let mut dec = base64_dec();
+            let mut out = [0u8; 16];
+            let progress = dec.process(b"QU", as_uninit_mut(&mut out)).unwrap();
+            assert_eq!(progress, Progress::InputConsumed { written: 0 });
+            let error = dec
+                .process(completion, as_uninit_mut(&mut out))
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::CorruptStream);
+            assert_eq!(error.consumed, position, "completion {completion:?}");
+            assert_eq!(error.written, 0, "completion {completion:?}");
         }
     }
 

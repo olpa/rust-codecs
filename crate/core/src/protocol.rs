@@ -116,6 +116,10 @@ pub trait Codec: DrainCodec {
     /// 3) The codec state after `Err` is not defined. A later call can fail
     ///    again or make normal progress.
     ///
+    /// Recommendation for a failing call: write all valid output for the
+    /// input before the error. Set `consumed` and `written` to match this
+    /// work. Set `consumed` near the cause of the error.
+    ///
     /// 4) This contract does not define a call to `process` after
     ///    `finish`. Two behaviors are valid:
     /// - a codec without a trailer or terminal state may continue to
