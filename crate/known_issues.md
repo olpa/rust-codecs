@@ -215,6 +215,27 @@ write a concrete test for each error path. On the happy paths, a driver
 and the one-shot run would give different results only after a critical
 defect in the core. The core tests catch such a defect.
 
+### The accessors of the wrapped reader or writer have no warning (decided 2026-10-19)
+
+`get_mut` on `CodecReader` and `BufReadCodecReader` (std and embedded
+variants) gives the caller the wrapped reader. A direct read skips the
+bytes that the wrapper has already pulled into its buffer. The doc
+comments do not say this. The same holds for `into_inner`, `into_parts`
+and the accessors of the writer wrappers. We add no warning.
+
+A user who wraps a stream expects that the wrapper reads ahead. The
+standard library uses the same accessors on `BufReader` and
+`BufWriter`. A direct read is a misuse that the caller must do on
+purpose. Do not report it.
+
+### `encode_str` and `encode_string` accept only `str` input (decided 2026-10-19)
+
+Both functions take `impl AsRef<str>`. They are for strings, and they
+are small wrappers over `VecSource`, `VecSink` and `stream_to_stream`.
+We add no bytes variant. A client that needs bytes builds the pipeline
+with its own wrapper. The name "encode" for a decoder call such as
+`encode_string(base64_dec(), ...)` stays. Do not report it.
+
 ## Known limits that we do not plan to fix
 
 - A third-party codec cannot report its own error detail. It must
