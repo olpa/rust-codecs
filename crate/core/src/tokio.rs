@@ -1,12 +1,70 @@
 //! Adapter from `tokio_util::codec::Decoder` to this crate's codecs.
 //!
-//! Work in progress: for now the module only holds a test that runs a
-//! sample tokio decoder by hand.
+//! Work in progress: the adapter is a stub.
+
+use core::mem::MaybeUninit;
+
+use bytes::BytesMut;
+use tokio_util::codec::Decoder;
+
+use crate::{
+    BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress, Error,
+};
+
+/// Runs a tokio `Decoder` as a [`BoundaryAwareCodec`]. Each logical
+/// stream ends after the first decoded object. The client takes the
+/// object with [`take_item`](Self::take_item).
+pub struct TokioDecoder<D: Decoder> {
+    decoder: D,
+    buf: BytesMut,
+    item: Option<D::Item>,
+}
+
+impl<D: Decoder> TokioDecoder<D> {
+    pub fn new(decoder: D) -> Self {
+        Self {
+            decoder,
+            buf: BytesMut::new(),
+            item: None,
+        }
+    }
+
+    /// Take the object decoded by the last logical stream.
+    pub fn take_item(&mut self) -> Option<D::Item> {
+        self.item.take()
+    }
+}
+
+impl<D: Decoder> DrainCodec for TokioDecoder<D> {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+}
+
+impl<D: Decoder> BoundaryAwareCodec for TokioDecoder<D> {
+    fn process_bounded(
+        &mut self,
+        _input: &[u8],
+        _output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        let _ = (&mut self.decoder, &mut self.buf);
+        unimplemented!("TokioDecoder::process_bounded")
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use bytes::{Buf, BytesMut};
     use tokio_util::codec::Decoder;
+
+    use super::TokioDecoder;
+    use crate::sources_and_sinks::slice::SliceSource;
+    use crate::sources_and_sinks::vec::VecSink;
+    use crate::{stream_to_stream, BoundaryAwareCodec};
 
     // Copied from the `tokio_util::codec` module documentation:
     // a four-byte little-endian length followed by that many bytes of
@@ -67,17 +125,39 @@ mod tests {
         v
     }
 
-    #[test]
-    fn decodes_three_strings() {
-        let mut decoder = MyStringDecoder {};
+    fn three_strings_input() -> Vec<u8> {
         let mut input = frame("hello");
         input.extend(frame("tokio"));
         input.extend(frame("world"));
-        let mut buf = BytesMut::from(&input[..]);
+        input
+    }
+
+    #[test]
+    fn decodes_three_strings() {
+        let mut decoder = MyStringDecoder {};
+        let mut buf = BytesMut::from(&three_strings_input()[..]);
 
         assert_eq!(decoder.decode(&mut buf).unwrap().as_deref(), Some("hello"));
         assert_eq!(decoder.decode(&mut buf).unwrap().as_deref(), Some("tokio"));
         assert_eq!(decoder.decode(&mut buf).unwrap().as_deref(), Some("world"));
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn stream_to_stream_stops_after_each_object() {
+        let input = three_strings_input();
+        let mut source = SliceSource::new(&input);
+        let mut adapter = TokioDecoder::new(MyStringDecoder {});
+
+        let mut items = Vec::new();
+        for _ in 0..3 {
+            let mut sink = VecSink::default();
+            // `&mut dyn` lets the caller keep the adapter.
+            let codec: &mut dyn BoundaryAwareCodec = &mut adapter;
+            stream_to_stream(&mut source, codec, &mut sink).unwrap();
+            items.push(adapter.take_item().unwrap());
+        }
+
+        assert_eq!(items, ["hello", "tokio", "world"]);
     }
 }
