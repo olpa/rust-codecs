@@ -235,6 +235,10 @@ pub mod sources_and_sinks;
 #[doc(inline)]
 pub use sources_and_sinks::vec::{encode_str, encode_string, EncodeError};
 
+#[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+pub mod tokio;
+
 mod codecs;
 #[allow(unused_imports)]
 pub use codecs::*;
@@ -254,6 +258,7 @@ mod feature_coverage {
             feature = "base64",
             feature = "json",
             feature = "embedded-io",
+            feature = "tokio",
             feature = "rot13"
         )),
         ignore = "some optional features are disabled — run `cargo test --all-features`"
@@ -264,6 +269,7 @@ mod feature_coverage {
         assert!(cfg!(feature = "base64"), "feature \"base64\" is off");
         assert!(cfg!(feature = "json"), "feature \"json\" is off");
         assert!(cfg!(feature = "rot13"), "feature \"rot13\" is off");
+        assert!(cfg!(feature = "tokio"), "feature \"tokio\" is off");
         assert!(
             cfg!(feature = "embedded-io"),
             "feature \"embedded-io\" is off"
