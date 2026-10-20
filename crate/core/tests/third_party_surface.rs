@@ -260,15 +260,94 @@ fn public_interfaces_are_instantiatable() {
     black_box(writer.finish().unwrap());
 }
 
+#[cfg(feature = "alloc")]
 #[test]
-fn a_codec_can_be_lent_as_mut() {
+fn a_plain_codec_can_be_boxed() {
     let mut out = [0u8; DUMMY.len()];
 
+    let boxed: Box<dyn Codec> = Box::new(DummyCodec);
+    let mut writer = DummyWriterWrapper::new(DummyWriter::new(), boxed);
+    black_box(writer.write(DUMMY).unwrap());
+    black_box(writer.finish().unwrap());
+
+    let boxed: Box<dyn Codec> = Box::new(DummyCodec);
+    let mut reader = DummyReaderWrapper::new(DummyReader::new(), boxed);
+    black_box(reader.read(&mut out).unwrap());
+}
+
+#[test]
+fn a_plain_codec_can_be_lent_as_mut() {
     let mut plain_codec = DummyCodec;
     let mut writer = DummyWriterWrapper::new(DummyWriter::new(), &mut plain_codec);
     black_box(writer.write(DUMMY).unwrap());
     black_box(writer.finish().unwrap());
-    black_box(&mut plain_codec);
+    black_box(plain_codec.finish(&mut []).unwrap());
+}
+
+#[test]
+fn a_plain_codec_can_be_lent_as_mut_dyn() {
+    let mut codec = DummyCodec;
+    let lent: &mut dyn Codec = &mut codec;
+    let mut writer = DummyWriterWrapper::new(DummyWriter::new(), lent);
+    black_box(writer.write(DUMMY).unwrap());
+    black_box(writer.finish().unwrap());
+    black_box(codec.finish(&mut []).unwrap());
+}
+
+#[test]
+fn a_plain_codec_can_move_to_a_thread() {
+    let mut writer = DummyWriterWrapper::new(DummyWriter::new(), DummyCodec);
+    std::thread::spawn(move || {
+        black_box(writer.write(DUMMY).unwrap());
+        black_box(writer.finish().unwrap());
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn a_lent_plain_codec_can_move_to_a_scoped_thread() {
+    let mut codec = DummyCodec;
+    std::thread::scope(|scope| {
+        let lent: &mut (dyn Codec + Send) = &mut codec;
+        scope.spawn(move || {
+            let mut writer = DummyWriterWrapper::new(DummyWriter::new(), lent);
+            black_box(writer.write(DUMMY).unwrap());
+            black_box(writer.finish().unwrap());
+        });
+    });
+    black_box(codec.finish(&mut []).unwrap());
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_boxed_plain_codec_can_move_to_a_thread() {
+    let boxed: Box<dyn Codec + Send + Sync> = Box::new(DummyCodec);
+    std::thread::spawn(move || {
+        let mut writer = DummyWriterWrapper::new(DummyWriter::new(), boxed);
+        black_box(writer.write(DUMMY).unwrap());
+        black_box(writer.finish().unwrap());
+    })
+    .join()
+    .unwrap();
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_boundary_aware_codec_can_be_boxed() {
+    let mut out = [0u8; DUMMY.len()];
+
+    let boxed: Box<dyn BoundaryAwareCodec> = Box::new(DummyBoundaryCodec);
+    let mut reader = DummyReaderWrapper::new(DummyReader::new(), boxed);
+    black_box(reader.read(&mut out).unwrap());
+
+    let boxed: Box<dyn BoundaryAwareCodec> = Box::new(DummyBoundaryCodec);
+    black_box(stream_to_stream(&mut DummyReader::new(), boxed, &mut DummyWriter::new()).unwrap());
+}
+
+#[test]
+fn a_boundary_aware_codec_can_be_lent_as_mut() {
+    let mut out = [0u8; DUMMY.len()];
 
     let mut boundary_codec = DummyBoundaryCodec;
     let mut reader = DummyReaderWrapper::new(DummyReader::new(), &mut boundary_codec);
@@ -281,5 +360,66 @@ fn a_codec_can_be_lent_as_mut() {
         )
         .unwrap(),
     );
-    black_box(&mut boundary_codec);
+    black_box(boundary_codec.finish(&mut []).unwrap());
+}
+
+#[test]
+fn a_boundary_aware_codec_can_be_lent_as_mut_dyn() {
+    let mut out = [0u8; DUMMY.len()];
+
+    let mut codec = DummyBoundaryCodec;
+    let lent: &mut dyn BoundaryAwareCodec = &mut codec;
+    let mut reader = DummyReaderWrapper::new(DummyReader::new(), lent);
+    black_box(reader.read(&mut out).unwrap());
+
+    let lent: &mut dyn BoundaryAwareCodec = &mut codec;
+    black_box(stream_to_stream(&mut DummyReader::new(), lent, &mut DummyWriter::new()).unwrap());
+    black_box(codec.finish(&mut []).unwrap());
+}
+
+#[test]
+fn a_boundary_aware_codec_can_move_to_a_thread() {
+    let mut reader = DummyReaderWrapper::new(DummyReader::new(), DummyBoundaryCodec);
+    std::thread::spawn(move || {
+        let mut out = [0u8; DUMMY.len()];
+        black_box(reader.read(&mut out).unwrap());
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn a_lent_boundary_aware_codec_can_move_to_a_scoped_thread() {
+    let mut codec = DummyBoundaryCodec;
+    std::thread::scope(|scope| {
+        let lent: &mut (dyn BoundaryAwareCodec + Send) = &mut codec;
+        scope.spawn(move || {
+            black_box(
+                stream_to_stream(&mut DummyReader::new(), lent, &mut DummyWriter::new()).unwrap(),
+            );
+        });
+    });
+    black_box(codec.finish(&mut []).unwrap());
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_boxed_boundary_aware_codec_can_move_to_a_thread() {
+    let boxed: Box<dyn BoundaryAwareCodec + Send> = Box::new(DummyBoundaryCodec);
+    std::thread::spawn(move || {
+        black_box(
+            stream_to_stream(&mut DummyReader::new(), boxed, &mut DummyWriter::new()).unwrap(),
+        );
+    })
+    .join()
+    .unwrap();
+
+    let boxed: Box<dyn BoundaryAwareCodec + Send + Sync> = Box::new(DummyBoundaryCodec);
+    std::thread::spawn(move || {
+        black_box(
+            stream_to_stream(&mut DummyReader::new(), boxed, &mut DummyWriter::new()).unwrap(),
+        );
+    })
+    .join()
+    .unwrap();
 }

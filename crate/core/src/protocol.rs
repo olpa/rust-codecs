@@ -361,6 +361,46 @@ impl<C: Codec + ?Sized> Codec for Box<C> {
     }
 }
 
+// Lets a `&mut dyn BoundaryAwareCodec` and a `Box<dyn BoundaryAwareCodec>`
+// stand in anywhere a `BoundaryAwareCodec` is expected.
+//
+// A generic `impl BoundaryAwareCodec for &mut C` would conflict with the
+// blanket impl for `Codec`. A trait object is not a `Codec`, so these
+// impls do not conflict.
+//
+// `dyn Trait + Send` is a different type from `dyn Trait`. So the macro
+// is called once for each set of auto traits that a caller needs to
+// move a codec between threads.
+macro_rules! forward_boundary_aware_for_dyn {
+    ($($auto_traits:tt)*) => {
+        impl BoundaryAwareCodec for &mut (dyn BoundaryAwareCodec $($auto_traits)* + '_) {
+            fn process_bounded(
+                &mut self,
+                input: &[u8],
+                output: &mut [MaybeUninit<u8>],
+            ) -> Result<BoundaryAwareProgress, Error> {
+                (**self).process_bounded(input, output)
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+        impl BoundaryAwareCodec for Box<dyn BoundaryAwareCodec $($auto_traits)* + '_> {
+            fn process_bounded(
+                &mut self,
+                input: &[u8],
+                output: &mut [MaybeUninit<u8>],
+            ) -> Result<BoundaryAwareProgress, Error> {
+                (**self).process_bounded(input, output)
+            }
+        }
+    };
+}
+
+forward_boundary_aware_for_dyn!();
+forward_boundary_aware_for_dyn!(+ Send);
+forward_boundary_aware_for_dyn!(+ Send + Sync);
+
 // ----
 // Errors and validation
 // ----

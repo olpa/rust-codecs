@@ -162,7 +162,8 @@ The crate cannot provide a `BoundaryAwareCodec` impl for `&mut C`. It
 would conflict with the blanket impl that makes every `Codec` a
 `BoundaryAwareCodec`.
 
-For a `BoundaryAwareCodec`, add this forwarding impl to your crate:
+For a concrete `BoundaryAwareCodec` type, add this forwarding impl to
+your crate:
 
 ```rust
 impl BoundaryAwareCodec for &mut MyBoundaryAwareCodec {
