@@ -1,6 +1,6 @@
 //! Adapter from `tokio_util::codec::Decoder` to this crate's codecs.
 //!
-//! Work in progress: the adapter is a stub.
+//! Work in progress.
 
 use core::mem::MaybeUninit;
 
@@ -8,12 +8,16 @@ use bytes::BytesMut;
 use tokio_util::codec::Decoder;
 
 use crate::{
-    BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress, Error,
+    BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress, Error, ErrorKind,
 };
 
 /// Runs a tokio `Decoder` as a [`BoundaryAwareCodec`]. Each logical
 /// stream ends after the first decoded object. The client takes the
 /// object with [`take_item`](Self::take_item).
+///
+/// The codec writes nothing to its output; the object travels only
+/// through `take_item`. An object that the client did not take is
+/// overwritten by the next one.
 pub struct TokioDecoder<D: Decoder> {
     decoder: D,
     buf: BytesMut,
@@ -40,19 +44,50 @@ impl<D: Decoder> DrainCodec for TokioDecoder<D> {
         Ok(DrainProgress::Done { written: 0 })
     }
 
+    /// Lets the decoder see the end of input. This can yield a last
+    /// object or report a truncated one.
     fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        Ok(DrainProgress::Done { written: 0 })
+        let result = self.decoder.decode_eof(&mut self.buf);
+        let leftover = !self.buf.is_empty();
+        self.buf.clear();
+        match result {
+            Ok(item) => {
+                if item.is_some() {
+                    self.item = item;
+                }
+                Ok(DrainProgress::Done { written: 0 })
+            }
+            Err(_) if leftover => Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0)),
+            Err(_) => Err(Error::new(ErrorKind::CorruptStream, 0, 0)),
+        }
     }
 }
 
 impl<D: Decoder> BoundaryAwareCodec for TokioDecoder<D> {
     fn process_bounded(
         &mut self,
-        _input: &[u8],
+        input: &[u8],
         _output: &mut [MaybeUninit<u8>],
     ) -> Result<BoundaryAwareProgress, Error> {
-        let _ = (&mut self.decoder, &mut self.buf);
-        unimplemented!("TokioDecoder::process_bounded")
+        self.buf.extend_from_slice(input);
+        // What the decoder leaves in `buf` is the tail of `input`.
+        match self.decoder.decode(&mut self.buf) {
+            Ok(None) => Ok(BoundaryAwareProgress::InputConsumed { written: 0 }),
+            Ok(Some(item)) => {
+                self.item = Some(item);
+                let consumed = input.len().saturating_sub(self.buf.len());
+                // The caller supplies the tail again for the next stream.
+                self.buf.clear();
+                Ok(BoundaryAwareProgress::Boundary {
+                    consumed,
+                    written: 0,
+                })
+            }
+            Err(_) => {
+                let consumed = input.len().saturating_sub(self.buf.len());
+                Err(Error::new(ErrorKind::CorruptStream, consumed, 0))
+            }
+        }
     }
 }
 
