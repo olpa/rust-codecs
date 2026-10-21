@@ -44,8 +44,8 @@ pub fn pump_flush<O: Sink, C: Codec>(
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.flush_to(output)? {
-        PumpDrain::Done { .. } => Ok(()),
-        PumpDrain::SinkExhausted { .. } => Err(pump.drive_error(DriveErrorKind::SinkExhausted)),
+        PumpDrain::Done => Ok(()),
+        PumpDrain::SinkExhausted => Err(pump.drive_error(DriveErrorKind::SinkExhausted)),
     }
 }
 
@@ -66,8 +66,8 @@ pub fn pump_finish<O: Sink, C: Codec>(
     output: &mut O,
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.finish_to(output)? {
-        PumpDrain::Done { .. } => Ok(()),
-        PumpDrain::SinkExhausted { .. } => Err(pump.drive_error(DriveErrorKind::SinkExhausted)),
+        PumpDrain::Done => Ok(()),
+        PumpDrain::SinkExhausted => Err(pump.drive_error(DriveErrorKind::SinkExhausted)),
     }
 }
 

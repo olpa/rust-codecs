@@ -55,9 +55,9 @@ fn read_into<I: Source, C: BoundaryAwareCodec>(
         || loop {
             let step = pump.transfer_step(input, output)?;
             match step {
-                PumpTransfer::SourceExhausted(_) | PumpTransfer::InputEnded(_) => break true,
-                PumpTransfer::Progressed(_) if output.written() == 0 => {}
-                PumpTransfer::Progressed(_) | PumpTransfer::SinkExhausted(_) => break false,
+                PumpTransfer::SourceExhausted | PumpTransfer::InputEnded => break true,
+                PumpTransfer::Progressed if output.written() == 0 => {}
+                PumpTransfer::Progressed | PumpTransfer::SinkExhausted => break false,
             }
         };
     if input_ended {

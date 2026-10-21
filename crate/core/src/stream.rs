@@ -42,8 +42,7 @@ impl<EI: core::fmt::Display, EO: core::fmt::Display> core::fmt::Display for Driv
 /// the error.
 ///
 /// `moved` counts the whole drive: all the bytes that the [`Pump`]
-/// moved in its life, up to and including the step that failed. A
-/// success result of one call counts only that call.
+/// moved in its life, up to and including the step that failed.
 ///
 /// With [`DriveErrorKind::Codec`], the inner [`Error`] counts only the
 /// codec step that failed. A repeat of the error counts zero, because
@@ -115,37 +114,27 @@ where
     C: BoundaryAwareCodec,
 {
     let mut pump = Pump::new(codec);
-    let transferred = match pump.transfer_from(input, output)? {
-        PumpStop::SinkExhausted(moved) => {
-            return Err(DriveError::new(DriveErrorKind::SinkExhausted, moved));
-        }
-        PumpStop::SourceExhausted(moved) | PumpStop::InputEnded(moved) => moved,
-    };
-    let drained = pump.finish_to(output).map_err(DriveError::widen_source)?;
-    let (PumpDrain::Done { written } | PumpDrain::SinkExhausted { written }) = drained;
-    let moved = TransferCounts {
-        consumed: transferred.consumed,
-        written: transferred.written.wrapping_add(written),
-    };
-    match drained {
-        PumpDrain::Done { .. } => Ok(moved),
-        PumpDrain::SinkExhausted { .. } => {
-            Err(DriveError::new(DriveErrorKind::SinkExhausted, moved))
-        }
+    if let PumpStop::SinkExhausted = pump.transfer_from(input, output)? {
+        return Err(pump.drive_error(DriveErrorKind::SinkExhausted));
+    }
+    match pump.finish_to(output).map_err(DriveError::widen_source)? {
+        PumpDrain::Done => Ok(pump.total()),
+        PumpDrain::SinkExhausted => Err(pump.drive_error(DriveErrorKind::SinkExhausted)),
     }
 }
 
-/// Result of one pump transfer, with the counts moved before it stopped.
+/// Result of one pump transfer. The bytes it moved are in
+/// [`Pump::total`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PumpTransfer {
-    SourceExhausted(TransferCounts),
-    SinkExhausted(TransferCounts),
+    SourceExhausted,
+    SinkExhausted,
     /// The step completed normally, without exhausting `input` or
     /// `output`. More may be available from either on the next step.
-    Progressed(TransferCounts),
+    Progressed,
     /// The codec reported an in-band end. The input of this logical
     /// stream ended. The driver must call `finish_to` next.
-    InputEnded(TransferCounts),
+    InputEnded,
 }
 
 /// A version of [`PumpTransfer`] without `Progressed`, for
@@ -153,16 +142,17 @@ pub(crate) enum PumpTransfer {
 /// progress alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PumpStop {
-    SourceExhausted(TransferCounts),
-    SinkExhausted(TransferCounts),
-    InputEnded(TransferCounts),
+    SourceExhausted,
+    SinkExhausted,
+    InputEnded,
 }
 
-/// Result of one pump drain, with the bytes written before it stopped.
+/// Result of one pump drain. The bytes it wrote are in
+/// [`Pump::total`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PumpDrain {
-    SinkExhausted { written: usize },
-    Done { written: usize },
+    SinkExhausted,
+    Done,
 }
 
 /// A bufferless lifecycle wrapper around a codec: processes input
@@ -250,7 +240,6 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     }
 
     /// The bytes that the pump moved in its life. See [`Self::total`].
-    #[cfg(test)]
     pub(crate) fn total(&self) -> TransferCounts {
         self.total
     }
@@ -302,28 +291,12 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         input: &mut I,
         output: &mut O,
     ) -> Result<PumpStop, DriveError<I::Error, O::Error>> {
-        let mut consumed = 0usize;
-        let mut written = 0usize;
         loop {
-            let total = |moved: TransferCounts| TransferCounts {
-                consumed: consumed.wrapping_add(moved.consumed),
-                written: written.wrapping_add(moved.written),
-            };
-            let step = self.transfer_step(input, output)?;
-            match step {
-                PumpTransfer::Progressed(moved) => {
-                    consumed = consumed.wrapping_add(moved.consumed);
-                    written = written.wrapping_add(moved.written);
-                }
-                PumpTransfer::SourceExhausted(moved) => {
-                    return Ok(PumpStop::SourceExhausted(total(moved)));
-                }
-                PumpTransfer::SinkExhausted(moved) => {
-                    return Ok(PumpStop::SinkExhausted(total(moved)));
-                }
-                PumpTransfer::InputEnded(moved) => {
-                    return Ok(PumpStop::InputEnded(total(moved)));
-                }
+            match self.transfer_step(input, output)? {
+                PumpTransfer::Progressed => {}
+                PumpTransfer::SourceExhausted => return Ok(PumpStop::SourceExhausted),
+                PumpTransfer::SinkExhausted => return Ok(PumpStop::SinkExhausted),
+                PumpTransfer::InputEnded => return Ok(PumpStop::InputEnded),
             }
         }
     }
@@ -374,7 +347,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             .chunk()
             .map_err(|error| self.drive_error(DriveErrorKind::Source(error)))?
         else {
-            return Ok(PumpTransfer::SourceExhausted(TransferCounts::default()));
+            return Ok(PumpTransfer::SourceExhausted);
         };
         let spare = output
             .spare()
@@ -427,7 +400,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         };
         if moved.consumed == 0 && moved.written == 0 && !boundary {
             if sink_full {
-                return Ok(PumpTransfer::SinkExhausted(TransferCounts::default()));
+                return Ok(PumpTransfer::SinkExhausted);
             }
             return Err(self.drive_error(DriveErrorKind::NoProgress));
         }
@@ -447,9 +420,9 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             self.count_written(moved.written);
         }
         Ok(if boundary {
-            PumpTransfer::InputEnded(moved)
+            PumpTransfer::InputEnded
         } else {
-            PumpTransfer::Progressed(moved)
+            PumpTransfer::Progressed
         })
     }
 
@@ -497,7 +470,6 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         mut step: impl FnMut(&mut Self, &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         self.check_not_failed()?;
-        let mut written = 0;
         loop {
             let spare = output
                 .spare()
@@ -533,8 +505,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                         }
                     };
                     return Ok(match progress {
-                        DrainProgress::Done { .. } => PumpDrain::Done { written },
-                        DrainProgress::OutputFilled => PumpDrain::SinkExhausted { written },
+                        DrainProgress::Done { .. } => PumpDrain::Done,
+                        DrainProgress::OutputFilled => PumpDrain::SinkExhausted,
                     });
                 }
             };
@@ -544,9 +516,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                     .map_err(|error| self.drive_error(DriveErrorKind::Sink(error)))?;
                 self.count_written(step_written);
             }
-            written = written.wrapping_add(step_written);
             if done {
-                return Ok(PumpDrain::Done { written });
+                return Ok(PumpDrain::Done);
             }
         }
     }
@@ -705,12 +676,13 @@ mod tests {
         let mut output = NullSink;
         let mut pump = Pump::new(DropEverything);
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
+        assert_eq!(moved, PumpStop::SourceExhausted);
         assert_eq!(
-            moved,
-            PumpStop::SourceExhausted(TransferCounts {
+            pump.total(),
+            TransferCounts {
                 consumed: 6,
                 written: 0,
-            })
+            }
         );
     }
 
@@ -872,12 +844,13 @@ mod tests {
         let boxed: alloc::boxed::Box<dyn crate::Codec> = alloc::boxed::Box::new(DropEverything);
         let mut pump: Pump<alloc::boxed::Box<dyn crate::Codec>> = Pump::new(boxed);
         let moved = pump.transfer_from(&mut input, &mut output).unwrap();
+        assert_eq!(moved, PumpStop::SourceExhausted);
         assert_eq!(
-            moved,
-            PumpStop::SourceExhausted(TransferCounts {
+            pump.total(),
+            TransferCounts {
                 consumed: 6,
                 written: 0,
-            })
+            }
         );
     }
 
@@ -1013,13 +986,16 @@ mod tests {
         };
 
         let first = pump.finish_to(&mut output).unwrap();
-        assert_eq!(first, PumpDrain::Done { written: 1 });
+        assert_eq!(first, PumpDrain::Done);
+        let after_first = pump.total();
+        assert_eq!(after_first.written, 1);
 
         output.written = 0;
         let second = pump.finish_to(&mut output).unwrap();
+        assert_eq!(second, PumpDrain::Done);
         assert_eq!(
-            second,
-            PumpDrain::Done { written: 0 },
+            pump.total(),
+            after_first,
             "finish ran again after it already reported Done"
         );
     }
@@ -1088,7 +1064,8 @@ mod tests {
         // output gets an 'F' marker.
         let drained = pump.flush_to(&mut output).unwrap();
 
-        assert_eq!(drained, PumpDrain::Done { written: 3 });
+        assert_eq!(drained, PumpDrain::Done);
+        assert_eq!(pump.total().written, 3);
         assert_eq!(&output.bytes[..output.written], b"XXX");
     }
 
@@ -1217,10 +1194,14 @@ mod tests {
 
         assert_eq!(
             pump.transfer_step(&mut input, &mut output).unwrap(),
-            PumpTransfer::Progressed(TransferCounts {
+            PumpTransfer::Progressed
+        );
+        assert_eq!(
+            pump.total(),
+            TransferCounts {
                 consumed: 3,
                 written: 2,
-            })
+            }
         );
     }
 
@@ -1238,10 +1219,14 @@ mod tests {
 
         assert_eq!(
             pump.transfer_step(&mut input, &mut output).unwrap(),
-            PumpTransfer::Progressed(TransferCounts {
+            PumpTransfer::Progressed
+        );
+        assert_eq!(
+            pump.total(),
+            TransferCounts {
                 consumed: 2,
                 written: 5,
-            })
+            }
         );
     }
 
@@ -1262,10 +1247,14 @@ mod tests {
 
         assert_eq!(
             pump.transfer_step(&mut input, &mut output).unwrap(),
-            PumpTransfer::InputEnded(TransferCounts {
+            PumpTransfer::InputEnded
+        );
+        assert_eq!(
+            pump.total(),
+            TransferCounts {
                 consumed: 2,
                 written: 4,
-            })
+            }
         );
     }
 
