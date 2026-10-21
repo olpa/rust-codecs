@@ -2,7 +2,7 @@ use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSink;
 use crate::stream::{Pump, PumpTransfer};
-use crate::{BoundaryAwareCodec, DriveError, DriveErrorKind, Source, TransferCounts};
+use crate::{BoundaryAwareCodec, DriveError, DriveErrorKind, Source};
 
 /// This is the transport-independent core of a `Read::read`
 /// implementation. In the normal case, one pull from `input` makes
@@ -28,10 +28,7 @@ pub fn boundary_aware_pump_read<I: Source, C: BoundaryAwareCodec>(
     buf: &mut [u8],
 ) -> Result<usize, DriveError<I::Error, Infallible>> {
     if let Some(error) = pump.failure() {
-        return Err(DriveError::new(
-            DriveErrorKind::Codec(error),
-            TransferCounts::default(),
-        ));
+        return Err(pump.drive_error(DriveErrorKind::Codec(error)));
     }
     if buf.is_empty() || pump.is_done() {
         return Ok(0);
@@ -54,18 +51,9 @@ fn read_into<I: Source, C: BoundaryAwareCodec>(
     input: &mut I,
     output: &mut SliceSink<'_>,
 ) -> Result<(), DriveError<I::Error, Infallible>> {
-    let mut moved = TransferCounts::default();
     let input_ended = pump.is_finishing()
         || loop {
-            let step = pump
-                .transfer_step(input, output)
-                .map_err(|error| error.after(moved))?;
-            let (PumpTransfer::SourceExhausted(step_moved)
-            | PumpTransfer::SinkExhausted(step_moved)
-            | PumpTransfer::Progressed(step_moved)
-            | PumpTransfer::InputEnded(step_moved)) = step;
-            moved.consumed = moved.consumed.wrapping_add(step_moved.consumed);
-            moved.written = moved.written.wrapping_add(step_moved.written);
+            let step = pump.transfer_step(input, output)?;
             match step {
                 PumpTransfer::SourceExhausted(_) | PumpTransfer::InputEnded(_) => break true,
                 PumpTransfer::Progressed(_) if output.written() == 0 => {}
@@ -76,8 +64,7 @@ fn read_into<I: Source, C: BoundaryAwareCodec>(
         // Filling this caller-provided read buffer is normal partial-read
         // progress, not an I/O failure. `finish_to` records that condition
         // in its successful result so the next `read` can resume finalizing.
-        pump.finish_to(output)
-            .map_err(|error| error.widen_source().after(moved))?;
+        pump.finish_to(output).map_err(DriveError::widen_source)?;
     }
     Ok(())
 }

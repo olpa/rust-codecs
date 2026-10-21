@@ -10,7 +10,7 @@ use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSource;
 use crate::stream::{Pump, PumpDrain};
-use crate::{Codec, DriveError, DriveErrorKind, Sink, TransferCounts};
+use crate::{Codec, DriveError, DriveErrorKind, Sink};
 
 /// Drive `pump` from `buf`, writing transformed bytes into `output`.
 /// Returns the number of bytes consumed from `buf`.
@@ -45,10 +45,7 @@ pub fn pump_flush<O: Sink, C: Codec>(
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.flush_to(output)? {
         PumpDrain::Done { .. } => Ok(()),
-        PumpDrain::SinkExhausted { written } => Err(DriveError::new(
-            DriveErrorKind::SinkExhausted,
-            TransferCounts::only_written(written),
-        )),
+        PumpDrain::SinkExhausted { .. } => Err(pump.drive_error(DriveErrorKind::SinkExhausted)),
     }
 }
 
@@ -70,10 +67,7 @@ pub fn pump_finish<O: Sink, C: Codec>(
 ) -> Result<(), DriveError<Infallible, O::Error>> {
     match pump.finish_to(output)? {
         PumpDrain::Done { .. } => Ok(()),
-        PumpDrain::SinkExhausted { written } => Err(DriveError::new(
-            DriveErrorKind::SinkExhausted,
-            TransferCounts::only_written(written),
-        )),
+        PumpDrain::SinkExhausted { .. } => Err(pump.drive_error(DriveErrorKind::SinkExhausted)),
     }
 }
 

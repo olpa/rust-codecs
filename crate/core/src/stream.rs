@@ -41,8 +41,13 @@ impl<EI: core::fmt::Display, EO: core::fmt::Display> core::fmt::Display for Driv
 /// An error from a drive, and the bytes that the drive moved before
 /// the error.
 ///
-/// `moved` counts the whole drive. With [`DriveErrorKind::Codec`],
-/// the inner [`Error`] counts only the codec step that failed.
+/// `moved` counts the whole drive: all the bytes that the [`Pump`]
+/// moved in its life, up to and including the step that failed. A
+/// success result of one call counts only that call.
+///
+/// With [`DriveErrorKind::Codec`], the inner [`Error`] counts only the
+/// codec step that failed. A repeat of the error counts zero, because
+/// the repeat moves no bytes.
 #[derive(Debug)]
 pub struct DriveError<EI, EO> {
     pub kind: DriveErrorKind<EI, EO>,
@@ -52,19 +57,6 @@ pub struct DriveError<EI, EO> {
 impl<EI, EO> DriveError<EI, EO> {
     pub(crate) fn new(kind: DriveErrorKind<EI, EO>, moved: TransferCounts) -> Self {
         Self { kind, moved }
-    }
-
-    /// Add the counts of the earlier steps of the drive.
-    ///
-    /// One step of the drive creates the error, and that step knows
-    /// only its own counts. The caller adds the counts of the steps
-    /// before it. Then `moved` counts the whole drive.
-    pub(crate) fn after(self, earlier: TransferCounts) -> Self {
-        let moved = TransferCounts {
-            consumed: earlier.consumed.wrapping_add(self.moved.consumed),
-            written: earlier.written.wrapping_add(self.moved.written),
-        };
-        Self::new(self.kind, moved)
     }
 }
 
@@ -129,9 +121,7 @@ where
         }
         PumpStop::SourceExhausted(moved) | PumpStop::InputEnded(moved) => moved,
     };
-    let drained = pump
-        .finish_to(output)
-        .map_err(|error| error.widen_source().after(transferred))?;
+    let drained = pump.finish_to(output).map_err(DriveError::widen_source)?;
     let (PumpDrain::Done { written } | PumpDrain::SinkExhausted { written }) = drained;
     let moved = TransferCounts {
         consumed: transferred.consumed,
@@ -210,6 +200,11 @@ pub struct Pump<C> {
     /// After `Err`, the codec state is not defined. So the pump does
     /// not call the codec again. It returns this error instead.
     failed: Option<ErrorKind>,
+    /// The bytes that the pump moved in its life. A byte counts after
+    /// the source or the sink has taken it: a failed commit does not
+    /// count its output bytes. Every [`DriveError`] of the pump reports
+    /// this value as `moved`.
+    total: TransferCounts,
 }
 
 impl<C: BoundaryAwareCodec> Pump<C> {
@@ -219,6 +214,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             ended_by_finish: false,
             finishing: false,
             failed: None,
+            total: TransferCounts::default(),
         }
     }
 
@@ -253,14 +249,31 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         self.failed.map(|kind| Error::new(kind, 0, 0))
     }
 
+    /// The bytes that the pump moved in its life. See [`Self::total`].
+    #[cfg(test)]
+    pub(crate) fn total(&self) -> TransferCounts {
+        self.total
+    }
+
+    /// An error of the pump, with the bytes that the pump moved in its
+    /// life.
+    pub(crate) fn drive_error<EI, EO>(&self, kind: DriveErrorKind<EI, EO>) -> DriveError<EI, EO> {
+        DriveError::new(kind, self.total)
+    }
+
+    fn count_consumed(&mut self, amount: usize) {
+        self.total.consumed = self.total.consumed.wrapping_add(amount);
+    }
+
+    fn count_written(&mut self, amount: usize) {
+        self.total.written = self.total.written.wrapping_add(amount);
+    }
+
     /// Return the latched codec error, if any, before a call to the
     /// codec.
     fn check_not_failed<EI, EO>(&self) -> Result<(), DriveError<EI, EO>> {
         match self.failure() {
-            Some(error) => Err(DriveError::new(
-                DriveErrorKind::Codec(error),
-                TransferCounts::default(),
-            )),
+            Some(error) => Err(self.drive_error(DriveErrorKind::Codec(error))),
             None => Ok(()),
         }
     }
@@ -296,9 +309,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 consumed: consumed.wrapping_add(moved.consumed),
                 written: written.wrapping_add(moved.written),
             };
-            let step = self
-                .transfer_step(input, output)
-                .map_err(|error| error.after(total(TransferCounts::default())))?;
+            let step = self.transfer_step(input, output)?;
             match step {
                 PumpTransfer::Progressed(moved) => {
                     consumed = consumed.wrapping_add(moved.consumed);
@@ -359,15 +370,15 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         //   case is a one-read delay at each atomic-unit boundary.
         //
         // These delays are tolerable. We do not plan to fix them.
-        let Some(chunk) = input.chunk().map_err(|error| {
-            DriveError::new(DriveErrorKind::Source(error), TransferCounts::default())
-        })?
+        let Some(chunk) = input
+            .chunk()
+            .map_err(|error| self.drive_error(DriveErrorKind::Source(error)))?
         else {
             return Ok(PumpTransfer::SourceExhausted(TransferCounts::default()));
         };
-        let spare = output.spare().map_err(|error| {
-            DriveError::new(DriveErrorKind::Sink(error), TransferCounts::default())
-        })?;
+        let spare = output
+            .spare()
+            .map_err(|error| self.drive_error(DriveErrorKind::Sink(error)))?;
         // A call may still progress with an empty `spare` (e.g. a
         // codec that only consumes input). So an empty slice is not
         // rejected up front, zero bytes moved on both sides without
@@ -383,21 +394,16 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 self.latch_failure(&error);
                 if error.consumed > 0 {
                     input.consume(error.consumed);
+                    self.count_consumed(error.consumed);
                 }
                 if error.written > 0 {
-                    output.commit(error.written).map_err(|sink_error| {
-                        // The commit failed, so no bytes count as written.
-                        DriveError::new(
-                            DriveErrorKind::Sink(sink_error),
-                            TransferCounts::only_consumed(error.consumed),
-                        )
-                    })?;
+                    // If the commit fails, no bytes count as written.
+                    output
+                        .commit(error.written)
+                        .map_err(|sink_error| self.drive_error(DriveErrorKind::Sink(sink_error)))?;
+                    self.count_written(error.written);
                 }
-                let moved = TransferCounts {
-                    consumed: error.consumed,
-                    written: error.written,
-                };
-                return Err(DriveError::new(DriveErrorKind::Codec(error), moved));
+                return Err(self.drive_error(DriveErrorKind::Codec(error)));
             }
         };
         let (moved, boundary) = match progress {
@@ -423,10 +429,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             if sink_full {
                 return Ok(PumpTransfer::SinkExhausted(TransferCounts::default()));
             }
-            return Err(DriveError::new(
-                DriveErrorKind::NoProgress,
-                TransferCounts::default(),
-            ));
+            return Err(self.drive_error(DriveErrorKind::NoProgress));
         }
         // `moved.consumed` may be less than `chunk.len()` if output
         // ran out first. The unconsumed remainder is not lost: it
@@ -434,15 +437,14 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         // together with newly arrived input.
         if moved.consumed > 0 {
             input.consume(moved.consumed);
+            self.count_consumed(moved.consumed);
         }
         if moved.written > 0 {
-            output.commit(moved.written).map_err(|error| {
-                // The commit failed, so no bytes count as written.
-                DriveError::new(
-                    DriveErrorKind::Sink(error),
-                    TransferCounts::only_consumed(moved.consumed),
-                )
-            })?;
+            // If the commit fails, no bytes count as written.
+            output
+                .commit(moved.written)
+                .map_err(|error| self.drive_error(DriveErrorKind::Sink(error)))?;
+            self.count_written(moved.written);
         }
         Ok(if boundary {
             PumpTransfer::InputEnded(moved)
@@ -497,21 +499,15 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         self.check_not_failed()?;
         let mut written = 0;
         loop {
-            let spare = output.spare().map_err(|error| {
-                DriveError::new(
-                    DriveErrorKind::Sink(error),
-                    TransferCounts::only_written(written),
-                )
-            })?;
+            let spare = output
+                .spare()
+                .map_err(|error| self.drive_error(DriveErrorKind::Sink(error)))?;
             let (step_written, done) = match spare {
                 Some(spare) => match step(self, spare) {
                     Ok(DrainProgress::Done { written }) => (written, true),
                     Ok(DrainProgress::OutputFilled) if !spare.is_empty() => (spare.len(), false),
                     Ok(DrainProgress::OutputFilled) => {
-                        return Err(DriveError::new(
-                            DriveErrorKind::NoProgress,
-                            TransferCounts::only_written(written),
-                        ));
+                        return Err(self.drive_error(DriveErrorKind::NoProgress));
                     }
                     Err(error) => {
                         let error = error
@@ -520,14 +516,11 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                         self.latch_failure(&error);
                         if error.written > 0 {
                             output.commit(error.written).map_err(|sink_error| {
-                                DriveError::new(
-                                    DriveErrorKind::Sink(sink_error),
-                                    TransferCounts::only_written(written),
-                                )
+                                self.drive_error(DriveErrorKind::Sink(sink_error))
                             })?;
+                            self.count_written(error.written);
                         }
-                        let all = TransferCounts::only_written(written.wrapping_add(error.written));
-                        return Err(DriveError::new(DriveErrorKind::Codec(error), all));
+                        return Err(self.drive_error(DriveErrorKind::Codec(error)));
                     }
                 },
                 None => {
@@ -536,10 +529,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                         Err(error) => {
                             let error = error.validated(0, 0).unwrap_or_else(|violation| violation);
                             self.latch_failure(&error);
-                            return Err(DriveError::new(
-                                DriveErrorKind::Codec(error),
-                                TransferCounts::only_written(written),
-                            ));
+                            return Err(self.drive_error(DriveErrorKind::Codec(error)));
                         }
                     };
                     return Ok(match progress {
@@ -549,12 +539,10 @@ impl<C: BoundaryAwareCodec> Pump<C> {
                 }
             };
             if step_written > 0 {
-                output.commit(step_written).map_err(|error| {
-                    DriveError::new(
-                        DriveErrorKind::Sink(error),
-                        TransferCounts::only_written(written),
-                    )
-                })?;
+                output
+                    .commit(step_written)
+                    .map_err(|error| self.drive_error(DriveErrorKind::Sink(error)))?;
+                self.count_written(step_written);
             }
             written = written.wrapping_add(step_written);
             if done {
@@ -840,7 +828,7 @@ mod tests {
     // first `transfer_from` call moves two chunks. The second call moves
     // one chunk and fails on the next. The failing chunk counts too.
     #[test]
-    fn failure_counts_the_bytes_of_earlier_transfers() {
+    fn total_counts_the_bytes_of_earlier_transfers() {
         let mut pump = Pump::new(FailsAfterInner {
             inner: identity(),
             ok_calls: 3,
@@ -864,8 +852,15 @@ mod tests {
         pump.transfer_from(&mut second, &mut output).unwrap_err();
 
         assert_eq!(
+            pump.total(),
+            TransferCounts {
+                consumed: 16,
+                written: 16,
+            }
+        );
+        assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 16, 16))
+            Some(Error::new(ErrorKind::CorruptStream, 0, 0))
         );
     }
 
@@ -1045,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_counts_the_bytes_before_a_failing_finish() {
+    fn total_counts_the_bytes_before_a_failing_finish() {
         let mut pump = pump_that_fails_in_the_drain();
         let mut bytes = [0u8; 16];
         let mut output = SliceSink::new(&mut bytes);
@@ -1059,8 +1054,15 @@ mod tests {
         assert!(pump.finish_to(&mut output).is_err());
 
         assert_eq!(
+            pump.total(),
+            TransferCounts {
+                consumed: 8,
+                written: 8,
+            }
+        );
+        assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 8, 8))
+            Some(Error::new(ErrorKind::CorruptStream, 0, 0))
         );
     }
 
@@ -1171,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_counts_the_bytes_before_a_failing_flush() {
+    fn total_counts_the_bytes_before_a_failing_flush() {
         let mut pump = pump_that_fails_in_the_drain();
         let mut bytes = [0u8; 16];
         let mut output = SliceSink::new(&mut bytes);
@@ -1185,8 +1187,15 @@ mod tests {
         assert!(pump.flush_to(&mut output).is_err());
 
         assert_eq!(
+            pump.total(),
+            TransferCounts {
+                consumed: 8,
+                written: 8,
+            }
+        );
+        assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 8, 8))
+            Some(Error::new(ErrorKind::CorruptStream, 0, 0))
         );
     }
 
