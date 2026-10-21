@@ -193,8 +193,8 @@ fn run_io<R: BufRead, W: Write>(
 /// Same end-to-end behavior as `run_io`, but drives the composed chain
 /// directly via `stream_to_stream` over `BufReadSource`/`StdSink` instead
 /// of wrapping it in `BufReadCodecReader`/`CodecWriter` and driving it with
-/// `std::io::copy`. The reader and writer stacks are folded into a
-/// single `Chain` first, since `stream_to_stream` drives one codec
+/// `std::io::copy`. The reader and writer codecs are folded into a
+/// single codec first, since `stream_to_stream` drives one codec
 /// between one `Source` and one `Sink`.
 fn run_io_stream<R: BufRead, W: Write>(
     reader_names: &[String],
@@ -202,10 +202,8 @@ fn run_io_stream<R: BufRead, W: Write>(
     input: R,
     output: W,
 ) -> Result<W, String> {
-    let reader_codec = compose(reader_names)?;
-    let writer_codec = compose(writer_names)?;
-    let codec =
-        Chain::new(reader_codec, writer_codec, vec![0u8; STAGING]).expect("STAGING is non-zero");
+    let names: Vec<String> = reader_names.iter().chain(writer_names).cloned().collect();
+    let codec = compose(&names)?;
 
     let mut source = BufReadSource::new(input);
     let mut sink = StdSink::new(output, vec![0u8; STAGING]).expect("STAGING is non-zero");
