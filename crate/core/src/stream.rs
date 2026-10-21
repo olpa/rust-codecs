@@ -80,7 +80,11 @@ impl<EO> DriveError<core::convert::Infallible, EO> {
 
 impl<EI: core::fmt::Display, EO: core::fmt::Display> core::fmt::Display for DriveError<EI, EO> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.kind.fmt(f)
+        write!(
+            f,
+            "{} (after {} input bytes, {} output bytes)",
+            self.kind, self.moved.consumed, self.moved.written
+        )
     }
 }
 
