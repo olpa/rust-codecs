@@ -408,4 +408,92 @@ mod tests {
         let n = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"ok");
     }
+
+    // The codec passes three 4-byte chunks and fails on the fourth. The
+    // failing call moves its 4 bytes too. The error comes on the next
+    // read. It must count the whole stream: 16 bytes in and 16 out.
+    #[test]
+    fn a_deferred_codec_error_counts_the_whole_stream() {
+        use crate::codecs::test_support::FailsAfterInner;
+        use crate::{DriveErrorKind, TransferCounts};
+
+        let mut source = ChunkedSource {
+            bytes: b"01234567890123456789",
+            pos: 0,
+            chunk_size: 4,
+            count_chunk_calls: 0,
+        };
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: identity(),
+            ok_calls: 3,
+            calls: 0,
+        });
+        let mut buf = [0u8; 16];
+
+        let mut out = Vec::new();
+        let error = loop {
+            match boundary_aware_pump_read(&mut pump, &mut source, &mut buf) {
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(error) => break error,
+            }
+        };
+
+        assert_eq!(out, b"0123456789012345");
+        assert!(matches!(error.kind, DriveErrorKind::Codec(_)));
+        assert_eq!(
+            error.moved,
+            TransferCounts {
+                consumed: 16,
+                written: 16,
+            }
+        );
+
+        let again = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
+        assert!(matches!(again.kind, DriveErrorKind::Codec(_)));
+        assert_eq!(again.moved, error.moved);
+    }
+
+    // The codec passes the five 4-byte chunks and fails in `finish`. That
+    // call writes nothing, so the error does not wait for a next read.
+    // It must count the whole stream: 20 bytes in and 20 out.
+    #[test]
+    fn a_direct_codec_error_counts_the_whole_stream() {
+        use crate::codecs::test_support::FailsAfterInner;
+        use crate::{DriveErrorKind, TransferCounts};
+
+        let mut source = ChunkedSource {
+            bytes: b"01234567890123456789",
+            pos: 0,
+            chunk_size: 4,
+            count_chunk_calls: 0,
+        };
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: identity(),
+            ok_calls: 5,
+            calls: 0,
+        });
+        let mut buf = [0u8; 16];
+
+        let mut out = Vec::new();
+        let error = loop {
+            match boundary_aware_pump_read(&mut pump, &mut source, &mut buf) {
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(error) => break error,
+            }
+        };
+
+        assert_eq!(out, b"01234567890123456789");
+        assert!(matches!(error.kind, DriveErrorKind::Codec(_)));
+        assert_eq!(
+            error.moved,
+            TransferCounts {
+                consumed: 20,
+                written: 20,
+            }
+        );
+
+        let again = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
+        assert!(matches!(again.kind, DriveErrorKind::Codec(_)));
+        assert_eq!(again.moved, error.moved);
+    }
 }

@@ -140,4 +140,43 @@ mod tests {
         }
         assert_eq!(bytes, *b"XXXaaaaa");
     }
+
+    // The codec passes three 4-byte chunks and fails on the fourth. The
+    // failing call moves its 4 bytes too. The error must count the
+    // whole stream: 16 bytes in and 16 out, not the last write only.
+    #[test]
+    fn a_codec_error_counts_the_whole_stream() {
+        use crate::codecs::test_support::FailsAfterInner;
+        use crate::identity::identity;
+
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: identity(),
+            ok_calls: 3,
+            calls: 0,
+        });
+        let mut bytes = [0u8; 16];
+        let mut sink = SliceSink::new(&mut bytes);
+
+        let mut error = None;
+        for piece in b"01234567890123456789".chunks(4) {
+            if let Err(e) = pump_write(&mut pump, &mut sink, piece) {
+                error = Some(e);
+                break;
+            }
+        }
+
+        let error = error.expect("the fourth piece must fail");
+        assert!(matches!(error.kind, DriveErrorKind::Codec(_)));
+        assert_eq!(
+            error.moved,
+            TransferCounts {
+                consumed: 16,
+                written: 16,
+            }
+        );
+
+        let again = pump_write(&mut pump, &mut sink, b"6789").unwrap_err();
+        assert!(matches!(again.kind, DriveErrorKind::Codec(_)));
+        assert_eq!(again.moved, error.moved);
+    }
 }

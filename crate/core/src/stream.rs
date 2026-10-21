@@ -836,6 +836,39 @@ mod tests {
         assert_eq!(output.written, 0);
     }
 
+    // The codec passes three 4-byte chunks and fails on the fourth. The
+    // first `transfer_from` call moves two chunks. The second call moves
+    // one chunk and fails on the next. The failing chunk counts too.
+    #[test]
+    fn failure_counts_the_bytes_of_earlier_transfers() {
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: identity(),
+            ok_calls: 3,
+            calls: 0,
+        });
+        let mut bytes = [0u8; 16];
+        let mut output = SliceSink::new(&mut bytes);
+        let mut first = SplitSource {
+            bytes: b"01234567",
+            pos: 0,
+            chunk_size: 4,
+        };
+        let mut second = SplitSource {
+            bytes: b"89012345",
+            pos: 0,
+            chunk_size: 4,
+        };
+
+        pump.transfer_from(&mut first, &mut output).unwrap();
+        assert_eq!(pump.failure(), None);
+        pump.transfer_from(&mut second, &mut output).unwrap_err();
+
+        assert_eq!(
+            pump.failure(),
+            Some(Error::new(ErrorKind::CorruptStream, 16, 16))
+        );
+    }
+
     #[test]
     #[cfg(feature = "alloc")]
     fn pump_accepts_a_boxed_trait_object_codec() {
@@ -996,6 +1029,41 @@ mod tests {
         );
     }
 
+    // The codec holds output from the first chunk and releases it with
+    // the second. Two chunks make 8 bytes in and 4 bytes out. The
+    // drain then releases 4 more bytes and fails. The failure must
+    // count the bytes of the transfer and of the drain.
+    fn pump_that_fails_in_the_drain() -> Pump<FailsAfterInner<HoldsOutput>> {
+        Pump::new(FailsAfterInner {
+            inner: HoldsOutput {
+                per_input: 1,
+                ..Default::default()
+            },
+            ok_calls: 2,
+            calls: 0,
+        })
+    }
+
+    #[test]
+    fn failure_counts_the_bytes_before_a_failing_finish() {
+        let mut pump = pump_that_fails_in_the_drain();
+        let mut bytes = [0u8; 16];
+        let mut output = SliceSink::new(&mut bytes);
+        let mut input = SplitSource {
+            bytes: b"01234567",
+            pos: 0,
+            chunk_size: 4,
+        };
+
+        pump.transfer_from(&mut input, &mut output).unwrap();
+        assert!(pump.finish_to(&mut output).is_err());
+
+        assert_eq!(
+            pump.failure(),
+            Some(Error::new(ErrorKind::CorruptStream, 8, 8))
+        );
+    }
+
     // ----
     // Pump::flush_to
     // ----
@@ -1100,6 +1168,26 @@ mod tests {
 
         assert_overclaim_rejected(&error.kind);
         assert_eq!(error.moved, TransferCounts::default());
+    }
+
+    #[test]
+    fn failure_counts_the_bytes_before_a_failing_flush() {
+        let mut pump = pump_that_fails_in_the_drain();
+        let mut bytes = [0u8; 16];
+        let mut output = SliceSink::new(&mut bytes);
+        let mut input = SplitSource {
+            bytes: b"01234567",
+            pos: 0,
+            chunk_size: 4,
+        };
+
+        pump.transfer_from(&mut input, &mut output).unwrap();
+        assert!(pump.flush_to(&mut output).is_err());
+
+        assert_eq!(
+            pump.failure(),
+            Some(Error::new(ErrorKind::CorruptStream, 8, 8))
+        );
     }
 
     // ----
