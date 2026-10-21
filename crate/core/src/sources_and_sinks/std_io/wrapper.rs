@@ -7,14 +7,14 @@ use crate::sources_and_sinks::shared_io::{
 };
 use crate::stream::Pump;
 use crate::{
-    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, Error, ErrorKind,
-    StallError,
+    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind, StallError,
+    StreamError,
 };
 
 use super::adapter::{BufReadSource, StdSink, StdSource};
 
-fn to_io_error(err: Error) -> io::Error {
-    let kind = match err.kind {
+fn to_io_error(err: StreamError) -> io::Error {
+    let kind = match err.error.kind {
         ErrorKind::CorruptStream => io::ErrorKind::InvalidData,
         ErrorKind::UnexpectedEnd => io::ErrorKind::UnexpectedEof,
         // Both are codec bugs. The data is not at fault.
@@ -32,20 +32,22 @@ fn stall_to_io_error(error: StallError) -> io::Error {
 }
 
 fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error {
+    let moved = err.moved;
     match err.kind {
         DriveErrorKind::Source(error) => error,
         DriveErrorKind::Sink(never) => match never {},
-        DriveErrorKind::Codec(error) => to_io_error(error),
+        DriveErrorKind::Codec(error) => to_io_error(StreamError::new(error, moved)),
         DriveErrorKind::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
         DriveErrorKind::NoProgress => stall_to_io_error(StallError::NoProgress),
     }
 }
 
 fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error {
+    let moved = err.moved;
     match err.kind {
         DriveErrorKind::Source(never) => match never {},
         DriveErrorKind::Sink(error) => error,
-        DriveErrorKind::Codec(error) => to_io_error(error),
+        DriveErrorKind::Codec(error) => to_io_error(StreamError::new(error, moved)),
         DriveErrorKind::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
         DriveErrorKind::NoProgress => stall_to_io_error(StallError::NoProgress),
     }

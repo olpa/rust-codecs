@@ -216,7 +216,7 @@ extern crate alloc;
 mod protocol;
 pub use protocol::{
     BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, EmptyBufferError,
-    Error, ErrorKind, Progress, Sink, Source, StallError, TransferCounts,
+    Error, ErrorKind, Progress, Sink, Source, StallError, StreamError, TransferCounts,
 };
 
 pub mod uninit;

@@ -448,6 +448,26 @@ impl Error {
     }
 }
 
+/// A codec failure, and the bytes that the stream moved before it.
+///
+/// The I/O backend wrappers (`CodecReader`, `CodecWriter`) report this
+/// type. They run many codec calls, so the counts of the failing call
+/// do not tell the user where in the stream the failure is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamError {
+    /// The failure, with the counts of the codec call that failed.
+    pub error: Error,
+    /// The bytes that the stream moved before the failure: the bytes
+    /// consumed from the input and written to the output.
+    pub moved: TransferCounts,
+}
+
+impl StreamError {
+    pub fn new(error: Error, moved: TransferCounts) -> Self {
+        Self { error, moved }
+    }
+}
+
 impl core::fmt::Display for EmptyBufferError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("buffer is empty")
@@ -490,3 +510,19 @@ impl core::fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+impl core::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} (after {} input bytes, {} output bytes)",
+            self.error.kind, self.moved.consumed, self.moved.written
+        )
+    }
+}
+
+impl core::error::Error for StreamError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}

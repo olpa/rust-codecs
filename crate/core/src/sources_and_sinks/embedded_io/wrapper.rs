@@ -8,8 +8,8 @@ use crate::sources_and_sinks::shared_io::{
 };
 use crate::stream::Pump;
 use crate::{
-    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, Error, ErrorKind,
-    StallError,
+    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind, StallError,
+    StreamError,
 };
 
 use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
@@ -20,16 +20,17 @@ pub enum EmbeddedError<E> {
     /// The wrapped reader or writer reported an error.
     Io(E),
     /// The codec reported an error.
-    Codec(Error),
+    Codec(StreamError),
     /// The transfer stalled.
     Stall(StallError),
 }
 
 fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> EmbeddedError<E> {
+    let moved = error.moved;
     match error.kind {
         DriveErrorKind::Source(error) => EmbeddedError::Io(error),
         DriveErrorKind::Sink(never) => match never {},
-        DriveErrorKind::Codec(error) => EmbeddedError::Codec(error),
+        DriveErrorKind::Codec(error) => EmbeddedError::Codec(StreamError::new(error, moved)),
         DriveErrorKind::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
         DriveErrorKind::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
     }
@@ -38,11 +39,12 @@ fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> Embedd
 fn writer_error_to_embedded_error<E>(
     error: DriveError<Infallible, WriteError<E>>,
 ) -> EmbeddedError<E> {
+    let moved = error.moved;
     match error.kind {
         DriveErrorKind::Source(never) => match never {},
         DriveErrorKind::Sink(WriteError::Io(error)) => EmbeddedError::Io(error),
         DriveErrorKind::Sink(WriteError::ZeroWrite) => EmbeddedError::Stall(StallError::ZeroWrite),
-        DriveErrorKind::Codec(error) => EmbeddedError::Codec(error),
+        DriveErrorKind::Codec(error) => EmbeddedError::Codec(StreamError::new(error, moved)),
         DriveErrorKind::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
         DriveErrorKind::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
     }
@@ -64,7 +66,7 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
     fn kind(&self) -> embedded_io::ErrorKind {
         match self {
             Self::Io(error) => error.kind(),
-            Self::Codec(error) => match error.kind {
+            Self::Codec(error) => match error.error.kind {
                 ErrorKind::CorruptStream | ErrorKind::UnexpectedEnd => {
                     embedded_io::ErrorKind::InvalidData
                 }
@@ -312,7 +314,7 @@ mod tests {
         let mut bytes = [0u8; 8];
         assert!(matches!(
             run(&mut bytes),
-            Err(EmbeddedError::Codec(e)) if e.kind == ErrorKind::CorruptStream
+            Err(EmbeddedError::Codec(e)) if e.error.kind == ErrorKind::CorruptStream
         ));
     }
 }
