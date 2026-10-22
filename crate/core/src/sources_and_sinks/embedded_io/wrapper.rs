@@ -19,7 +19,8 @@ use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
 pub enum EmbeddedError<E> {
     /// The wrapped reader or writer reported an error.
     Io(E),
-    /// The codec reported an error.
+    /// The codec failed. [`StreamError::moved`] counts the bytes that the
+    /// whole stream moved before the failure.
     Codec(StreamError),
     /// The transfer stalled.
     Stall(StallError),

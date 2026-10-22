@@ -397,8 +397,10 @@ mod tests {
     }
 
     // The codec passes three 4-byte chunks and fails on the fourth. The
-    // failing call moves its 4 bytes too. The error comes on the next
-    // read. It must count the whole stream: 16 bytes in and 16 out.
+    // failing call moves its 4 bytes too, so the read returns them with
+    // `Ok`. The error comes on the next read. It must count the whole
+    // stream: 16 bytes in and 16 out. A repeat of the call gives the
+    // same totals.
     #[test]
     fn a_deferred_codec_error_counts_the_whole_stream() {
         use crate::codecs::test_support::FailsAfterInner;
@@ -440,9 +442,10 @@ mod tests {
         assert_eq!(again.moved, error.moved);
     }
 
-    // The codec passes the five 4-byte chunks and fails in `finish`. That
-    // call writes nothing, so the error does not wait for a next read.
-    // It must count the whole stream: 20 bytes in and 20 out.
+    // The codec passes five 4-byte chunks and fails in `finish`. That
+    // call writes nothing, so the error comes at once, not on a next
+    // read. It must count the whole stream: 20 bytes in and 20 out. A
+    // repeat of the call gives the same totals.
     #[test]
     fn a_direct_codec_error_counts_the_whole_stream() {
         use crate::codecs::test_support::FailsAfterInner;

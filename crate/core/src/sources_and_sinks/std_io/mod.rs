@@ -12,10 +12,9 @@
 //!   [`StallError::NoProgress`](crate::StallError::NoProgress). They mean
 //!   a bug in the codec or in an adapter, not bad data.
 //!
-//! The payload is the original [`Error`](crate::Error) or
-//! [`StallError`](crate::StallError). To get it back, use
-//! `io_error.get_ref()`, then `downcast_ref::<Error>()` or
-//! `downcast_ref::<StallError>()`.
+//! The payload of a codec failure is a [`StreamError`](crate::StreamError).
+//! Its `error` field has the original [`Error`](crate::Error). Its `moved`
+//! field counts the bytes that the whole stream moved before the failure.
 
 mod adapter;
 mod wrapper;

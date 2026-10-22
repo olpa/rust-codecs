@@ -16,6 +16,9 @@ use crate::{
 pub enum DriveErrorKind<EI, EO> {
     Source(EI),
     Sink(EO),
+    /// The codec failed. The `consumed` and `written` fields of the
+    /// [`Error`] count only the codec call that failed.
+    /// [`DriveError::moved`] counts the bytes that the whole stream moved.
     Codec(crate::Error),
     /// The sink had no more room (`Sink::spare` returned `None`)
     /// before the codec reached the end of its stream.
@@ -42,11 +45,9 @@ impl<EI: core::fmt::Display, EO: core::fmt::Display> core::fmt::Display for Driv
 /// the error.
 ///
 /// `moved` counts the whole drive: all the bytes that the [`Pump`]
-/// moved in its life, up to and including the step that failed.
-///
-/// With [`DriveErrorKind::Codec`], the inner [`Error`] counts only the
-/// codec step that failed. A repeat of the error counts zero, because
-/// the repeat moves no bytes.
+/// moved since its creation, up to and including the step that failed.
+/// Also, with [`DriveErrorKind::Codec`], the `consumed` and `written`
+/// fields of the inner [`Error`] count only the codec step that failed.
 #[derive(Debug)]
 pub struct DriveError<EI, EO> {
     pub kind: DriveErrorKind<EI, EO>,
@@ -133,11 +134,10 @@ where
 pub(crate) enum PumpTransfer {
     SourceExhausted,
     SinkExhausted,
-    /// The step completed normally, without exhausting `input` or
-    /// `output`. More may be available from either on the next step.
+    /// The step ended normally. It did not exhaust `input` or `output`.
+    /// The next step may move more bytes.
     Progressed,
-    /// The codec reported an in-band end. The input of this logical
-    /// stream ended. The driver must call `finish_to` next.
+    /// The codec found the end of the logical stream in the input.
     InputEnded,
 }
 
@@ -194,10 +194,8 @@ pub struct Pump<C> {
     /// After `Err`, the codec state is not defined. So the pump does
     /// not call the codec again. It returns this error instead.
     failed: Option<ErrorKind>,
-    /// The bytes that the pump moved in its life. A byte counts after
-    /// the source or the sink has taken it: a failed commit does not
-    /// count its output bytes. Every [`DriveError`] of the pump reports
-    /// this value as `moved`.
+    /// The bytes that the pump moved since its creation. The pump counts a
+    /// byte after the source or the sink has taken it.
     total: TransferCounts,
 }
 
@@ -243,7 +241,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         self.failed.map(|kind| Error::new(kind, 0, 0))
     }
 
-    /// The bytes that the pump moved in its life. See [`Self::total`].
+    /// The bytes that the pump moved since its creation. See [`Self::total`].
     pub(crate) fn total(&self) -> TransferCounts {
         self.total
     }

@@ -190,12 +190,12 @@ fn run_io<R: BufRead, W: Write>(
     Ok(output)
 }
 
-/// Same end-to-end behavior as `run_io`, but drives the composed chain
+/// Same end-to-end behavior as `run_io`, but drives the composed codec
 /// directly via `stream_to_stream` over `BufReadSource`/`StdSink` instead
 /// of wrapping it in `BufReadCodecReader`/`CodecWriter` and driving it with
-/// `std::io::copy`. The reader and writer codecs are folded into a
-/// single codec first, since `stream_to_stream` drives one codec
-/// between one `Source` and one `Sink`.
+/// `std::io::copy`. The reader names and the writer names make one list,
+/// because `stream_to_stream` drives one codec between one `Source` and
+/// one `Sink`.
 fn run_io_stream<R: BufRead, W: Write>(
     reader_names: &[String],
     writer_names: &[String],

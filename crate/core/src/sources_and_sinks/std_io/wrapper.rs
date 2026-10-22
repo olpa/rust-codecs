@@ -130,7 +130,7 @@ impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, 
 
 /// Like [`CodecReader`], but for an `R: std::io::BufRead`, using the
 /// `BufRead`'s buffer directly instead of a caller-provided scratch
-/// buffer. Same end-of-stream and end-of-codec behavior as
+/// buffer. Same end-of-stream, end-of-codec, and error behavior as
 /// `CodecReader`.
 pub struct BufReadCodecReader<R, C: BoundaryAwareCodec> {
     input: BufReadSource<R>,

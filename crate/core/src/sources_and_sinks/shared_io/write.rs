@@ -137,7 +137,8 @@ mod tests {
 
     // The codec passes three 4-byte chunks and fails on the fourth. The
     // failing call moves its 4 bytes too. The error must count the
-    // whole stream: 16 bytes in and 16 out, not the last write only.
+    // whole stream: 16 bytes in and 16 out, not only the last write. A
+    // repeat of the call gives the same totals.
     #[test]
     fn a_codec_error_counts_the_whole_stream() {
         use crate::codecs::test_support::FailsAfterInner;

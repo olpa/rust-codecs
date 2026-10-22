@@ -448,17 +448,14 @@ impl Error {
     }
 }
 
-/// A codec failure, and the bytes that the stream moved before it.
-///
-/// The I/O backend wrappers (`CodecReader`, `CodecWriter`) report this
-/// type. They run many codec calls, so the counts of the failing call
-/// do not tell the user where in the stream the failure is.
+/// A codec failure, and the bytes that the stream moved before the
+/// failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamError {
-    /// The failure, with the counts of the codec call that failed.
+    /// The failure. Its `consumed` and `written` fields count only the
+    /// codec call that failed.
     pub error: Error,
-    /// The bytes that the stream moved before the failure: the bytes
-    /// consumed from the input and written to the output.
+    /// The total bytes that the stream moved before the failure.
     pub moved: TransferCounts,
 }
 
