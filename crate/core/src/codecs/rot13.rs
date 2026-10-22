@@ -6,6 +6,7 @@ use core::mem::MaybeUninit;
 
 use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
+/// Rotate an ASCII letter by 13 places. Keep all other bytes.
 fn rot13_byte(b: u8) -> u8 {
     match b {
         b'A'..=b'M' | b'a'..=b'm' => b + 13,
@@ -46,6 +47,7 @@ impl Codec for Rot13 {
     }
 }
 
+/// Build a [`Rot13`] codec.
 pub fn rot13() -> Rot13 {
     Rot13
 }
