@@ -29,7 +29,7 @@ pub enum DriveErrorKind<EI, EO> {
     NoProgress,
 }
 
-impl<EI: core::fmt::Display, EO: core::fmt::Display> core::fmt::Display for DriveErrorKind<EI, EO> {
+impl<EI, EO> core::fmt::Display for DriveErrorKind<EI, EO> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(_) => f.write_str("source error"),
@@ -79,7 +79,7 @@ impl<EO> DriveError<core::convert::Infallible, EO> {
     }
 }
 
-impl<EI: core::fmt::Display, EO: core::fmt::Display> core::fmt::Display for DriveError<EI, EO> {
+impl<EI, EO> core::fmt::Display for DriveError<EI, EO> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
