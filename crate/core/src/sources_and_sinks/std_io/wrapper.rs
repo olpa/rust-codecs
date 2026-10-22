@@ -271,10 +271,10 @@ impl<T> From<CodecWriterFinishError<io::Error, T>> for io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::io::{self, Read};
 
-    use super::CodecWriter;
-    use crate::codecs::test_support::FailsAfterInner;
+    use super::{BufReadCodecReader, CodecReader, CodecWriter};
+    use crate::codecs::test_support::{EndsAtBar, FailsAfterInner};
     use crate::identity::identity;
 
     #[test]
@@ -292,5 +292,36 @@ mod tests {
         }
 
         assert_eq!(run().unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    fn ends_at_bar() -> EndsAtBar<crate::identity::Identity> {
+        EndsAtBar {
+            inner: identity(),
+            finish_calls: 0,
+        }
+    }
+
+    #[test]
+    fn codec_reader_returns_the_tail_after_an_in_band_end_as_pending() {
+        let mut reader = CodecReader::new(&b"abc|tail"[..], ends_at_bar(), [0u8; 16]).unwrap();
+        let mut output = Vec::new();
+
+        // Act
+        reader.read_to_end(&mut output).unwrap();
+
+        assert_eq!(output, b"abc");
+        assert_eq!(reader.pending(), b"tail");
+    }
+
+    #[test]
+    fn buf_read_codec_reader_leaves_the_tail_in_the_wrapped_reader() {
+        let mut reader = BufReadCodecReader::new(&b"abc|tail"[..], ends_at_bar());
+        let mut output = Vec::new();
+
+        // Act
+        reader.read_to_end(&mut output).unwrap();
+
+        assert_eq!(output, b"abc");
+        assert_eq!(reader.into_inner(), b"tail");
     }
 }

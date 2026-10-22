@@ -289,10 +289,10 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 
 #[cfg(test)]
 mod tests {
-    use embedded_io::ErrorType;
+    use embedded_io::{ErrorType, Read};
 
-    use super::{CodecWriter, EmbeddedError};
-    use crate::codecs::test_support::FailsAfterInner;
+    use super::{BufReadCodecReader, CodecReader, CodecWriter, EmbeddedError};
+    use crate::codecs::test_support::{EndsAtBar, FailsAfterInner};
     use crate::identity::{identity, Identity};
     use crate::ErrorKind;
 
@@ -317,5 +317,46 @@ mod tests {
             run(&mut bytes),
             Err(EmbeddedError::Codec(e)) if e.error.kind == ErrorKind::CorruptStream
         ));
+    }
+
+    fn ends_at_bar() -> EndsAtBar<Identity> {
+        EndsAtBar {
+            inner: identity(),
+            finish_calls: 0,
+        }
+    }
+
+    fn read_to_end<R: Read>(reader: &mut R) -> Vec<u8> {
+        let mut output = Vec::new();
+        let mut buf = [0u8; 4];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            if n == 0 {
+                return output;
+            }
+            output.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    #[test]
+    fn codec_reader_returns_the_tail_after_an_in_band_end_as_pending() {
+        let mut reader = CodecReader::new(&b"abc|tail"[..], ends_at_bar(), [0u8; 16]).unwrap();
+
+        // Act
+        let output = read_to_end(&mut reader);
+
+        assert_eq!(output, b"abc");
+        assert_eq!(reader.pending(), b"tail");
+    }
+
+    #[test]
+    fn buf_read_codec_reader_leaves_the_tail_in_the_wrapped_reader() {
+        let mut reader = BufReadCodecReader::new(&b"abc|tail"[..], ends_at_bar());
+
+        // Act
+        let output = read_to_end(&mut reader);
+
+        assert_eq!(output, b"abc");
+        assert_eq!(reader.into_inner(), b"tail");
     }
 }
