@@ -242,7 +242,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     }
 
     /// The bytes that the pump moved since its creation. See [`Self::total`].
-    pub(crate) fn total(&self) -> TransferCounts {
+    pub fn total(&self) -> TransferCounts {
         self.total
     }
 
