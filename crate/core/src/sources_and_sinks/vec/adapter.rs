@@ -62,16 +62,20 @@ pub struct VecSink {
 }
 
 impl VecSink {
-    // The minimum extra capacity requested each time the vec runs out of
-    // spare space. `Vec::reserve`'s underlying allocator still amortizes
-    // growth on top of this (roughly doubling capacity once it's past a
-    // small size), so this value is a floor, not the actual step size.
+    /// The minimum extra capacity requested each time the vec runs out of
+    /// spare space. `Vec::reserve`'s underlying allocator still amortizes
+    /// growth on top of this (roughly doubling capacity once it's past a
+    /// small size), so this value is a floor, not the actual step size.
     pub const DEFAULT_GROWTH: usize = 1024;
 
+    /// Build a `VecSink` that grows by [`Self::DEFAULT_GROWTH`].
     pub fn new(inner: Vec<u8>) -> Self {
         Self::with_growth(inner, Self::DEFAULT_GROWTH)
     }
 
+    /// Build a `VecSink` that requests at least `grow_by` bytes of extra
+    /// capacity each time the vec is full. A `grow_by` of 0 means
+    /// [`Self::DEFAULT_GROWTH`].
     pub fn with_growth(inner: Vec<u8>, grow_by: usize) -> Self {
         Self {
             inner,
