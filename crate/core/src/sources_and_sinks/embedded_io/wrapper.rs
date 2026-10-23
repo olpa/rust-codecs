@@ -242,12 +242,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         self.pump.total()
     }
 
-    /// Drain the codec and hand back ownership of the writer. Same
-    /// behavior as
+    /// Drain the codec and hand back ownership of the writer, and the
+    /// total bytes that the codec consumed and wrote. Same behavior as
     /// [`std_io::CodecWriter::finish`](crate::sources_and_sinks::std_io::CodecWriter::finish).
-    pub fn finish(mut self) -> Result<W, CodecWriterFinishError<StreamError<W::Error>, Self>> {
+    pub fn finish(
+        mut self,
+    ) -> Result<(W, TransferCounts), CodecWriterFinishError<StreamError<W::Error>, Self>> {
         match pump_finish(&mut self.pump, &mut self.output) {
-            Ok(()) => Ok(self.output.into_inner()),
+            Ok(()) => Ok((self.output.into_inner(), self.pump.total())),
             Err(error) => Err(CodecWriterFinishError::new(
                 writer_error_to_stream_error(error),
                 self,

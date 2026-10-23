@@ -46,7 +46,7 @@
 //! let mut codec_writer = CodecWriter::new(base_writer, json_codec, scratch_buffer).unwrap();
 //! write!(codec_writer, r#""\"#).unwrap();
 //!
-//! let mut base_writer = codec_writer.finish().unwrap();
+//! let (mut base_writer, _) = codec_writer.finish().unwrap();
 //! write!(base_writer, r#"""#).unwrap();
 //!
 //! // Assert

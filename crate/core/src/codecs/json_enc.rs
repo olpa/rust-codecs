@@ -302,7 +302,7 @@ mod tests {
         for chunk in input.chunks(1) {
             writer.write_all(chunk).unwrap();
         }
-        let via_writer = writer.finish().unwrap();
+        let (via_writer, _) = writer.finish().unwrap();
         assert_eq!(via_writer, expected);
     }
 
@@ -314,7 +314,7 @@ mod tests {
         // an encoded group span calls smaller than it.
         let mut writer = CodecWriter::new(Vec::new(), json_enc(), vec![0u8; 1]).unwrap();
         writer.write_all(b"\x01").unwrap();
-        let out = writer.finish().unwrap();
+        let (out, _) = writer.finish().unwrap();
         assert_eq!(out, b"\\u0001");
     }
 
@@ -347,7 +347,7 @@ mod tests {
         for &b in b"\xf0\x9f\x98\x80" {
             writer.write_all(&[b]).unwrap();
         }
-        let out = writer.finish().unwrap();
+        let (out, _) = writer.finish().unwrap();
         assert_eq!(out, b"\xf0\x9f\x98\x80");
     }
 

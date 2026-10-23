@@ -243,11 +243,12 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
         self.pump.total()
     }
 
-    /// Call the codec's `finish` repeatedly until it returns
-    /// `DrainProgress::Done`. This writes any remaining trailer,
+    /// This method calls the codec's `finish` repeatedly until it
+    /// returns `DrainProgress::Done`. This writes any remaining trailer,
     /// checksum, or padding bytes.
     ///
-    /// Then return ownership of the writer.
+    /// Then return ownership of the writer, and the total bytes that the
+    /// codec consumed and wrote.
     ///
     /// You must call this method to complete the output. Dropping a
     /// `CodecWriter` without calling `finish` loses any remaining
@@ -255,9 +256,11 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// warning or runtime error.
     ///
     /// If the wrapped writer reports an error, do not call `finish` again.
-    pub fn finish(mut self) -> Result<W, CodecWriterFinishError<io::Error, Self>> {
+    pub fn finish(
+        mut self,
+    ) -> Result<(W, TransferCounts), CodecWriterFinishError<io::Error, Self>> {
         match pump_finish(&mut self.pump, &mut self.output) {
-            Ok(()) => Ok(self.output.into_inner()),
+            Ok(()) => Ok((self.output.into_inner(), self.pump.total())),
             Err(error) => Err(CodecWriterFinishError::new(
                 writer_error_to_io_error(error),
                 self,
@@ -314,7 +317,7 @@ mod tests {
             let writer = CodecWriter::new(Vec::new(), codec, [0u8; 8]).unwrap();
 
             // Act: the `?` operator calls the `From` impl.
-            Ok(writer.finish()?)
+            Ok(writer.finish()?.0)
         }
 
         assert_eq!(run().unwrap_err().kind(), io::ErrorKind::InvalidData);

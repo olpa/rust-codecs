@@ -185,7 +185,7 @@ fn run_io<R: BufRead, W: Write>(
         CodecWriter::new(output, writer_codec, vec![0u8; STAGING]).expect("STAGING is non-zero");
 
     io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
-    let mut output = writer.finish().map_err(|e| e.to_string())?;
+    let (mut output, _) = writer.finish().map_err(|e| e.to_string())?;
     output.flush().map_err(|e| e.to_string())?;
     Ok(output)
 }
