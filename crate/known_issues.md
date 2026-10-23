@@ -197,6 +197,19 @@ so generic code can still downcast to `StreamError` and read the byte
 counts. Removing the `StreamError` level from `EncodeError::source`
 would hide those counts from code that holds only a `dyn Error`.
 
+### The CLI engines print the same error in different words (decided 2026-10-23)
+
+For the same failure, the `copy` engine prints "corrupt stream (after 0
+input bytes, 0 output bytes)", and the `stream` engine prints "codec
+error (after 0 input bytes, 0 output bytes): corrupt stream".
+
+The `copy` engine gets an `io::Error` with a `StreamError` inside, and
+its `Display` has the codec reason. The `stream` engine gets a
+`DriveError`, and its `Display` has no reason, so the CLI appends the
+`source()` chain. Both messages have the same facts, and the CLI is a
+small demo tool. We do not change the CLI or the `Display` of
+`DriveError` for this.
+
 ### Comment style in private comments
 
 Some private comments in `base64_shared.rs`, `base64_dec.rs`,
