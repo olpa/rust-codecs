@@ -31,6 +31,12 @@ pub trait Source {
     /// One error is visible: an `amount` larger than the chunk. The
     /// sources in this crate check it with `debug_assert!`. They also
     /// clamp the amount to the chunk length.
+    ///
+    /// The exception is the `BufReadSource` types of `std_io` and
+    /// `embedded_io`. They pass `consume` to the wrapped reader and
+    /// follow the rules of that reader. For example,
+    /// `std::io::BufReader` clamps the amount, but `embedded_io::BufRead`
+    /// for `&[u8]` can panic, also in release builds.
     fn consume(&mut self, amount: usize);
 }
 
