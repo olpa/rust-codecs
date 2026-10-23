@@ -8,7 +8,7 @@ use crate::sources_and_sinks::shared_io::{
 use crate::stream::Pump;
 use crate::{
     BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind,
-    StreamError, StreamErrorKind,
+    StreamError, StreamErrorKind, TransferCounts,
 };
 
 use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
@@ -117,6 +117,12 @@ impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     pub fn codec_mut(&mut self) -> &mut C {
         self.pump.get_mut()
     }
+
+    /// The input bytes that the codec consumed and the output bytes that
+    /// it wrote, in all the calls so far.
+    pub fn total(&self) -> TransferCounts {
+        self.pump.total()
+    }
 }
 
 impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
@@ -172,6 +178,12 @@ impl<R: BufRead, C: BoundaryAwareCodec> BufReadCodecReader<R, C> {
     pub fn codec_mut(&mut self) -> &mut C {
         self.pump.get_mut()
     }
+
+    /// The input bytes that the codec consumed and the output bytes that
+    /// it wrote, in all the calls so far.
+    pub fn total(&self) -> TransferCounts {
+        self.pump.total()
+    }
 }
 
 impl<R: BufRead, C: BoundaryAwareCodec> ErrorType for BufReadCodecReader<R, C> {
@@ -222,6 +234,12 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 
     pub fn codec_mut(&mut self) -> &mut C {
         self.pump.get_mut()
+    }
+
+    /// The input bytes that the codec consumed and the output bytes that
+    /// it wrote, in all the calls so far.
+    pub fn total(&self) -> TransferCounts {
+        self.pump.total()
     }
 
     /// Drain the codec and hand back ownership of the writer. Same
