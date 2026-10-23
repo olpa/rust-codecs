@@ -269,6 +269,10 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// Drain the codec and hand back ownership of the writer, and the
     /// total bytes that the codec consumed and wrote. Same behavior as
     /// [`std_io::CodecWriter::finish`](crate::sources_and_sinks::std_io::CodecWriter::finish).
+    // The type is the documentation: the writer and the totals on
+    // success, the error and the `CodecWriter` on failure. An alias
+    // would hide it.
+    #[allow(clippy::type_complexity)]
     pub fn finish(
         mut self,
     ) -> Result<(W, TransferCounts), CodecWriterFinishError<StreamError<W::Error>, Self>> {
