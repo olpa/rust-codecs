@@ -391,19 +391,6 @@ forward_boundary_aware_for_dyn!(+ Send + Sync);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyBufferError;
 
-/// The transfer stopped, but the codec and the endpoints reported no
-/// error. No bytes moved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StallError {
-    /// The wrapped writer returned `Ok(0)` from `write`.
-    ZeroWrite,
-    /// The sink had no more room before the codec was done.
-    SinkExhausted,
-    /// One codec step read no input and wrote no output, and the
-    /// stream did not end.
-    NoProgress,
-}
-
 /// What kind of failure a codec reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -448,20 +435,38 @@ impl Error {
     }
 }
 
-/// A codec failure, and the bytes that the stream moved before the
-/// failure.
+/// Why a wrapper stopped the stream. See [`StreamError`].
+///
+/// `E` is the error type of the wrapped reader or writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StreamError {
-    /// The failure. Its `consumed` and `written` fields count only the
-    /// codec call that failed.
-    pub error: Error,
-    /// The total bytes that the stream moved before the failure.
+pub enum StreamErrorKind<E> {
+    /// The wrapped reader or writer failed.
+    Io(E),
+    /// The codec failed. The `consumed` and `written` fields of the
+    /// [`Error`] count only the codec call that failed.
+    /// [`StreamError::moved`] counts the bytes that the whole stream
+    /// moved.
+    Codec(Error),
+    /// The sink had no more room before the codec was done.
+    SinkExhausted,
+    /// One codec call read no input and wrote no output. The stream did
+    /// not end.
+    NoProgress,
+    /// The wrapped writer returned `Ok(0)` from `write`.
+    ZeroWrite,
+}
+
+/// An error of a stream, and the bytes that the stream moved before the
+/// error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamError<E> {
+    pub kind: StreamErrorKind<E>,
     pub moved: TransferCounts,
 }
 
-impl StreamError {
-    pub fn new(error: Error, moved: TransferCounts) -> Self {
-        Self { error, moved }
+impl<E> StreamError<E> {
+    pub fn new(kind: StreamErrorKind<E>, moved: TransferCounts) -> Self {
+        Self { kind, moved }
     }
 }
 
@@ -472,18 +477,6 @@ impl core::fmt::Display for EmptyBufferError {
 }
 
 impl core::error::Error for EmptyBufferError {}
-
-impl core::fmt::Display for StallError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::ZeroWrite => "writer accepted zero bytes",
-            Self::SinkExhausted => "sink has no more room",
-            Self::NoProgress => "no progress on input or output",
-        })
-    }
-}
-
-impl core::error::Error for StallError {}
 
 impl core::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -504,18 +497,35 @@ impl core::fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
-impl core::fmt::Display for StreamError {
+impl<E: core::fmt::Display> core::fmt::Display for StreamErrorKind<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Codec(error) => error.fmt(f),
+            Self::SinkExhausted => f.write_str("sink has no more room"),
+            Self::NoProgress => f.write_str("no progress on input or output"),
+            Self::ZeroWrite => f.write_str("writer wrote zero bytes"),
+        }
+    }
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for StreamError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{} (after {} input bytes, {} output bytes)",
-            self.error.kind, self.moved.consumed, self.moved.written
+            self.kind, self.moved.consumed, self.moved.written
         )
     }
 }
 
-impl core::error::Error for StreamError {
+/// `source` returns the codec [`Error`] only. An `Io` error would need
+/// a `'static` bound on `E`.
+impl<E: core::fmt::Debug + core::fmt::Display> core::error::Error for StreamError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        Some(&self.error)
+        match &self.kind {
+            StreamErrorKind::Codec(error) => Some(error),
+            _ => None,
+        }
     }
 }

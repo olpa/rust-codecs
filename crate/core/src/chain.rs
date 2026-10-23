@@ -414,7 +414,7 @@ mod tests {
     use crate::uninit::{as_uninit_mut, copy_to_uninit};
     use crate::{
         stream_to_stream, Codec, DrainCodec, DrainProgress, DriveError, DriveErrorKind,
-        EmptyBufferError, Error, ErrorKind, Progress, Pump, Sink,
+        EmptyBufferError, Error, ErrorKind, Progress, Pump, Sink, StreamError, StreamErrorKind,
     };
 
     const INPUT: &str = "Hello, World! 123";
@@ -775,7 +775,10 @@ mod tests {
         // ByteCountClaim error instead.
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]).unwrap();
         match encode_string(chain, INPUT).unwrap_err() {
-            EncodeError::Codec(error) => {
+            EncodeError::Stream(StreamError {
+                kind: StreamErrorKind::Codec(error),
+                ..
+            }) => {
                 assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
             }
             other => panic!("expected a codec error, got {other:?}"),

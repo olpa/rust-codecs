@@ -4,32 +4,34 @@
 use core::convert::Infallible;
 
 use super::VecSink;
-use crate::{stream_to_stream, Codec, DriveError, DriveErrorKind};
+use crate::{stream_to_stream, Codec, DriveError, DriveErrorKind, StreamError, StreamErrorKind};
 
 /// Everything that can go wrong in [`encode_str`]/[`encode_string`].
 #[derive(Debug)]
 pub enum EncodeError {
-    Codec(crate::Error),
-    NoProgress,
+    /// The codec failed. [`StreamError::moved`] counts the input bytes
+    /// that the codec consumed and the output bytes that it wrote before
+    /// the failure.
+    Stream(StreamError<Infallible>),
     Utf8(alloc::string::FromUtf8Error),
 }
 
 fn from_drive_error(error: DriveError<Infallible, Infallible>) -> EncodeError {
-    match error.kind {
+    let kind = match error.kind {
         DriveErrorKind::Source(never) | DriveErrorKind::Sink(never) => match never {},
-        DriveErrorKind::Codec(error) => EncodeError::Codec(error),
-        DriveErrorKind::NoProgress => EncodeError::NoProgress,
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
         // VecSink's spare capacity always grows to fit; it can
         // never decline to offer any.
         DriveErrorKind::SinkExhausted => unreachable!("VecSink always has spare capacity"),
-    }
+    };
+    EncodeError::Stream(StreamError::new(kind, error.moved))
 }
 
 impl core::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Codec(_) => f.write_str("codec error"),
-            Self::NoProgress => f.write_str("no progress on input or output"),
+            Self::Stream(error) => error.fmt(f),
             Self::Utf8(_) => f.write_str("output is not UTF-8"),
         }
     }
@@ -38,8 +40,7 @@ impl core::fmt::Display for EncodeError {
 impl core::error::Error for EncodeError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::Codec(error) => Some(error),
-            Self::NoProgress => None,
+            Self::Stream(error) => Some(error),
             Self::Utf8(error) => Some(error),
         }
     }

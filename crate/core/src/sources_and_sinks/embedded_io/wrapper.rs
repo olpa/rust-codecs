@@ -1,5 +1,4 @@
 use core::convert::Infallible;
-use core::fmt;
 
 use embedded_io::{BufRead, ErrorType, Read, Write};
 
@@ -8,66 +7,40 @@ use crate::sources_and_sinks::shared_io::{
 };
 use crate::stream::Pump;
 use crate::{
-    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind, StallError,
-    StreamError,
+    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind,
+    StreamError, StreamErrorKind,
 };
 
 use super::adapter::{BufReadSource, EmbeddedSink, EmbeddedSource, WriteError};
 
-/// An error from an embedded I/O wrapper.
-#[derive(Debug)]
-pub enum EmbeddedError<E> {
-    /// The wrapped reader or writer reported an error.
-    Io(E),
-    /// The codec failed. [`StreamError::moved`] counts the bytes that the
-    /// whole stream moved before the failure.
-    Codec(StreamError),
-    /// The transfer stalled.
-    Stall(StallError),
-}
-
-fn reader_error_to_embedded_error<E>(error: DriveError<E, Infallible>) -> EmbeddedError<E> {
-    let moved = error.moved;
-    match error.kind {
-        DriveErrorKind::Source(error) => EmbeddedError::Io(error),
+fn reader_error_to_stream_error<E>(error: DriveError<E, Infallible>) -> StreamError<E> {
+    let kind = match error.kind {
+        DriveErrorKind::Source(error) => StreamErrorKind::Io(error),
         DriveErrorKind::Sink(never) => match never {},
-        DriveErrorKind::Codec(error) => EmbeddedError::Codec(StreamError::new(error, moved)),
-        DriveErrorKind::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
-        DriveErrorKind::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
-    }
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::SinkExhausted => StreamErrorKind::SinkExhausted,
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
+    };
+    StreamError::new(kind, error.moved)
 }
 
-fn writer_error_to_embedded_error<E>(
-    error: DriveError<Infallible, WriteError<E>>,
-) -> EmbeddedError<E> {
-    let moved = error.moved;
-    match error.kind {
+fn writer_error_to_stream_error<E>(error: DriveError<Infallible, WriteError<E>>) -> StreamError<E> {
+    let kind = match error.kind {
         DriveErrorKind::Source(never) => match never {},
-        DriveErrorKind::Sink(WriteError::Io(error)) => EmbeddedError::Io(error),
-        DriveErrorKind::Sink(WriteError::ZeroWrite) => EmbeddedError::Stall(StallError::ZeroWrite),
-        DriveErrorKind::Codec(error) => EmbeddedError::Codec(StreamError::new(error, moved)),
-        DriveErrorKind::SinkExhausted => EmbeddedError::Stall(StallError::SinkExhausted),
-        DriveErrorKind::NoProgress => EmbeddedError::Stall(StallError::NoProgress),
-    }
+        DriveErrorKind::Sink(WriteError::Io(error)) => StreamErrorKind::Io(error),
+        DriveErrorKind::Sink(WriteError::ZeroWrite) => StreamErrorKind::ZeroWrite,
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::SinkExhausted => StreamErrorKind::SinkExhausted,
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
+    };
+    StreamError::new(kind, error.moved)
 }
 
-impl<E: fmt::Display> fmt::Display for EmbeddedError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "I/O error: {error}"),
-            Self::Codec(error) => write!(f, "codec error: {error}"),
-            Self::Stall(error) => write!(f, "transfer stalled: {error}"),
-        }
-    }
-}
-
-impl<E: embedded_io::Error> core::error::Error for EmbeddedError<E> {}
-
-impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
+impl<E: embedded_io::Error> embedded_io::Error for StreamError<E> {
     fn kind(&self) -> embedded_io::ErrorKind {
-        match self {
-            Self::Io(error) => error.kind(),
-            Self::Codec(error) => match error.error.kind {
+        match &self.kind {
+            StreamErrorKind::Io(error) => error.kind(),
+            StreamErrorKind::Codec(error) => match error.kind {
                 ErrorKind::CorruptStream | ErrorKind::UnexpectedEnd => {
                     embedded_io::ErrorKind::InvalidData
                 }
@@ -76,16 +49,16 @@ impl<E: embedded_io::Error> embedded_io::Error for EmbeddedError<E> {
                     embedded_io::ErrorKind::Other
                 }
             },
-            Self::Stall(StallError::ZeroWrite | StallError::SinkExhausted) => {
+            StreamErrorKind::ZeroWrite | StreamErrorKind::SinkExhausted => {
                 embedded_io::ErrorKind::WriteZero
             }
-            Self::Stall(StallError::NoProgress) => embedded_io::ErrorKind::Other,
+            StreamErrorKind::NoProgress => embedded_io::ErrorKind::Other,
         }
     }
 }
 
-impl<E, T> From<CodecWriterFinishError<EmbeddedError<E>, T>> for EmbeddedError<E> {
-    fn from(error: CodecWriterFinishError<EmbeddedError<E>, T>) -> Self {
+impl<E, T> From<CodecWriterFinishError<StreamError<E>, T>> for StreamError<E> {
+    fn from(error: CodecWriterFinishError<StreamError<E>, T>) -> Self {
         error.into_error()
     }
 }
@@ -147,13 +120,13 @@ impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
 }
 
 impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> ErrorType for CodecReader<R, C, S> {
-    type Error = EmbeddedError<R::Error>;
+    type Error = StreamError<R::Error>;
 }
 
 impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
-            .map_err(reader_error_to_embedded_error)
+            .map_err(reader_error_to_stream_error)
     }
 }
 
@@ -202,13 +175,13 @@ impl<R: BufRead, C: BoundaryAwareCodec> BufReadCodecReader<R, C> {
 }
 
 impl<R: BufRead, C: BoundaryAwareCodec> ErrorType for BufReadCodecReader<R, C> {
-    type Error = EmbeddedError<R::Error>;
+    type Error = StreamError<R::Error>;
 }
 
 impl<R: BufRead, C: BoundaryAwareCodec> Read for BufReadCodecReader<R, C> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
-            .map_err(reader_error_to_embedded_error)
+            .map_err(reader_error_to_stream_error)
     }
 }
 
@@ -254,11 +227,11 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// Drain the codec and hand back ownership of the writer. Same
     /// behavior as
     /// [`std_io::CodecWriter::finish`](crate::sources_and_sinks::std_io::CodecWriter::finish).
-    pub fn finish(mut self) -> Result<W, CodecWriterFinishError<EmbeddedError<W::Error>, Self>> {
+    pub fn finish(mut self) -> Result<W, CodecWriterFinishError<StreamError<W::Error>, Self>> {
         match pump_finish(&mut self.pump, &mut self.output) {
             Ok(()) => Ok(self.output.into_inner()),
             Err(error) => Err(CodecWriterFinishError::new(
-                writer_error_to_embedded_error(error),
+                writer_error_to_stream_error(error),
                 self,
             )),
         }
@@ -273,17 +246,20 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> ErrorType for CodecWriter<W, C, S> {
-    type Error = EmbeddedError<W::Error>;
+    type Error = StreamError<W::Error>;
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error_to_embedded_error)
+        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error_to_stream_error)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_embedded_error)?;
-        self.output.get_mut().flush().map_err(EmbeddedError::Io)
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_stream_error)?;
+        self.output
+            .get_mut()
+            .flush()
+            .map_err(|error| StreamError::new(StreamErrorKind::Io(error), self.pump.total()))
     }
 }
 
@@ -291,14 +267,14 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 mod tests {
     use embedded_io::{ErrorType, Read};
 
-    use super::{BufReadCodecReader, CodecReader, CodecWriter, EmbeddedError};
+    use super::{BufReadCodecReader, CodecReader, CodecWriter};
     use crate::codecs::test_support::{EndsAtBar, FailsAfterInner};
     use crate::identity::{identity, Identity};
-    use crate::ErrorKind;
+    use crate::{ErrorKind, StreamError, StreamErrorKind};
 
     #[test]
     fn question_mark_turns_a_finish_error_into_an_embedded_error() {
-        fn run(bytes: &mut [u8]) -> Result<(), EmbeddedError<<&mut [u8] as ErrorType>::Error>> {
+        fn run(bytes: &mut [u8]) -> Result<(), StreamError<<&mut [u8] as ErrorType>::Error>> {
             let codec: FailsAfterInner<Identity> = FailsAfterInner {
                 inner: identity(),
                 ok_calls: 0,
@@ -315,7 +291,7 @@ mod tests {
         let mut bytes = [0u8; 8];
         assert!(matches!(
             run(&mut bytes),
-            Err(EmbeddedError::Codec(e)) if e.error.kind == ErrorKind::CorruptStream
+            Err(StreamError { kind: StreamErrorKind::Codec(e), .. }) if e.kind == ErrorKind::CorruptStream
         ));
     }
 

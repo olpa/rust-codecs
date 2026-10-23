@@ -175,9 +175,11 @@ before 1.0 needs only a 0.x version bump. `#[non_exhaustive]` would
 also stop users from matching all variants, so the compiler would not
 tell them about a new kind.
 
-`EmbeddedError` and `WriteError` have no `source()`. Their `Display`
-prints the inner error. A `source()` impl would need a `'static` bound
-on the error type of the wrapped reader or writer.
+`StreamError` and `WriteError` have no `source()` for the error of the
+wrapped reader or writer. Their `Display` prints the inner error. A
+`source()` impl would need a `'static` bound on the error type of the
+wrapped reader or writer. `StreamError::source` returns the codec
+`Error` only.
 
 ### Comment style in private comments
 

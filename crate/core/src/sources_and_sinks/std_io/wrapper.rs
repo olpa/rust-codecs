@@ -7,50 +7,47 @@ use crate::sources_and_sinks::shared_io::{
 };
 use crate::stream::Pump;
 use crate::{
-    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind, StallError,
-    StreamError,
+    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind,
+    StreamError, StreamErrorKind,
 };
 
 use super::adapter::{BufReadSource, StdSink, StdSource};
 
-fn to_io_error(err: StreamError) -> io::Error {
-    let kind = match err.error.kind {
-        ErrorKind::CorruptStream => io::ErrorKind::InvalidData,
-        ErrorKind::UnexpectedEnd => io::ErrorKind::UnexpectedEof,
-        // Both are codec bugs. The data is not at fault.
-        ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim => io::ErrorKind::Other,
+fn to_io_error(err: StreamError<io::Error>) -> io::Error {
+    let kind = match &err.kind {
+        StreamErrorKind::Io(error) => error.kind(),
+        StreamErrorKind::Codec(error) => match error.kind {
+            ErrorKind::CorruptStream => io::ErrorKind::InvalidData,
+            ErrorKind::UnexpectedEnd => io::ErrorKind::UnexpectedEof,
+            // Both are codec bugs. The data is not at fault.
+            ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim => io::ErrorKind::Other,
+        },
+        StreamErrorKind::SinkExhausted | StreamErrorKind::ZeroWrite => io::ErrorKind::WriteZero,
+        StreamErrorKind::NoProgress => io::ErrorKind::Other,
     };
     io::Error::new(kind, err)
 }
 
-fn stall_to_io_error(error: StallError) -> io::Error {
-    let kind = match error {
-        StallError::ZeroWrite | StallError::SinkExhausted => io::ErrorKind::WriteZero,
-        StallError::NoProgress => io::ErrorKind::Other,
-    };
-    io::Error::new(kind, error)
-}
-
 fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error {
-    let moved = err.moved;
-    match err.kind {
-        DriveErrorKind::Source(error) => error,
+    let kind = match err.kind {
+        DriveErrorKind::Source(error) => StreamErrorKind::Io(error),
         DriveErrorKind::Sink(never) => match never {},
-        DriveErrorKind::Codec(error) => to_io_error(StreamError::new(error, moved)),
-        DriveErrorKind::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
-        DriveErrorKind::NoProgress => stall_to_io_error(StallError::NoProgress),
-    }
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::SinkExhausted => StreamErrorKind::SinkExhausted,
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
+    };
+    to_io_error(StreamError::new(kind, err.moved))
 }
 
 fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error {
-    let moved = err.moved;
-    match err.kind {
+    let kind = match err.kind {
         DriveErrorKind::Source(never) => match never {},
-        DriveErrorKind::Sink(error) => error,
-        DriveErrorKind::Codec(error) => to_io_error(StreamError::new(error, moved)),
-        DriveErrorKind::SinkExhausted => stall_to_io_error(StallError::SinkExhausted),
-        DriveErrorKind::NoProgress => stall_to_io_error(StallError::NoProgress),
-    }
+        DriveErrorKind::Sink(error) => StreamErrorKind::Io(error),
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::SinkExhausted => StreamErrorKind::SinkExhausted,
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
+    };
+    to_io_error(StreamError::new(kind, err.moved))
 }
 
 /// Wraps a `Read`, running `C` over the bytes as they're pulled through.
@@ -69,6 +66,9 @@ fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error
 /// - Trailing input bytes already pulled from the wrapped reader are
 ///   not yielded as output; retrieve them with [`CodecReader::pending`]
 ///   before dropping the reader.
+///
+/// A failure is an `io::Error`. Its payload is a
+/// [`StreamError`](crate::StreamError).
 pub struct CodecReader<R, C: BoundaryAwareCodec, S> {
     input: StdSource<R, S>,
     pump: Pump<C>,
@@ -188,6 +188,9 @@ impl<R: BufRead, C: BoundaryAwareCodec> Read for BufReadCodecReader<R, C> {
 /// `CodecWriter` sends the codec output to the wrapped writer at each
 /// call to `write`. If the calls are small and the wrapped writer has
 /// no buffer, performance can decrease.
+///
+/// A failure is an `io::Error`. Its payload is a
+/// [`StreamError`](crate::StreamError).
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,
     pump: Pump<C>,
@@ -259,7 +262,12 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
 
     fn flush(&mut self) -> io::Result<()> {
         pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)?;
-        self.output.get_mut().flush()
+        self.output.get_mut().flush().map_err(|error| {
+            to_io_error(StreamError::new(
+                StreamErrorKind::Io(error),
+                self.pump.total(),
+            ))
+        })
     }
 }
 
