@@ -288,7 +288,7 @@ mod tests {
     use embedded_io::{ErrorType, Read};
 
     use super::{BufReadCodecReader, CodecReader, CodecWriter};
-    use crate::codecs::test_support::{EndsAtBar, FailsAfterInner};
+    use crate::codecs::test_support::{Collected, EndsAtBar, FailsAfterInner};
     use crate::identity::{identity, Identity};
     use crate::{ErrorKind, StreamError, StreamErrorKind};
 
@@ -322,8 +322,8 @@ mod tests {
         }
     }
 
-    fn read_to_end<R: Read>(reader: &mut R) -> Vec<u8> {
-        let mut output = Vec::new();
+    fn read_to_end<R: Read>(reader: &mut R) -> Collected {
+        let mut output = Collected::new();
         let mut buf = [0u8; 4];
         loop {
             let n = reader.read(&mut buf).unwrap();
@@ -341,7 +341,7 @@ mod tests {
         // Act
         let output = read_to_end(&mut reader);
 
-        assert_eq!(output, b"abc");
+        assert_eq!(output.as_slice(), b"abc");
         assert_eq!(reader.pending(), b"tail");
     }
 
@@ -352,7 +352,7 @@ mod tests {
         // Act
         let output = read_to_end(&mut reader);
 
-        assert_eq!(output, b"abc");
+        assert_eq!(output.as_slice(), b"abc");
         assert_eq!(reader.into_inner(), b"tail");
     }
 }

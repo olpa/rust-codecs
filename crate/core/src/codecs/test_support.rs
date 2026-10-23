@@ -298,3 +298,28 @@ impl Source for SplitSource<'_> {
         self.pos += amount;
     }
 }
+
+/// Collects bytes in a fixed array. It replaces `Vec`, so the tests
+/// do not need `alloc`.
+pub(crate) struct Collected {
+    bytes: [u8; 1024],
+    len: usize,
+}
+
+impl Collected {
+    pub(crate) fn new() -> Self {
+        Self {
+            bytes: [0; 1024],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn extend_from_slice(&mut self, data: &[u8]) {
+        self.bytes[self.len..self.len + data.len()].copy_from_slice(data);
+        self.len += data.len();
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}

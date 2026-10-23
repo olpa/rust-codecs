@@ -74,6 +74,7 @@ mod tests {
     use core::convert::Infallible;
 
     use super::boundary_aware_pump_read;
+    use crate::codecs::test_support::Collected;
     use crate::identity::identity;
     use crate::{Pump, Source};
 
@@ -419,7 +420,7 @@ mod tests {
         });
         let mut buf = [0u8; 16];
 
-        let mut out = Vec::new();
+        let mut out = Collected::new();
         let error = loop {
             match boundary_aware_pump_read(&mut pump, &mut source, &mut buf) {
                 Ok(n) => out.extend_from_slice(&buf[..n]),
@@ -427,7 +428,7 @@ mod tests {
             }
         };
 
-        assert_eq!(out, b"0123456789012345");
+        assert_eq!(out.as_slice(), b"0123456789012345");
         assert!(matches!(error.kind, DriveErrorKind::Codec(_)));
         assert_eq!(
             error.moved,
@@ -464,7 +465,7 @@ mod tests {
         });
         let mut buf = [0u8; 16];
 
-        let mut out = Vec::new();
+        let mut out = Collected::new();
         let error = loop {
             match boundary_aware_pump_read(&mut pump, &mut source, &mut buf) {
                 Ok(n) => out.extend_from_slice(&buf[..n]),
@@ -472,7 +473,7 @@ mod tests {
             }
         };
 
-        assert_eq!(out, b"01234567890123456789");
+        assert_eq!(out.as_slice(), b"01234567890123456789");
         assert!(matches!(error.kind, DriveErrorKind::Codec(_)));
         assert_eq!(
             error.moved,

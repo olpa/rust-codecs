@@ -79,34 +79,10 @@ pub fn retry_write_all<T, E>(
 #[cfg(test)]
 mod tests {
     use super::{retry_fill_buf, retry_on_interrupted, retry_write_all};
+    use crate::codecs::test_support::Collected;
 
     fn is_interrupted(e: &&str) -> bool {
         *e == "eintr"
-    }
-
-    /// Collects bytes in a fixed array. It replaces `Vec`, so the
-    /// tests do not need `alloc`.
-    struct Collected {
-        bytes: [u8; 1024],
-        len: usize,
-    }
-
-    impl Collected {
-        fn new() -> Self {
-            Self {
-                bytes: [0; 1024],
-                len: 0,
-            }
-        }
-
-        fn extend_from_slice(&mut self, data: &[u8]) {
-            self.bytes[self.len..self.len + data.len()].copy_from_slice(data);
-            self.len += data.len();
-        }
-
-        fn as_slice(&self) -> &[u8] {
-            &self.bytes[..self.len]
-        }
     }
 
     /// Yields `data` one byte per real call, alternating an
