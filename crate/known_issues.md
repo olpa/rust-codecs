@@ -181,6 +181,22 @@ wrapped reader or writer. Their `Display` prints the inner error. A
 wrapped reader or writer. `StreamError::source` returns the codec
 `Error` only.
 
+### Error chains repeat the codec error message (decided 2026-10-23)
+
+`StreamError` prints the codec error in its `Display` and returns it
+from `source()`. `EncodeError::Stream` prints the `StreamError` and
+returns it from `source()`. A printer that walks `Error::source()`
+(`anyhow`, `eyre`, the CLI's `error_chain`) shows the text two or three
+times, for example "corrupt stream (after 0 input bytes, 0 output
+bytes): corrupt stream".
+
+We accept this. Users who print with plain `{}` (embedded, `no_std`,
+`unwrap` panics, test output) must get the whole message from
+`Display`, and they are the users that we care about. `source()` stays,
+so generic code can still downcast to `StreamError` and read the byte
+counts. Removing the `StreamError` level from `EncodeError::source`
+would hide those counts from code that holds only a `dyn Error`.
+
 ### Comment style in private comments
 
 Some private comments in `base64_shared.rs`, `base64_dec.rs`,
