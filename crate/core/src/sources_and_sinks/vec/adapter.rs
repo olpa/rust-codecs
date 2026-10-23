@@ -12,6 +12,7 @@ use crate::{Sink, Source};
 // with no check to catch it.
 
 /// `Vec<u8>` input stream.
+#[derive(Debug)]
 pub struct VecSource {
     inner: Vec<u8>,
     pos: usize,
@@ -53,6 +54,7 @@ impl Source for VecSource {
 }
 
 /// `Vec<u8>` auto-growing output stream.
+#[derive(Debug)]
 pub struct VecSink {
     inner: Vec<u8>,
     grow_by: usize,

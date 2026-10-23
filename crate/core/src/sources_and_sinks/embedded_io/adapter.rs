@@ -11,6 +11,7 @@ fn is_interrupted<E: embedded_io::Error>(e: &E) -> bool {
 }
 
 /// Wraps an `embedded_io::Read`, recognizing `Interrupted`.
+#[derive(Debug)]
 struct EmbeddedReader<R>(R);
 
 impl<R: Read> EintrRead for EmbeddedReader<R> {
@@ -27,6 +28,7 @@ impl<R: Read> EintrRead for EmbeddedReader<R> {
 
 /// A `Source` over `embedded_io::Read`, reading into an owned scratch
 /// buffer.
+#[derive(Debug)]
 pub struct EmbeddedSource<R, S>(ScratchSource<EmbeddedReader<R>, S>);
 
 impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
@@ -80,6 +82,7 @@ impl<R: Read, S: AsMut<[u8]>> Source for EmbeddedSource<R, S> {
 }
 
 /// Wraps an `embedded_io::BufRead`, recognizing `Interrupted`.
+#[derive(Debug)]
 struct EmbeddedBufReader<R>(R);
 
 impl<R: BufRead> EintrFillBuf for EmbeddedBufReader<R> {
@@ -100,6 +103,7 @@ impl<R: BufRead> EintrFillBuf for EmbeddedBufReader<R> {
 
 /// A `Source` over `embedded_io::BufRead`, using the `BufRead`'s
 /// buffer directly to expose input as `u8` slices.
+#[derive(Debug)]
 pub struct BufReadSource<R>(LendingSource<EmbeddedBufReader<R>>);
 
 impl<R: BufRead> BufReadSource<R> {
@@ -170,6 +174,7 @@ impl<E: embedded_io::Error> embedded_io::Error for WriteError<E> {
 /// Wraps an `embedded_io::Write`, retrying via `retry_write_all` —
 /// unlike `std::io::Write::write_all`, `embedded_io`'s doesn't retry
 /// on its own.
+#[derive(Debug)]
 struct EmbeddedWriter<W>(W);
 
 impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
@@ -188,6 +193,7 @@ impl<W: Write> RetryingWrite for EmbeddedWriter<W> {
 
 /// A `Sink` over `embedded_io::Write`, staging writes in an owned
 /// scratch buffer.
+#[derive(Debug)]
 pub struct EmbeddedSink<W, S>(ScratchSink<EmbeddedWriter<W>, S>);
 
 impl<W: Write, S: AsMut<[u8]>> EmbeddedSink<W, S> {

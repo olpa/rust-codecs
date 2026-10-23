@@ -10,6 +10,7 @@ fn is_interrupted(e: &std::io::Error) -> bool {
 }
 
 /// Wraps a `std::io::Read`, recognizing `Interrupted`.
+#[derive(Debug)]
 struct StdReader<R>(R);
 
 impl<R: Read> EintrRead for StdReader<R> {
@@ -26,6 +27,7 @@ impl<R: Read> EintrRead for StdReader<R> {
 
 /// A `Source` over `std::io::Read`, reading into an owned scratch
 /// buffer.
+#[derive(Debug)]
 pub struct StdSource<R, S>(ScratchSource<StdReader<R>, S>);
 
 impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
@@ -79,6 +81,7 @@ impl<R: Read, S: AsMut<[u8]>> Source for StdSource<R, S> {
 }
 
 /// Wraps a `std::io::BufRead`, recognizing `Interrupted`.
+#[derive(Debug)]
 struct StdBufReader<R>(R);
 
 impl<R: BufRead> EintrFillBuf for StdBufReader<R> {
@@ -99,6 +102,7 @@ impl<R: BufRead> EintrFillBuf for StdBufReader<R> {
 
 /// A `Source` over `std::io::BufRead`, using the `BufRead`'s buffer
 /// directly to expose input as `u8` slices.
+#[derive(Debug)]
 pub struct BufReadSource<R>(LendingSource<StdBufReader<R>>);
 
 impl<R: BufRead> BufReadSource<R> {
@@ -134,6 +138,7 @@ impl<R: BufRead> Source for BufReadSource<R> {
 }
 
 /// Wraps a `std::io::Write`, delegating to its own `write_all`.
+#[derive(Debug)]
 struct StdWriter<W>(W);
 
 impl<W: Write> RetryingWrite for StdWriter<W> {
@@ -146,6 +151,7 @@ impl<W: Write> RetryingWrite for StdWriter<W> {
 
 /// A `Sink` over `std::io::Write`, staging writes in an owned scratch
 /// buffer.
+#[derive(Debug)]
 pub struct StdSink<W, S>(ScratchSink<StdWriter<W>, S>);
 
 impl<W: Write, S: AsMut<[u8]>> StdSink<W, S> {

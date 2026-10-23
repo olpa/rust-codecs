@@ -5,6 +5,7 @@ use crate::uninit::as_uninit_mut;
 use crate::{Sink, Source};
 
 /// A borrowed `&[u8]` used directly as an input stream.
+#[derive(Debug)]
 pub struct SliceSource<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -36,6 +37,7 @@ impl Source for SliceSource<'_> {
 }
 
 /// A borrowed `&mut [u8]` used directly as an output stream.
+#[derive(Debug)]
 pub struct SliceSink<'a> {
     bytes: &'a mut [u8],
     pos: usize,

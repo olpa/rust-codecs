@@ -173,6 +173,7 @@ pub(crate) enum PumpDrain {
 // because a trait has no fixed size, so a field cannot hold it. A caller
 // who activated the `alloc` feature can generalize with a box:
 // `Pump<Box<dyn Codec>>`.
+#[derive(Debug)]
 pub struct Pump<C> {
     codec: C,
     /// Persistent flag for `finish`.

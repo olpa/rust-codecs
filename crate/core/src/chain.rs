@@ -41,6 +41,7 @@ use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, ErrorKind
 /// not `std::io` or `embedded_io`.
 /// `CodecReader` and `CodecWriter` exist for those two backends, but a
 /// custom `Source`/`Sink` implementation might not have one.
+#[derive(Debug)]
 pub struct Chain<A, B, S> {
     first: A,
     second: B,

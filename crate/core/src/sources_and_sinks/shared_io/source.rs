@@ -13,6 +13,7 @@ pub trait EintrRead {
 }
 
 /// A `Source`, Eintr-reading into an owned scratch buffer.
+#[derive(Debug)]
 pub struct ScratchSource<R, S> {
     inner: R,
     buffer: S,
@@ -111,6 +112,7 @@ pub trait EintrFillBuf {
 
 /// A `Source`, Eintr-reading into the buffer of `inner`, so that
 /// a `BufRead`-implementing reader can be adapted with no extra copy.
+#[derive(Debug)]
 pub struct LendingSource<R> {
     inner: R,
 }

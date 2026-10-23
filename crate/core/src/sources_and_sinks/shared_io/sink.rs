@@ -14,6 +14,7 @@ pub trait RetryingWrite {
 
 /// A `Sink` over any [`RetryingWrite`], staging writes in an owned
 /// scratch buffer.
+#[derive(Debug)]
 pub struct ScratchSink<W, S> {
     inner: W,
     buffer: S,

@@ -74,6 +74,14 @@ pub struct CodecReader<R, C: BoundaryAwareCodec, S> {
     pump: Pump<C>,
 }
 
+impl<R, C: BoundaryAwareCodec, S> core::fmt::Debug for CodecReader<R, C, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CodecReader")
+            .field("total", &self.pump.total())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// Build a `CodecReader`.
     ///
@@ -143,6 +151,14 @@ pub struct BufReadCodecReader<R, C: BoundaryAwareCodec> {
     pump: Pump<C>,
 }
 
+impl<R, C: BoundaryAwareCodec> core::fmt::Debug for BufReadCodecReader<R, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BufReadCodecReader")
+            .field("total", &self.pump.total())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: BufRead, C: BoundaryAwareCodec> BufReadCodecReader<R, C> {
     /// Build a `BufReadCodecReader`.
     pub fn new(inner: R, codec: C) -> Self {
@@ -206,6 +222,14 @@ impl<R: BufRead, C: BoundaryAwareCodec> Read for BufReadCodecReader<R, C> {
 pub struct CodecWriter<W, C: Codec, S> {
     output: StdSink<W, S>,
     pump: Pump<C>,
+}
+
+impl<W, C: Codec, S> core::fmt::Debug for CodecWriter<W, C, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CodecWriter")
+            .field("total", &self.pump.total())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
