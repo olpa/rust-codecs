@@ -274,6 +274,37 @@ With the default features, `cargo doc` reports unresolved links to
 with all features, so the published docs are correct. Use
 `cargo doc --all-features` locally. Do not report it.
 
+### The buffer types need `AsMut<[u8]>` to be a stable view (decided 2026-10-24)
+
+`Chain`, `ScratchSource` and `ScratchSink` take `S: AsMut<[u8]>`. They
+call `as_mut()` many times and keep indexes between the calls:
+`stage_start` and `stage_end` in `Chain`, `pos` and `len` in
+`ScratchSource`, `offered` in `ScratchSink`. The trait does not say
+that `as_mut()` returns the same slice each time. The code needs this
+implicit contract:
+
+> As long as no other `&mut self` method of the object is called,
+> `as_mut()` is stable: it always returns the same slice.
+
+The crate calls only `as_mut()` on the buffer, and it writes only
+through the returned slice. So the same slice means the same length,
+the same memory and the bytes that were written earlier.
+
+`Vec<u8>`, `[u8; N]`, `&mut [u8]` and `Box<[u8]>` keep the contract.
+A type that switches between buffers, returns a shorter slice, or
+drops writes does not. With such a type the code panics on an index
+out of range, or it sends wrong bytes. There is no undefined behavior,
+because all indexing is checked and all bytes are initialized.
+
+We cannot call `as_mut()` once and keep the slice. The struct owns the
+buffer, and a slice into it would be a self-referential borrow, which
+the compiler rejects. A struct that only borrows the buffer could keep
+the slice, but then the caller must keep the buffer alive, and there is
+no `into_parts`. A concrete `Box<[u8]>` or `&mut [u8]` instead of the
+generic bound would remove the contract, but we lose the other buffer
+types. We keep the generic bound, add no runtime check and no
+documentation on the constructors. Do not report it.
+
 ## Known limits that we do not plan to fix
 
 - A third-party codec cannot report its own error detail. It must
