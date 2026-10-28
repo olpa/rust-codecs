@@ -12,7 +12,7 @@ use crate::{
 
 /// Why the drive stopped before the end of the stream. See
 /// [`DriveError`].
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriveErrorKind<EI, EO> {
     Source(EI),
     Sink(EO),
@@ -48,7 +48,7 @@ impl<EI, EO> core::fmt::Display for DriveErrorKind<EI, EO> {
 /// moved since its creation, up to and including the step that failed.
 /// Also, with [`DriveErrorKind::Codec`], the `consumed` and `written`
 /// fields of the inner [`Error`] count only the codec step that failed.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriveError<EI, EO> {
     pub kind: DriveErrorKind<EI, EO>,
     pub moved: TransferCounts,
