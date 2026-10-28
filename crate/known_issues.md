@@ -286,9 +286,14 @@ implicit contract:
 > As long as no other `&mut self` method of the object is called,
 > `as_mut()` is stable: it always returns the same slice.
 
-The crate calls only `as_mut()` on the buffer, and it writes only
-through the returned slice. So the same slice means the same length,
-the same memory and the bytes that were written earlier.
+The crate writes only through the slice from `as_mut()`. Only
+`ScratchSource::pending` calls `as_ref()`, and it only reads. It needs
+one more rule:
+
+> `as_ref()` returns the same slice as `as_mut()`.
+
+So the same slice means the same length, the same memory and the
+bytes that were written earlier.
 
 `Vec<u8>`, `[u8; N]`, `&mut [u8]` and `Box<[u8]>` keep the contract.
 A type that switches between buffers, returns a shorter slice, or

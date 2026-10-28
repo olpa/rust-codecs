@@ -108,12 +108,6 @@ impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
         self.input.get_ref()
     }
 
-    /// The unconsumed bytes already pulled from the reader into the
-    /// scratch buffer, but not yet yielded to the caller.
-    pub fn pending(&mut self) -> &[u8] {
-        self.input.pending()
-    }
-
     pub fn get_mut(&mut self) -> &mut R {
         self.input.get_mut()
     }
@@ -130,6 +124,14 @@ impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
     /// it wrote, in all the calls so far.
     pub fn total(&self) -> TransferCounts {
         self.pump.total()
+    }
+}
+
+impl<R, C: BoundaryAwareCodec, S: AsRef<[u8]>> CodecReader<R, C, S> {
+    /// The unconsumed bytes already pulled from the reader into the
+    /// scratch buffer, but not yet yielded to the caller.
+    pub fn pending(&self) -> &[u8] {
+        self.input.pending()
     }
 }
 

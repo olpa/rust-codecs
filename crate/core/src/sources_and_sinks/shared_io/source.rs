@@ -68,12 +68,6 @@ impl<R: EintrRead, S: AsMut<[u8]>> ScratchSource<R, S> {
     pub fn into_parts(self) -> (R, S) {
         (self.inner, self.buffer)
     }
-
-    /// The unconsumed bytes already pulled from the reader into the
-    /// scratch buffer, but not yet yielded to the caller.
-    pub fn pending(&mut self) -> &[u8] {
-        &self.buffer.as_mut()[self.pos..self.len]
-    }
 }
 
 impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
@@ -100,6 +94,14 @@ impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
             "consume({amount}) exceeds the {remaining} bytes remaining in the current chunk"
         );
         self.pos += amount.min(remaining);
+    }
+}
+
+impl<R, S: AsRef<[u8]>> ScratchSource<R, S> {
+    /// The unconsumed bytes already pulled from the reader into the
+    /// scratch buffer, but not yet yielded to the caller.
+    pub fn pending(&self) -> &[u8] {
+        &self.buffer.as_ref()[self.pos..self.len]
     }
 }
 

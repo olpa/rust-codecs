@@ -54,17 +54,19 @@ impl<R: Read, S: AsMut<[u8]>> StdSource<R, S> {
         self.0.into_inner().0
     }
 
-    /// The unconsumed bytes already pulled from the reader into the
-    /// scratch buffer, but not yet yielded to the caller.
-    pub fn pending(&mut self) -> &[u8] {
-        self.0.pending()
-    }
-
     /// Reclaim both the reader and the scratch buffer. If the buffer
     /// holds unconsumed bytes, treat them as lost.
     pub fn into_parts(self) -> (R, S) {
         let (reader, buffer) = self.0.into_parts();
         (reader.0, buffer)
+    }
+}
+
+impl<R, S: AsRef<[u8]>> StdSource<R, S> {
+    /// The unconsumed bytes already pulled from the reader into the
+    /// scratch buffer, but not yet yielded to the caller.
+    pub fn pending(&self) -> &[u8] {
+        self.0.pending()
     }
 }
 
