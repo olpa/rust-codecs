@@ -41,7 +41,6 @@ use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, ErrorKind
 /// not `std::io` or `embedded_io`.
 /// `CodecReader` and `CodecWriter` exist for those two backends, but a
 /// custom `Source`/`Sink` implementation might not have one.
-#[derive(Debug)]
 pub struct Chain<A, B, S> {
     first: A,
     second: B,
@@ -61,6 +60,19 @@ pub struct Chain<A, B, S> {
     /// empty. It also returns this error if `second` fails on these
     /// bytes, because the error of `first` happened first.
     first_error: Option<ErrorKind>,
+}
+
+/// It shows the number of staged bytes, but not the bytes.
+impl<A: core::fmt::Debug, B: core::fmt::Debug, S> core::fmt::Debug for Chain<A, B, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Chain")
+            .field("first", &self.first)
+            .field("second", &self.second)
+            .field("staged", &(self.stage_end - self.stage_start))
+            .field("first_done", &self.first_done)
+            .field("first_error", &self.first_error)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
