@@ -52,20 +52,21 @@ fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error
 
 /// Wraps a `Read`, running `C` over the bytes as they're pulled through.
 ///
-/// End-of-stream: when the wrapped reader hits EOF, the reader
-/// runs codec's `finish` (trailer, padding) and its bytes are
-/// yielded before this reader reports EOF itself.
+/// The input ends in one of two ways:
 ///
-/// End-of-codec: a codec can end its input in-band, before the
-/// wrapped reader hits EOF. It reports
-/// [`BoundaryAwareProgress::Boundary`](crate::BoundaryAwareProgress::Boundary).
-/// Then the reader stops pulling from the wrapped reader:
+/// - End-of-stream: the wrapped reader hits EOF.
+/// - End-of-codec: the codec ends its input in-band, before the
+///   wrapped reader hits EOF.
 ///
-/// - The reader runs the codec's `finish`, the same as at EOF. The
-///   reader yields the output of `finish`. Then it reports EOF.
-/// - Trailing input bytes already pulled from the wrapped reader are
-///   not yielded as output; retrieve them with [`CodecReader::pending`]
-///   before dropping the reader.
+/// At both ends, the reader runs the codec's `finish` (trailer,
+/// padding) and yields its output. Then it reports EOF.
+///
+/// The EOF stays: later reads return `Ok(0)`, and the reader does
+/// not pull from the wrapped reader again.
+///
+/// At end-of-codec, trailing input bytes already pulled from the
+/// wrapped reader are not yielded as output; retrieve them with
+/// [`CodecReader::pending`] before dropping the reader.
 ///
 /// A failure is an `io::Error`. Its payload is a
 /// [`StreamError`](crate::StreamError).
