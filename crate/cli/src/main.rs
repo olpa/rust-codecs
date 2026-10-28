@@ -274,7 +274,12 @@ fn install_sigusr1_handler() {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = no_op as *const () as libc::sighandler_t;
         libc::sigemptyset(&mut action.sa_mask);
-        libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut());
+        if libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()) == -1 {
+            eprintln!(
+                "warning: cannot install the SIGUSR1 handler: {}",
+                std::io::Error::last_os_error()
+            );
+        }
     }
 }
 
