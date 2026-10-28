@@ -18,11 +18,26 @@ use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it encodes with.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Base64Enc<E: Engine = GeneralPurpose> {
     engine: E,
     pending_input: PendingInput<GROUP>,
     pending_output: PendingOutput<ENCODED_GROUP>,
+}
+
+/// It shows the engine's config and the number of pending bytes, but
+/// not the engine's tables.
+impl<E: Engine> core::fmt::Debug for Base64Enc<E>
+where
+    E::Config: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Base64Enc")
+            .field("config", self.engine.config())
+            .field("pending_input", &self.pending_input.len())
+            .field("pending_output", &self.pending_output.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E: Engine> Base64Enc<E> {

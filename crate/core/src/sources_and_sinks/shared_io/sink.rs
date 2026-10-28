@@ -14,11 +14,20 @@ pub trait RetryingWrite {
 
 /// A `Sink` over any [`RetryingWrite`], staging writes in an owned
 /// scratch buffer.
-#[derive(Debug)]
 pub struct ScratchSink<W, S> {
     inner: W,
     buffer: S,
     offered: usize,
+}
+
+/// It shows the number of offered bytes, but not the bytes.
+impl<W: core::fmt::Debug, S> core::fmt::Debug for ScratchSink<W, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ScratchSink")
+            .field("inner", &self.inner)
+            .field("offered", &self.offered)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<W: RetryingWrite, S: AsMut<[u8]>> ScratchSink<W, S> {

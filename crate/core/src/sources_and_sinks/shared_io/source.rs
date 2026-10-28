@@ -13,12 +13,21 @@ pub trait EintrRead {
 }
 
 /// A `Source`, Eintr-reading into an owned scratch buffer.
-#[derive(Debug)]
 pub struct ScratchSource<R, S> {
     inner: R,
     buffer: S,
     pos: usize,
     len: usize,
+}
+
+/// It shows the number of pending bytes, but not the bytes.
+impl<R: core::fmt::Debug, S> core::fmt::Debug for ScratchSource<R, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ScratchSource")
+            .field("inner", &self.inner)
+            .field("pending", &(self.len - self.pos))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<R: EintrRead, S: AsMut<[u8]>> ScratchSource<R, S> {

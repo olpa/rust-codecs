@@ -22,12 +22,28 @@ use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
 /// padding behavior) it decodes with.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Base64Dec<E: Engine = GeneralPurpose> {
     engine: E,
     pending_input: PendingInput<ENCODED_GROUP>,
     pending_output: PendingOutput<GROUP>,
     done: bool,
+}
+
+/// It shows the engine's config and the number of pending bytes, but
+/// not the engine's tables.
+impl<E: Engine> core::fmt::Debug for Base64Dec<E>
+where
+    E::Config: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Base64Dec")
+            .field("config", self.engine.config())
+            .field("pending_input", &self.pending_input.len())
+            .field("pending_output", &self.pending_output.len())
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E: Engine> Base64Dec<E> {

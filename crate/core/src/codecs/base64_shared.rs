@@ -56,6 +56,11 @@ impl<const N: usize> PendingInput<N> {
         self.len == 0
     }
 
+    /// How many bytes are currently held.
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+
     /// Whether a full unit (`N` bytes) is currently held.
     pub(super) fn is_full(&self) -> bool {
         self.len == N
