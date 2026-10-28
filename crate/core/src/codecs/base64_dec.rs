@@ -140,8 +140,8 @@ impl<E: Engine> Codec for Base64Dec<E> {
             // remaining input, and the total time is quadratic. A run
             // that stops at the window end is not a problem: the next
             // loop iteration continues it.
-            let window = ((output.len() - out_pos) / GROUP + 2) * ENCODED_GROUP;
-            let scan_end = input.len().min(in_pos + window);
+            let window = ((output.len() - out_pos) / GROUP + 2).saturating_mul(ENCODED_GROUP);
+            let scan_end = input.len().min(in_pos.saturating_add(window));
             let run_end = input[in_pos..scan_end]
                 .iter()
                 .position(u8::is_ascii_whitespace)
