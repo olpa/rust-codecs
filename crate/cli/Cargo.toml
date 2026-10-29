@@ -6,6 +6,7 @@ rust-version = "1.87"
 description = "Command-line tool to run codec chains by hand."
 license = "MIT"
 repository = "https://github.com/olpa/rust-codecs"
+publish = false
 
 [dependencies]
 rust-codecs-core = { path = "../core", features = ["rot13", "base64", "json", "embedded-io"] }
