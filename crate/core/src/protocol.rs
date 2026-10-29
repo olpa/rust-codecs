@@ -230,12 +230,12 @@ impl From<Progress> for BoundaryAwareProgress {
     }
 }
 
-/// Progress of one [`DrainCodec::finish`] call.
+/// Progress of one [`DrainCodec::flush`] or [`DrainCodec::finish`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainProgress {
     /// The call filled all of `output`. More output is pending.
     OutputFilled,
-    /// The call delivered the last `written` bytes.
+    /// The call wrote `written` bytes. It has no more output to write.
     Done { written: usize },
 }
 
