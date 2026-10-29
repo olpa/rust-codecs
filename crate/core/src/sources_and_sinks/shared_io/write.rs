@@ -16,15 +16,34 @@ use crate::{Codec, DriveError, DriveErrorKind, Sink};
 /// Returns the number of bytes consumed from `buf`.
 ///
 /// This is the transport-independent core of a `Write::write` impl.
+///
+/// The `Write` contract says: if `write` returns an error, it took no
+/// bytes of `buf`. Therefore, if an error happens after the function
+/// took bytes of `buf`, then `pump_write` returns the number of bytes
+/// taken, and reports the error on the next call. (FIXME: Only codec
+/// errors work this way now. The comment in the code lists the other
+/// errors.)
 pub fn pump_write<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
     buf: &[u8],
 ) -> Result<usize, DriveError<Infallible, O::Error>> {
     let mut input = SliceSource::new(buf);
-    // FIXME: A commit error can occur after input was consumed.
+    // FIXME: `write` can still return `Err` after it took bytes from
+    // `buf`. Only codec errors are latched. These errors are not fixed yet:
+    // - A sink error (`spare` or `commit`) after an earlier step
+    //   committed output.
+    // - A failed commit. The codec has consumed the input of that step.
+    //   A retry duplicates output.
+    // - `NoProgress` after an earlier step moved bytes.
     // Track Write::write failure handling: https://github.com/olpa/rust-codecs/issues/20
-    pump.transfer_from(&mut input, output)?;
+    match pump.transfer_from(&mut input, output) {
+        Ok(_) => {}
+        Err(error) if input.consumed() > 0 && matches!(error.kind, DriveErrorKind::Codec(_)) => {
+            // `Pump::transfer_step` latched the error. The next call returns it.
+        }
+        Err(error) => return Err(error),
+    }
     Ok(input.consumed())
 }
 
@@ -133,6 +152,32 @@ mod tests {
             pump_flush(&mut pump, &mut sink).unwrap();
         }
         assert_eq!(bytes, *b"XXXaaaaa");
+    }
+
+    // The codec passes the first 4 bytes and fails on the next ones. The
+    // sink is too small for all of `buf`, so the first step commits its
+    // 4 bytes before the second step fails. A `Write::write` that
+    // returns an error must have taken no bytes. So `pump_write` must
+    // report the progress as `Ok(4)`. The latched error comes on the
+    // next call.
+    #[test]
+    fn a_codec_error_after_progress_is_reported_by_the_next_call() {
+        use crate::codecs::test_support::FailsAfterInner;
+        use crate::identity::identity;
+
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: identity(),
+            ok_calls: 1,
+            calls: 0,
+        });
+        let mut bytes = [0u8; 4];
+        let mut sink = SliceSink::new(&mut bytes);
+
+        let first = pump_write(&mut pump, &mut sink, b"01234567");
+        assert_eq!(first.unwrap(), 4);
+
+        let second = pump_write(&mut pump, &mut sink, b"4567").unwrap_err();
+        assert!(matches!(second.kind, DriveErrorKind::Codec(_)));
     }
 
     // The codec passes three 4-byte chunks and fails on the fourth. The

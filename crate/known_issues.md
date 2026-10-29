@@ -38,6 +38,17 @@ The fix direction is to keep the uncommitted output in the sink, return
 `Ok(consumed)`, and report the error on the next call. `Pump` already
 has a latch for codec errors that the fix can use.
 
+`pump_write` already does this for codec errors. In these cases
+`write` can still return `Err` after it took bytes from `buf`:
+
+- A sink error (`spare` or `commit`) after an earlier step committed
+  output.
+- A failed commit. The codec has consumed the input of that step.
+- `NoProgress` after an earlier step moved bytes.
+
+The issue stays open until all three are fixed. Then remove the
+`FIXME` in `pump_write`.
+
 The same problem affects `CodecWriter::finish`. Its error gives back
 the `CodecWriter`, but a second `finish` after a sink error loses the
 trailer bytes of the failed commit. The doc of
