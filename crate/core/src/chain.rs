@@ -96,6 +96,25 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         })
     }
 
+    /// Get references to the two codecs, as `(first, second)`.
+    pub fn get_ref(&self) -> (&A, &B) {
+        (&self.first, &self.second)
+    }
+
+    /// Get mutable references to the two codecs, as `(first, second)`.
+    ///
+    /// Use this method to read or change the state of a codec. For
+    /// example, set a counter to zero, or change a setting between
+    /// two records.
+    ///
+    /// Do not call the `Codec` methods of the codecs. Do not replace a
+    /// codec. The chain keeps its own state: the staged bytes, and a
+    /// record that `first` finished or failed. If you do these things,
+    /// this state is not correct for the codecs.
+    pub fn get_mut(&mut self) -> (&mut A, &mut B) {
+        (&mut self.first, &mut self.second)
+    }
+
     /// Reclaim both codecs and the staging buffer. If the buffer
     /// holds undrained bytes, treat them as lost.
     pub fn into_parts(self) -> (A, B, S) {
