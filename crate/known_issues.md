@@ -313,8 +313,8 @@ documentation on the constructors. Do not report it.
 ## Known limits that we do not plan to fix
 
 - A third-party codec cannot report its own error detail. It must
-  choose one of the four kinds of `ErrorKind`. "Checksum mismatch" and
-  "invalid Huffman table" both become `CorruptStream`.
+  choose one of the existing kinds of `ErrorKind`. "Checksum mismatch"
+  and "invalid Huffman table" both become `CorruptStream`.
 - `Pump` and `Chain` cannot check that a codec reports its counts
   honestly. They check only that the counts fit the buffers.
 - The `Sink` contract does not say what a failed `commit` did. The
