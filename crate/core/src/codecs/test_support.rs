@@ -36,12 +36,15 @@ pub(crate) fn assert_overclaim_rejected<EI: Debug, EO: Debug>(kind: &DriveErrorK
 /// - Takes new input only after it releases all held 'X's.
 ///
 /// `finish` first releases the held 'X's, then emits the trailer.
+///
+/// Counts its `flush` calls.
 #[derive(Default)]
 pub(crate) struct HoldsOutput {
     pub(crate) held: usize,
     pub(crate) per_input: usize,
     pub(crate) trailer: &'static [u8],
     pub(crate) trailer_written: usize,
+    pub(crate) flush_calls: usize,
 }
 
 impl HoldsOutput {
@@ -58,6 +61,7 @@ impl HoldsOutput {
 impl DrainCodec for HoldsOutput {
     /// Releases the held 'X's. Does not emit the trailer.
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.flush_calls += 1;
         let n = self.release_held(output);
         if self.held > 0 {
             return Ok(DrainProgress::OutputFilled);

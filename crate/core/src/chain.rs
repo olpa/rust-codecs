@@ -51,9 +51,13 @@ pub struct Chain<A, B, S> {
     stage_end: usize,
     /// How far the chain is in `finish`.
     finish_phase: FinishPhase,
-    /// Set when `first.finish` reports `Done`. Then the next `finish`
-    /// calls skip `first`. Used only while `finish_phase` is `Finishing`.
-    first_done: bool,
+    /// Set when `first.flush` (`first.finish`) reports `Done`. Then the
+    /// next `flush` (`finish`) calls skip `first`.
+    /// `first_flushed` is cleared when the chain's `flush` reports `Done`
+    /// or fails, and by `process`.
+    /// `first_finished` is used only while `finish_phase` is `Finishing`.
+    first_flushed: bool,
+    first_finished: bool,
     /// Set when `first` fails. The valid bytes that `first` wrote
     /// before the failure are in `staging`. The chain passes them
     /// through `second` first. It returns this error when `staging` is
@@ -70,7 +74,8 @@ impl<A: core::fmt::Debug, B: core::fmt::Debug, S> core::fmt::Debug for Chain<A, 
             .field("second", &self.second)
             .field("staged", &(self.stage_end - self.stage_start))
             .field("finish_phase", &self.finish_phase)
-            .field("first_done", &self.first_done)
+            .field("first_flushed", &self.first_flushed)
+            .field("first_finished", &self.first_finished)
             .field("first_error", &self.first_error)
             .finish_non_exhaustive()
     }
@@ -93,7 +98,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             stage_start: 0,
             stage_end: 0,
             finish_phase: FinishPhase::Open,
-            first_done: false,
+            first_flushed: false,
+            first_finished: false,
             first_error: None,
         })
     }
@@ -223,7 +229,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         mode: DrainMode,
     ) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
-        let mut first_done = self.first_done;
+        let mut first_done = match mode {
+            DrainMode::Flush => self.first_flushed,
+            DrainMode::Finish => self.first_finished,
+        };
 
         loop {
             //
@@ -292,8 +301,9 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 DrainProgress::Done { written } => {
                     self.stage_end = written;
                     first_done = true;
-                    if mode == DrainMode::Finish {
-                        self.first_done = true;
+                    match mode {
+                        DrainMode::Flush => self.first_flushed = true,
+                        DrainMode::Finish => self.first_finished = true,
                     }
                 }
             }
@@ -331,7 +341,17 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.finish_phase.check_open()?;
-        self.drain_through(output, DrainMode::Flush)
+        let progress = self.drain_through(output, DrainMode::Flush);
+        // When the flush cycle ends, the next `flush` starts a new cycle
+        // and flushes `first` again.
+        match progress {
+            // The cycle continues.
+            Ok(DrainProgress::OutputFilled) => {}
+            // The cycle ends.
+            Ok(DrainProgress::Done { .. }) => self.first_flushed = false,
+            Err(_) => self.first_flushed = false,
+        }
+        progress
     }
 
     /// Finish `first` through `staging` to `second`, then finish
@@ -378,6 +398,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         self.finish_phase.check_open()?;
+        // New input starts a new flush cycle.
+        self.first_flushed = false;
         let mut in_pos = 0;
         let mut out_pos = 0;
 
@@ -805,6 +827,62 @@ mod tests {
         };
         let mut chain = Chain::new(identity(), second, vec![0u8; 1]).unwrap();
         assert_eq!(flush_one_byte_at_a_time(&mut chain), b"XX");
+    }
+
+    #[test]
+    fn flush_does_not_flush_a_flushed_first_again() {
+        // `first` reports `Done` on the first call, but `staging` holds
+        // "XXX" and the output takes 1 byte per call. The next calls
+        // must drain `staging`, not flush `first` again.
+        let first = HoldsOutput {
+            held: 3,
+            ..Default::default()
+        };
+        let mut chain = Chain::new(first, identity(), vec![0u8; 16]).unwrap();
+        assert_eq!(flush_one_byte_at_a_time(&mut chain), b"XXX");
+
+        let (first, _second, _staging) = chain.into_parts();
+        assert_eq!(first.flush_calls, 1);
+    }
+
+    #[test]
+    fn flush_does_not_flush_first_again_while_second_flushes() {
+        // `first` holds nothing. `second` holds "XXX", and with a 1-byte
+        // output its `flush` reports `OutputFilled` two times. Meanwhile,
+        // the chain must not flush `first` again.
+        let second = HoldsOutput {
+            held: 3,
+            ..Default::default()
+        };
+        let mut chain = Chain::new(HoldsOutput::default(), second, vec![0u8; 16]).unwrap();
+        assert_eq!(flush_one_byte_at_a_time(&mut chain), b"XXX");
+
+        let (first, _second, _staging) = chain.into_parts();
+        assert_eq!(first.flush_calls, 1);
+    }
+
+    #[test]
+    fn each_flush_cycle_flushes_first_once() {
+        // After a flush reports `Done`, the next flush is a new cycle
+        // and flushes `first` again. The same holds after new input.
+        let first = HoldsOutput {
+            held: 2,
+            per_input: 1,
+            ..Default::default()
+        };
+        let mut chain = Chain::new(first, identity(), vec![0u8; 16]).unwrap();
+
+        assert_eq!(flush_one_byte_at_a_time(&mut chain), b"XX");
+        assert_eq!(flush_one_byte_at_a_time(&mut chain), b"");
+
+        // `first` holds one 'X' for each input byte.
+        let mut output = [0u8; 8];
+        let outcome = chain.process(b"ab", as_uninit_mut(&mut output)).unwrap();
+        assert_eq!(outcome, Progress::InputConsumed { written: 0 });
+        assert_eq!(flush_one_byte_at_a_time(&mut chain), b"XX");
+
+        let (first, _second, _staging) = chain.into_parts();
+        assert_eq!(first.flush_calls, 3);
     }
 
     // ----
