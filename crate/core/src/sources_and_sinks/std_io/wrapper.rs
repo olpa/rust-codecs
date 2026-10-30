@@ -19,8 +19,10 @@ fn to_io_error(err: StreamError<io::Error>) -> io::Error {
         StreamErrorKind::Codec(error) => match error.kind {
             ErrorKind::CorruptStream => io::ErrorKind::InvalidData,
             ErrorKind::UnexpectedEnd => io::ErrorKind::UnexpectedEof,
-            // Both are codec bugs. The data is not at fault.
-            ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim => io::ErrorKind::Other,
+            // Bugs in the codec or in the caller. The data is not at fault.
+            ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim | ErrorKind::AfterFinish => {
+                io::ErrorKind::Other
+            }
         },
         StreamErrorKind::SinkExhausted | StreamErrorKind::ZeroWrite => io::ErrorKind::WriteZero,
         StreamErrorKind::NoProgress => io::ErrorKind::Other,

@@ -23,6 +23,9 @@ use crate::{Codec, DriveError, DriveErrorKind, Sink};
 /// taken, and reports the error on the next call. (FIXME: Only codec
 /// errors work this way now. The comment in the code lists the other
 /// errors.)
+///
+/// After [`pump_finish`], the function takes no bytes. It returns
+/// `DriveErrorKind::Codec` with `ErrorKind::AfterFinish`.
 pub fn pump_write<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
@@ -56,6 +59,8 @@ pub fn pump_write<O: Sink, C: Codec>(
 ///
 /// - If `output` is full before the codec is done, the function
 ///   returns `DriveErrorKind::SinkExhausted`.
+/// - After [`pump_finish`], the function returns
+///   `DriveErrorKind::Codec` with `ErrorKind::AfterFinish`.
 /// - The function returns all errors from `pump` and from `output`
 ///   without change.
 pub fn pump_flush<O: Sink, C: Codec>(
@@ -96,7 +101,7 @@ mod tests {
     use crate::codecs::test_support::HoldsOutput;
     use crate::sources_and_sinks::slice::SliceSink;
     use crate::stream::Pump;
-    use crate::{DriveErrorKind, TransferCounts};
+    use crate::{DriveErrorKind, Error, ErrorKind, TransferCounts};
 
     #[test]
     fn reports_sink_exhausted_instead_of_silently_truncating_the_trailer() {
@@ -218,5 +223,28 @@ mod tests {
         let again = pump_write(&mut pump, &mut sink, b"6789").unwrap_err();
         assert!(matches!(again.kind, DriveErrorKind::Codec(_)));
         assert_eq!(again.moved, error.moved);
+    }
+
+    #[test]
+    fn write_and_flush_fail_after_finish() {
+        let mut pump = Pump::new(HoldsOutput {
+            per_input: 1,
+            ..Default::default()
+        });
+        let mut bytes = [0u8; 8];
+        let mut sink = SliceSink::new(&mut bytes);
+        pump_write(&mut pump, &mut sink, b"a").unwrap();
+        pump_finish(&mut pump, &mut sink).unwrap();
+        let total = pump.total();
+
+        let after_finish = DriveErrorKind::Codec(Error::new(ErrorKind::AfterFinish, 0, 0));
+        let error = pump_write(&mut pump, &mut sink, b"b").unwrap_err();
+        assert_eq!(error.kind, after_finish);
+        let error = pump_flush(&mut pump, &mut sink).unwrap_err();
+        assert_eq!(error.kind, after_finish);
+
+        pump_finish(&mut pump, &mut sink).unwrap();
+        assert_eq!(pump.total(), total);
+        assert_eq!(sink.written(), 1);
     }
 }

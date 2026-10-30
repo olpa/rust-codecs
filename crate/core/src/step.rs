@@ -1,13 +1,14 @@
 //! Validates a codec's reported progress against the buffers it
 //! received. [`codec_step`] also converts the result into exact
-//! counts. [`Pump`](crate::stream::Pump) and [`Chain`](crate::Chain)
+//! counts. [`FinishPhase`] tracks how far a wrapper is in `finish`.
+//! [`Pump`](crate::stream::Pump) and [`Chain`](crate::Chain)
 //! share this module.
 
 use core::mem::MaybeUninit;
 
 use crate::{
-    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, Progress,
-    TransferCounts,
+    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, ErrorKind,
+    Progress, TransferCounts,
 };
 
 /// Run one step of an ordinary [`Codec`]. Validate the result against
@@ -63,11 +64,59 @@ pub(crate) fn finish_step<C: DrainCodec + ?Sized>(
     codec.finish(output)?.validated(output.len())
 }
 
+/// How far a wrapper of a codec, such as `Chain` or `Pump`, is in
+/// `finish`. It moves only forward: `Open` -> `Finishing` -> `Finished`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FinishPhase {
+    /// `finish` was not called.
+    #[default]
+    Open,
+    /// `finish` was called, but it did not report `Done` yet.
+    Finishing,
+    /// `finish` reported `Done`.
+    Finished,
+}
+
+impl FinishPhase {
+    /// Fail if `finish` was called. Call it before `process` and
+    /// `flush`.
+    ///
+    /// The counts of the error are zero: the call moves no bytes.
+    pub(crate) fn check_open(self) -> Result<(), Error> {
+        match self {
+            Self::Open => Ok(()),
+            Self::Finishing | Self::Finished => Err(Error::new(ErrorKind::AfterFinish, 0, 0)),
+        }
+    }
+
+    pub(crate) fn is_open(self) -> bool {
+        self == Self::Open
+    }
+
+    pub(crate) fn is_finished(self) -> bool {
+        self == Self::Finished
+    }
+
+    /// Record a `finish` call. A repeated call does not change the
+    /// phase.
+    pub(crate) fn start_finish(&mut self) {
+        if *self == Self::Open {
+            *self = Self::Finishing;
+        }
+    }
+
+    /// Record that `finish` reported `Done`. Call it only after
+    /// [`start_finish`](Self::start_finish), and only once.
+    pub(crate) fn finish_done(&mut self) {
+        *self = Self::Finished;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::mem::MaybeUninit;
 
-    use super::boundary_aware_step;
+    use super::{boundary_aware_step, FinishPhase};
     use crate::codecs::test_support::{FailsAfterInner, HoldsOutput, Scripted};
     use crate::{BoundaryAwareProgress, DrainProgress, Error, ErrorKind};
 
@@ -125,5 +174,16 @@ mod tests {
             ),
             Err(Error::new(ErrorKind::CorruptStream, 3, 2))
         );
+    }
+
+    #[test]
+    fn check_open_fails_after_the_first_finish_call() {
+        let after_finish = Err(Error::new(ErrorKind::AfterFinish, 0, 0));
+        let mut phase = FinishPhase::default();
+
+        phase.start_finish();
+        assert_eq!(phase.check_open(), after_finish);
+        phase.finish_done();
+        assert_eq!(phase.check_open(), after_finish);
     }
 }

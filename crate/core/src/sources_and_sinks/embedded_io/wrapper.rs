@@ -44,10 +44,11 @@ impl<E: embedded_io::Error> embedded_io::Error for StreamError<E> {
                 ErrorKind::CorruptStream | ErrorKind::UnexpectedEnd => {
                     embedded_io::ErrorKind::InvalidData
                 }
-                // Both are codec bugs. The data is not at fault.
-                ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim => {
-                    embedded_io::ErrorKind::Other
-                }
+                // Bugs in the codec or in the caller. The data is not at
+                // fault.
+                ErrorKind::CodecBufferTooSmall
+                | ErrorKind::ByteCountClaim
+                | ErrorKind::AfterFinish => embedded_io::ErrorKind::Other,
             },
             StreamErrorKind::ZeroWrite | StreamErrorKind::SinkExhausted => {
                 embedded_io::ErrorKind::WriteZero

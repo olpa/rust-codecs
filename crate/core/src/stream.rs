@@ -4,7 +4,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::step::{boundary_aware_step, finish_step, flush_step};
+use crate::step::{boundary_aware_step, finish_step, flush_step, FinishPhase};
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, Error, ErrorKind, Sink, Source,
     TransferCounts,
@@ -162,6 +162,9 @@ pub(crate) enum PumpDrain {
 /// A bufferless lifecycle wrapper around a codec: processes input
 /// until the stream ends, then drains what's owed.
 ///
+/// After `pump_finish`, `pump_write` and `pump_flush` fail with
+/// [`ErrorKind::AfterFinish`].
+///
 /// Used by [`stream_to_stream`] and by I/O backend wrappers.
 ///
 /// `Pump` is public only because third-party I/O backends are built
@@ -176,20 +179,8 @@ pub(crate) enum PumpDrain {
 #[derive(Debug)]
 pub struct Pump<C> {
     codec: C,
-    /// Persistent flag for `finish`.
-    ///
-    /// Does not guard transfer steps, because a guard is extra work and
-    /// nothing requires it. The `Codec` contract leaves `process` after
-    /// `finish` to the codec. It can continue, or it can return `Err`.
-    ended_by_finish: bool,
-    /// Latches when `finish_to` is entered.
-    ///
-    /// `Read`-style interfaces have no `finish` call. A wrapper like
-    /// `boundary_aware_pump_read` integrates `finish` into `read`. This
-    /// flag selects the mode. `false` means `read` pulls more data
-    /// from the source. `true` means `read` drives the codec to its
-    /// end.
-    finishing: bool,
+    /// How far the pump is in `finish`.
+    finish_phase: FinishPhase,
     /// Latches the codec error.
     ///
     /// After `Err`, the codec state is not defined. So the pump does
@@ -204,8 +195,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     pub fn new(codec: C) -> Self {
         Self {
             codec,
-            ended_by_finish: false,
-            finishing: false,
+            finish_phase: FinishPhase::Open,
             failed: None,
             total: TransferCounts::default(),
         }
@@ -226,12 +216,12 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 
     /// Whether `finish` has reported `Done`.
     pub(crate) fn is_done(&self) -> bool {
-        self.ended_by_finish
+        self.finish_phase.is_finished()
     }
 
-    /// See [`Self::finishing`].
+    /// Whether `finish_to` was called.
     pub(crate) fn is_finishing(&self) -> bool {
-        self.finishing
+        !self.finish_phase.is_open()
     }
 
     /// The latched codec error, if any. See [`Self::failed`].
@@ -268,6 +258,13 @@ impl<C: BoundaryAwareCodec> Pump<C> {
             Some(error) => Err(self.drive_error(DriveErrorKind::Codec(error))),
             None => Ok(()),
         }
+    }
+
+    /// Fail if `finish_to` was called. The error is not latched.
+    fn check_open<EI, EO>(&self) -> Result<(), DriveError<EI, EO>> {
+        self.finish_phase
+            .check_open()
+            .map_err(|error| self.drive_error(DriveErrorKind::Codec(error)))
     }
 
     /// Latch a codec error. Later calls return it and do not call the
@@ -321,12 +318,15 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     ///
     /// After a codec error, the pump latches it. Later calls return
     /// the error and do not call the codec.
+    ///
+    /// After `finish_to`, fails with [`ErrorKind::AfterFinish`].
     pub(crate) fn transfer_step<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
         output: &mut O,
     ) -> Result<PumpTransfer, DriveError<I::Error, O::Error>> {
         self.check_not_failed()?;
+        self.check_open()?;
         // Design note: this step must call `input.chunk()` before
         // `output.spare()`. Only the source can tell end of input from
         // more input. If the sink were checked first, a sink that the
@@ -431,11 +431,15 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 
     /// Flush the codec into `output`. The codec decides how much of its
     /// held output to write. The codec stream does not end.
+    ///
+    /// After `finish_to`, fails with [`ErrorKind::AfterFinish`].
     pub(crate) fn flush_to<O: Sink>(
         &mut self,
         output: &mut O,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
-        self.drain_loop(output, Self::latched_flush_step)
+        self.check_not_failed()?;
+        self.check_open()?;
+        self.drain_loop(output, |pump, output| flush_step(&mut pump.codec, output))
     }
 
     /// Drain all the bytes that the codec must still write, and end
@@ -444,7 +448,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         &mut self,
         output: &mut O,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
-        self.finishing = true;
+        self.finish_phase.start_finish();
         self.drain_loop(output, Self::latched_finish_step)
     }
 
@@ -525,21 +529,6 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
     }
 
-    /// With [`Pump::drain_loop`], flushes the codec.
-    ///
-    /// If `finish` already reported `Done`, the codec stream has ended,
-    /// and nothing is left to flush. Then this function does not call
-    /// the codec. It returns the latched `Done`.
-    fn latched_flush_step(
-        &mut self,
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<DrainProgress, Error> {
-        if self.is_done() {
-            return Ok(DrainProgress::Done { written: 0 });
-        }
-        flush_step(&mut self.codec, output)
-    }
-
     /// Run one `finish` call, latched.
     ///
     /// With [`Pump::drain_loop`], drains all the bytes that the codec
@@ -559,7 +548,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
         }
         let progress = finish_step(&mut self.codec, output)?;
         if matches!(progress, DrainProgress::Done { .. }) {
-            self.ended_by_finish = true;
+            self.finish_phase.finish_done();
         }
         Ok(progress)
     }

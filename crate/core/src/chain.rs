@@ -5,7 +5,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::step::{codec_step, finish_step, flush_step};
+use crate::step::{codec_step, finish_step, flush_step, FinishPhase};
 use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, ErrorKind, Progress};
 
@@ -49,10 +49,10 @@ pub struct Chain<A, B, S> {
     /// by `first`, not drained by `second`.
     stage_start: usize,
     stage_end: usize,
-    /// Set when `first.finish` reports `Done`. Then `flush` and
-    /// `finish` skip `first`. Does not affect `process`: the
-    /// `Codec` contract does not specify `process` after `finish`,
-    /// so we skip that work.
+    /// How far the chain is in `finish`.
+    finish_phase: FinishPhase,
+    /// Set when `first.finish` reports `Done`. Then the next `finish`
+    /// calls skip `first`. Used only while `finish_phase` is `Finishing`.
     first_done: bool,
     /// Set when `first` fails. The valid bytes that `first` wrote
     /// before the failure are in `staging`. The chain passes them
@@ -69,6 +69,7 @@ impl<A: core::fmt::Debug, B: core::fmt::Debug, S> core::fmt::Debug for Chain<A, 
             .field("first", &self.first)
             .field("second", &self.second)
             .field("staged", &(self.stage_end - self.stage_start))
+            .field("finish_phase", &self.finish_phase)
             .field("first_done", &self.first_done)
             .field("first_error", &self.first_error)
             .finish_non_exhaustive()
@@ -91,6 +92,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             staging,
             stage_start: 0,
             stage_end: 0,
+            finish_phase: FinishPhase::Open,
             first_done: false,
             first_error: None,
         })
@@ -325,7 +327,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     ///
     /// On an error, the chain delivers as many bytes as possible
     /// before it reports the error.
+    ///
+    /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.finish_phase.check_open()?;
         self.drain_through(output, DrainMode::Flush)
     }
 
@@ -334,8 +339,21 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     ///
     /// On an error, the chain delivers as many bytes as possible
     /// before it reports the error.
+    ///
+    /// After `finish` reports `Done`, a repeated call writes nothing
+    /// and reports `Done` again.
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.drain_through(output, DrainMode::Finish)
+        if self.finish_phase.is_finished() {
+            return Ok(DrainProgress::Done { written: 0 });
+        }
+        if self.finish_phase.is_open() {
+            self.finish_phase.start_finish();
+        }
+        let progress = self.drain_through(output, DrainMode::Finish)?;
+        if let DrainProgress::Done { .. } = progress {
+            self.finish_phase.finish_done();
+        }
+        Ok(progress)
     }
 }
 
@@ -356,7 +374,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     /// `output`. If `second` also fails on these bytes, the chain
     /// reports the error of `first`, because `first` failed first in
     /// time.
+    ///
+    /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        self.finish_phase.check_open()?;
         let mut in_pos = 0;
         let mut out_pos = 0;
 
@@ -719,6 +740,21 @@ mod tests {
             first.finish_calls, 1,
             "first's finish must run exactly once, no matter how many outer finish calls it took"
         );
+    }
+
+    #[test]
+    fn process_and_flush_fail_after_finish_is_done() {
+        let mut chain = Chain::new(identity(), identity(), vec![0u8; 16]).unwrap();
+        let mut output = [0u8; 8];
+        let progress = chain.finish(as_uninit_mut(&mut output)).unwrap();
+        assert_eq!(progress, DrainProgress::Done { written: 0 });
+
+        let after_finish = Error::new(ErrorKind::AfterFinish, 0, 0);
+        assert_eq!(
+            chain.process(b"b", as_uninit_mut(&mut output)),
+            Err(after_finish)
+        );
+        assert_eq!(chain.flush(as_uninit_mut(&mut output)), Err(after_finish));
     }
 
     // ----

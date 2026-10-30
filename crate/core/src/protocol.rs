@@ -128,7 +128,7 @@ pub trait Codec: DrainCodec {
     /// work. Set `consumed` near the cause of the error.
     ///
     /// 4) This contract does not define a call to `process` after
-    ///    `finish`. Two behaviors are valid:
+    ///    `finish`. Each codec chooses its behavior. For example:
     /// - a codec without a trailer or terminal state may continue to
     ///   process input, or
     /// - a codec that has closed its format, for example by writing a
@@ -410,6 +410,8 @@ pub enum ErrorKind {
     /// given. The error's `consumed`/`written` can't be trusted, so
     /// validation (such as [`Progress::validated`]) zeroes them.
     ByteCountClaim,
+    /// The codec was called after `finish`, but it does not allow this.
+    AfterFinish,
 }
 
 /// A codec failure.
@@ -491,6 +493,7 @@ impl core::fmt::Display for ErrorKind {
             Self::UnexpectedEnd => "unexpected end of stream",
             Self::CodecBufferTooSmall => "codec buffer too small",
             Self::ByteCountClaim => "codec reported byte counts outside its buffers",
+            Self::AfterFinish => "call after finish",
         })
     }
 }
