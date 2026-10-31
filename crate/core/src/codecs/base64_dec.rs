@@ -319,6 +319,8 @@ pub fn base64_dec() -> Base64Dec {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
+    use alloc::{vec, vec::Vec};
+
     use crate::uninit::as_uninit_mut;
 
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
