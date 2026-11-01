@@ -32,7 +32,9 @@ pub fn retry_on_interrupted<T, E>(
 /// by borrow-checker limitations, resolved by calling `fill_buf`
 /// twice. That's fine: the underlying buffer stays available,
 /// unconsumed, until `consume` is called, so the second call is a
-/// free re-borrow, not a new read.
+/// free re-borrow, not a new read. The trait contracts promise it:
+/// both `std::io::BufRead` and `embedded_io::BufRead` refill the
+/// buffer only "if it is empty".
 pub fn retry_fill_buf<T, E>(
     target: &mut T,
     mut fill_buf: impl FnMut(&mut T) -> Result<&[u8], E>,

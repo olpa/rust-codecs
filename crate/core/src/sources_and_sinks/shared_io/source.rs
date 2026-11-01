@@ -112,6 +112,8 @@ pub trait EintrFillBuf {
     type Error;
 
     /// Like `std::io::BufRead::fill_buf`/`embedded_io::BufRead::fill_buf`.
+    /// As in both, refill the buffer only "if it is empty": while
+    /// unconsumed bytes remain, return them and do not fail.
     fn fill_buf(&mut self) -> Result<&[u8], Self::Error>;
 
     /// Whether `err` means "the call was interrupted, try again".
