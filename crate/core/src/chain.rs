@@ -407,9 +407,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
         if self.finish_phase.is_finished() {
             return Ok(DrainProgress::Done { written: 0 });
         }
-        if self.finish_phase.is_open() {
-            self.finish_phase.start_finish();
-        }
+        self.finish_phase.start_finish(); // .is_open() is checked inside
         let progress = self.drain_through(output, DrainMode::Finish)?;
         if let DrainProgress::Done { .. } = progress {
             self.finish_phase.finish_done();
