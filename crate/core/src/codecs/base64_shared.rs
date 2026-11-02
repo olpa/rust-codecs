@@ -141,7 +141,7 @@ impl<const N: usize> PendingOutput<N> {
         self.pos >= self.len
     }
 
-    /// How many bytes are currently held, drained or not.
+    /// How many bytes are currently held.
     pub(super) fn len(&self) -> usize {
         self.len - self.pos
     }
