@@ -280,7 +280,7 @@ impl BoundaryAwareProgress {
 }
 
 impl DrainProgress {
-    /// The [`Progress::validated`] counterpart for `finish`.
+    /// The [`Progress::validated`] counterpart for `flush` and `finish`.
     pub fn validated(self, output_len: usize) -> Result<DrainProgress, Error> {
         match self {
             DrainProgress::Done { written } if written > output_len => {
