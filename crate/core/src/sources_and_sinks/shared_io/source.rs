@@ -75,8 +75,14 @@ impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
 
     fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
         if self.pos == self.len {
-            self.len =
+            let count =
                 retry_on_interrupted(|| self.inner.read(self.buffer.as_mut()), R::is_interrupted)?;
+            let capacity = self.buffer.as_mut().len();
+            debug_assert!(
+                count <= capacity,
+                "read returned {count}, more than the {capacity}-byte buffer"
+            );
+            self.len = count.min(capacity);
             self.pos = 0;
         }
         if self.pos < self.len {
