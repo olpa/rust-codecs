@@ -279,6 +279,10 @@ impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
     /// Then return ownership of the writer, and the total bytes that the
     /// codec consumed and wrote.
     ///
+    /// This method does not flush the wrapped writer. If the writer has a
+    /// buffer, call `flush` on the returned writer. If you only drop the
+    /// writer, it can lose bytes, and you cannot see a potential flush error.
+    ///
     /// You must call this method to complete the output. Dropping a
     /// `CodecWriter` without calling `finish` loses any remaining
     /// trailer, checksum, or padding bytes. This produces no compiler
