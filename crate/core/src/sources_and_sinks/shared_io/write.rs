@@ -9,7 +9,7 @@
 use core::convert::Infallible;
 
 use crate::sources_and_sinks::slice::SliceSource;
-use crate::stream::{Pump, PumpDrain};
+use crate::stream::{Pump, PumpDrain, PumpStop};
 use crate::{Codec, DriveError, DriveErrorKind, Sink};
 
 /// Drive `pump` from `buf`, writing transformed bytes into `output`.
@@ -41,6 +41,11 @@ pub fn pump_write<O: Sink, C: Codec>(
     // - `NoProgress` after an earlier step moved bytes.
     // Track Write::write failure handling: https://github.com/olpa/rust-codecs/issues/20
     match pump.transfer_from(&mut input, output) {
+        Ok(PumpStop::SinkExhausted) if input.consumed() == 0 => {
+            // A `Write` caller reads `Ok(0)` for a non-empty `buf` as
+            // end of stream. Return the full-sink error instead.
+            return Err(pump.drive_error(DriveErrorKind::SinkExhausted));
+        }
         Ok(_) => {}
         Err(error) if input.consumed() > 0 && matches!(error.kind, DriveErrorKind::Codec(_)) => {
             // `Pump::transfer_step` latched the error. The next call returns it.
@@ -223,6 +228,31 @@ mod tests {
         let again = pump_write(&mut pump, &mut sink, b"6789").unwrap_err();
         assert!(matches!(again.kind, DriveErrorKind::Codec(_)));
         assert_eq!(again.moved, error.moved);
+    }
+
+    // The sink holds 2 bytes. The first write takes them, and that is
+    // a normal short write. The second write can take nothing. It must
+    // report `SinkExhausted`, not `Ok(0)`.
+    #[test]
+    fn write_to_a_full_sink_reports_sink_exhausted_not_ok_zero() {
+        use crate::identity::identity;
+
+        let mut pump = Pump::new(identity());
+        let mut bytes = [0u8; 2];
+        let mut sink = SliceSink::new(&mut bytes);
+
+        let first = pump_write(&mut pump, &mut sink, b"abc");
+        assert_eq!(first.unwrap(), 2);
+
+        let second = pump_write(&mut pump, &mut sink, b"c").unwrap_err();
+        assert!(matches!(second.kind, DriveErrorKind::SinkExhausted));
+        assert_eq!(
+            second.moved,
+            TransferCounts {
+                consumed: 2,
+                written: 2,
+            }
+        );
     }
 
     #[test]
