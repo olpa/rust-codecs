@@ -58,9 +58,17 @@ pub struct Chain<A, B, S> {
     /// `first_finished` is used only while `finish_phase` is `Finishing`.
     first_flushed: bool,
     first_finished: bool,
-    /// Set when `first` fails. To see when and how the chain reports
-    /// this error, refer to `deliver_first_error_if_due`.
-    first_error: Option<ErrorKind>,
+    /// The error of the chain, pending or latched. To see when and
+    /// how the chain reports it, refer to `deliver_error_if_due`.
+    failure: Option<Failure>,
+}
+
+/// The state of an error in the chain. To see what each state means
+/// and how the chain changes it, refer to `Chain::deliver_error_if_due`.
+#[derive(Clone, Copy, Debug)]
+enum Failure {
+    FirstPending(ErrorKind),
+    Latched(ErrorKind),
 }
 
 /// It shows the number of staged bytes, but not the bytes.
@@ -73,14 +81,13 @@ impl<A: core::fmt::Debug, B: core::fmt::Debug, S> core::fmt::Debug for Chain<A, 
             .field("finish_phase", &self.finish_phase)
             .field("first_flushed", &self.first_flushed)
             .field("first_finished", &self.first_finished)
-            .field("first_error", &self.first_error)
+            .field("failure", &self.failure)
             .finish_non_exhaustive()
     }
 }
 
-/// Result of `Chain::deliver_first_error_if_due`.
-enum FirstErrorDelivery {
-    /// `first` did not fail, or `staging` still has bytes to output.
+/// Result of `Chain::deliver_error_if_due`.
+enum ErrorDelivery {
     NotDue,
     /// `first` failed, and `second` still has bytes to output, but
     /// `output` is full.
@@ -108,7 +115,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             finish_phase: FinishPhase::Open,
             first_flushed: false,
             first_finished: false,
-            first_error: None,
+            failure: None,
         })
     }
 
@@ -137,9 +144,19 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         (self.first, self.second, self.staging)
     }
 
-    /// Report the error of `first` when it is due.
+    /// Report the error of the chain when it is due.
     ///
-    /// The error is due when these two conditions are true:
+    /// The states of `Failure`:
+    /// - `FirstPending`: `first` failed, and the chain did not return
+    ///   the error yet.
+    /// - `Latched`: the chain returned the error.
+    ///
+    /// When this function reports a `FirstPending` error, it changes
+    /// the state to `Latched`.
+    ///
+    /// A `Latched` error is always due. A repeated error moves no bytes.
+    ///
+    /// A `FirstPending` error is due when these two conditions are true:
     /// - `first` failed.
     /// - `second` took all the valid bytes that `first` wrote before
     ///   the failure.
@@ -150,21 +167,25 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     ///
     /// If the flush fails, this function reports the error of `first`,
     /// because `first` failed first.
-    fn deliver_first_error_if_due(
+    fn deliver_error_if_due(
         &mut self,
         output: &mut [MaybeUninit<u8>],
         out_pos: usize,
         consumed: usize,
-    ) -> FirstErrorDelivery {
-        let Some(kind) = self.first_error else {
-            return FirstErrorDelivery::NotDue;
+    ) -> ErrorDelivery {
+        let kind = match self.failure {
+            None => return ErrorDelivery::NotDue,
+            Some(Failure::Latched(kind)) => {
+                return ErrorDelivery::Report(Error::new(kind, 0, 0));
+            }
+            Some(Failure::FirstPending(kind)) => kind,
         };
         if !self.is_staging_empty() {
-            return FirstErrorDelivery::NotDue;
+            return ErrorDelivery::NotDue;
         }
         // Not `finish`: the stream has an error, so no trailer.
         let written = match flush_step(&mut self.second, &mut output[out_pos..]) {
-            Ok(DrainProgress::OutputFilled) => return FirstErrorDelivery::OutputFilled,
+            Ok(DrainProgress::OutputFilled) => return ErrorDelivery::OutputFilled,
             Ok(DrainProgress::Done { written }) => written,
             // Keep the bytes that `second` wrote before it failed.
             Err(error) => {
@@ -174,7 +195,14 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     .written
             }
         };
-        FirstErrorDelivery::Report(Error::new(kind, consumed, out_pos + written))
+        self.failure = Some(Failure::Latched(kind));
+        ErrorDelivery::Report(Error::new(kind, consumed, out_pos + written))
+    }
+
+    /// Latch the kind of `error`. Return `error`.
+    fn latch(&mut self, error: Error) -> Error {
+        self.failure = Some(Failure::Latched(error.kind));
+        error
     }
 
     /// Mirrors `rebase_first_failed`, but for `second`.
@@ -234,10 +262,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 let error = Self::rebase_second_failed(error, caller_consumed_so_far, out_pos);
                 // If `first` failed earlier, its error wins. The bytes
                 // that `second` wrote before it failed stay in `written`.
-                return Err(match self.first_error {
-                    Some(kind) => Error::new(kind, error.consumed, error.written),
-                    None => error,
-                });
+                let error = match self.failure {
+                    Some(Failure::FirstPending(kind)) => {
+                        Error::new(kind, error.consumed, error.written)
+                    }
+                    _ => error,
+                };
+                return Err(self.latch(error));
             }
         };
         self.drop_staged(moved.consumed);
@@ -266,6 +297,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         mode: DrainMode,
     ) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
+        // Return a latched error before any call to `second`.
+        match self.deliver_error_if_due(output, out_pos, 0) {
+            ErrorDelivery::NotDue => {}
+            ErrorDelivery::OutputFilled => return Ok(DrainProgress::OutputFilled),
+            ErrorDelivery::Report(error) => return Err(error),
+        }
         let mut first_done = match mode {
             DrainMode::Flush => self.first_flushed,
             DrainMode::Finish => self.first_finished,
@@ -280,10 +317,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
 
             // Return the error of `first` when it is due. Before this, the
             // helper flushes `second`, and this flush can fill `output`.
-            match self.deliver_first_error_if_due(output, out_pos, 0) {
-                FirstErrorDelivery::NotDue => {}
-                FirstErrorDelivery::OutputFilled => return Ok(DrainProgress::OutputFilled),
-                FirstErrorDelivery::Report(error) => return Err(error),
+            match self.deliver_error_if_due(output, out_pos, 0) {
+                ErrorDelivery::NotDue => {}
+                ErrorDelivery::OutputFilled => return Ok(DrainProgress::OutputFilled),
+                ErrorDelivery::Report(error) => return Err(error),
             }
 
             if first_done && self.is_staging_empty() {
@@ -297,7 +334,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                         let error = error
                             .validated(0, output.len() - out_pos)
                             .unwrap_or_else(|violation| violation);
-                        return Err(Self::rebase_second_failed(error, 0, out_pos));
+                        let error = Self::rebase_second_failed(error, 0, out_pos);
+                        return Err(self.latch(error));
                     }
                 };
                 return Ok(match moved {
@@ -333,7 +371,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     // The next pass drains the bytes of `first`. Then
                     // it returns the error.
                     self.stage_end = error.written;
-                    self.first_error = Some(error.kind);
+                    self.failure = Some(Failure::FirstPending(error.kind));
                     continue;
                 }
             };
@@ -377,7 +415,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     /// `second`.
     ///
     /// On an error, the chain delivers as many bytes as possible
-    /// before it reports the error.
+    /// before it reports the error. After an error, the chain latches
+    /// it: see [`Chain::process`](Codec::process).
     ///
     /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
@@ -399,7 +438,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     /// `second`.
     ///
     /// On an error, the chain delivers as many bytes as possible
-    /// before it reports the error.
+    /// before it reports the error. After an error, the chain latches
+    /// it: see [`Chain::process`](Codec::process).
     ///
     /// After `finish` reports `Done`, a repeated call writes nothing
     /// and reports `Done` again.
@@ -435,6 +475,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     /// in this flush, the chain reports the error of `first`, because
     /// `first` failed first in time.
     ///
+    /// The chain latches the first error that it returns, from `first`
+    /// or from `second`. Later calls of `process`, `flush` and
+    /// `finish` return the same error kind, with no bytes moved. They
+    /// do not call `first` or `second`.
+    ///
     /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         self.finish_phase.check_open()?;
@@ -442,6 +487,13 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
         self.first_flushed = false;
         let mut in_pos = 0;
         let mut out_pos = 0;
+
+        // Return a latched error before any call to `second`.
+        match self.deliver_error_if_due(output, out_pos, in_pos) {
+            ErrorDelivery::NotDue => {}
+            ErrorDelivery::OutputFilled => return Ok(Progress::OutputFilled { consumed: in_pos }),
+            ErrorDelivery::Report(error) => return Err(error),
+        }
 
         // A pass drains `staging` first. The loop stops when all of
         // `input` is consumed or `output` is full. If not, `first`
@@ -454,12 +506,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
 
             // Return the error of `first` when it is due. Before this, the
             // helper flushes `second`, and this flush can fill `output`.
-            match self.deliver_first_error_if_due(output, out_pos, in_pos) {
-                FirstErrorDelivery::NotDue => {}
-                FirstErrorDelivery::OutputFilled => {
+            match self.deliver_error_if_due(output, out_pos, in_pos) {
+                ErrorDelivery::NotDue => {}
+                ErrorDelivery::OutputFilled => {
                     return Ok(Progress::OutputFilled { consumed: in_pos })
                 }
-                FirstErrorDelivery::Report(error) => return Err(error),
+                ErrorDelivery::Report(error) => return Err(error),
             }
             // Case: input fully consumed, and nothing is left waiting
             // in staging for `second`.
@@ -502,7 +554,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     // it returns the error. The error reports the
                     // input that `first` consumed.
                     self.stage_end = error.written;
-                    self.first_error = Some(error.kind);
+                    self.failure = Some(Failure::FirstPending(error.kind));
                     in_pos += error.consumed;
                     continue;
                 }
@@ -1357,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn second_codec_error_progress_is_dropped_from_staging() {
+    fn second_codec_error_counts_are_reported_and_the_error_is_latched() {
         let mut chain = Chain::new(
             identity(),
             FailsOnce {
@@ -1375,9 +1427,12 @@ mod tests {
         assert_eq!(error, Error::new(crate::ErrorKind::CorruptStream, 3, 1));
         assert_eq!(&output[..1], b"a");
 
-        let progress = chain.process(b"", as_uninit_mut(&mut output)).unwrap();
-        assert_eq!(progress, Progress::InputConsumed { written: 2 });
-        assert_eq!(&output[..2], b"bc");
+        // The chain latched the error. It does not offer `bc` to
+        // `second` again.
+        assert_eq!(
+            chain.process(b"", as_uninit_mut(&mut output)),
+            Err(Error::new(crate::ErrorKind::CorruptStream, 0, 0))
+        );
     }
 
     #[test]
@@ -1506,5 +1561,110 @@ mod tests {
     fn empty_staging_buffer_errors() {
         let result = Chain::new(rot13(), rot13(), Vec::<u8>::new());
         assert_eq!(result.err(), Some(EmptyBufferError));
+    }
+
+    // ----
+    // The chain keeps an error of `second`
+    // ----
+
+    /// This codec fails in its first call of any method, with no bytes
+    /// moved. Then it works like `Identity`. A chain that calls it again
+    /// after the error gets `Ok`. The output can look valid.
+    #[derive(Default)]
+    struct FailsOnFirstCall {
+        inner: Identity,
+        calls: usize,
+    }
+
+    impl FailsOnFirstCall {
+        fn enter(&mut self) -> Result<(), Error> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Err(Error::new(ErrorKind::CorruptStream, 0, 0))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl DrainCodec for FailsOnFirstCall {
+        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.enter()?;
+            self.inner.flush(output)
+        }
+
+        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+            self.enter()?;
+            self.inner.finish(output)
+        }
+    }
+
+    impl Codec for FailsOnFirstCall {
+        fn process(
+            &mut self,
+            input: &[u8],
+            output: &mut [MaybeUninit<u8>],
+        ) -> Result<Progress, Error> {
+            self.enter()?;
+            self.inner.process(input, output)
+        }
+    }
+
+    /// A repeated call returns this error: the kind of the first error,
+    /// and no bytes moved.
+    fn repeated_error() -> Error {
+        Error::new(ErrorKind::CorruptStream, 0, 0)
+    }
+
+    #[test]
+    fn process_repeats_an_error_of_second_and_does_not_call_it_again() {
+        let mut chain = Chain::new(identity(), FailsOnFirstCall::default(), vec![0u8; 16]).unwrap();
+        let mut output = [0u8; 8];
+
+        let error = chain
+            .process(b"abc", as_uninit_mut(&mut output))
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+
+        // `second` did not take the 3 bytes in `staging`. A chain
+        // without the latch offers them to `second` again.
+        assert_eq!(
+            chain.process(b"", as_uninit_mut(&mut output)),
+            Err(repeated_error())
+        );
+        let (_first, second, _staging) = chain.into_parts();
+        assert_eq!(second.calls, 1, "second must not run after its error");
+    }
+
+    #[test]
+    fn flush_repeats_an_error_of_second_and_does_not_call_it_again() {
+        let mut chain = Chain::new(identity(), FailsOnFirstCall::default(), vec![0u8; 16]).unwrap();
+        let mut output = [0u8; 8];
+
+        let error = chain.flush(as_uninit_mut(&mut output)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+
+        assert_eq!(
+            chain.flush(as_uninit_mut(&mut output)),
+            Err(repeated_error())
+        );
+        let (_first, second, _staging) = chain.into_parts();
+        assert_eq!(second.calls, 1, "second must not run after its error");
+    }
+
+    #[test]
+    fn finish_repeats_an_error_of_second_and_does_not_call_it_again() {
+        let mut chain = Chain::new(identity(), FailsOnFirstCall::default(), vec![0u8; 16]).unwrap();
+        let mut output = [0u8; 8];
+
+        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+
+        assert_eq!(
+            chain.finish(as_uninit_mut(&mut output)),
+            Err(repeated_error())
+        );
+        let (_first, second, _staging) = chain.into_parts();
+        assert_eq!(second.calls, 1, "second must not run after its error");
     }
 }
