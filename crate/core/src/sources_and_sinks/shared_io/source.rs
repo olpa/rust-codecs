@@ -104,8 +104,8 @@ impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
 }
 
 impl<R, S: AsRef<[u8]>> ScratchSource<R, S> {
-    /// The unconsumed bytes already pulled from the reader into the
-    /// scratch buffer, but not yet yielded to the caller.
+    /// The bytes that the reader pulled into the scratch buffer and that
+    /// the caller did not `consume` yet.
     pub fn pending(&self) -> &[u8] {
         &self.buffer.as_ref()[self.pos..self.len]
     }

@@ -129,8 +129,8 @@ impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
 }
 
 impl<R, C: BoundaryAwareCodec, S: AsRef<[u8]>> CodecReader<R, C, S> {
-    /// The unconsumed bytes already pulled from the reader into the
-    /// scratch buffer, but not yet yielded to the caller.
+    /// The bytes that the reader pulled into the scratch buffer and that
+    /// the codec did not consume yet.
     pub fn pending(&self) -> &[u8] {
         self.input.pending()
     }

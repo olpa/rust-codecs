@@ -64,8 +64,8 @@ impl<R: Read, S: AsMut<[u8]>> EmbeddedSource<R, S> {
 }
 
 impl<R, S: AsRef<[u8]>> EmbeddedSource<R, S> {
-    /// The unconsumed bytes already pulled from the reader into the
-    /// scratch buffer, but not yet yielded to the caller.
+    /// The bytes that the reader pulled into the scratch buffer and that
+    /// the caller did not `consume` yet.
     pub fn pending(&self) -> &[u8] {
         self.0.pending()
     }
