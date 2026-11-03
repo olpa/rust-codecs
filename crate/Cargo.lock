@@ -12,22 +12,29 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rust-codecs-core",
 ]
 
 [[package]]
-name = "compcol"
-version = "0.6.8"
+name = "embedded-io"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28b37ce533aa0fddc1e6820e331968ba72aa48b5c8bbb2bebdc03d48b6ed0f16"
+checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
 
 [[package]]
 name = "json-escape"
 version = "0.3.1"
-source = "git+https://github.com/olpa/json-escape?branch=feat%2Fescape-bytes-try2#f08a2f26d308738a5c48957d8eb151f1e5bdea60"
+source = "git+https://github.com/olpa/json-escape?rev=f08a2f26d308738a5c48957d8eb151f1e5bdea60#f08a2f26d308738a5c48957d8eb151f1e5bdea60"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "libc"
+version = "0.2.189"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "memchr"
@@ -40,6 +47,6 @@ name = "rust-codecs-core"
 version = "0.1.0"
 dependencies = [
  "base64",
- "compcol",
+ "embedded-io",
  "json-escape",
 ]

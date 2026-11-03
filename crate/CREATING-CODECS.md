@@ -1,20 +1,19 @@
 # Creating a codec
 
-This document covers how to **create** a codec crate on top of
-`rust-codecs-core`. See [`README.md`](./README.md) for how to **use**
-one.
+## The simplest codec
 
-A codec crate depends on `rust-codecs-core`, never on `compcol`
-directly — the whole point of this crate is to be the only place that
-name appears.
+A codec is a `struct` with two trait implementations:
 
-## 1. Implement `Codec`
+- `Codec` for `process`, and
+- `DrainCodec` for `flush` and `finish`.
+
+In the simplest case, a transform has no internal state and no trailer
+to write. Then `process` does the work, and `flush` and `finish` are no-ops.
+`core/src/codecs/rot13.rs` is essentially that:
 
 ```rust
-use rust_codecs_core::{Codec, Error, Progress, Status};
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Rot13;
+use core::mem::MaybeUninit;
+use rust_codecs_core::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 fn rot13_byte(b: u8) -> u8 {
     match b {
@@ -24,74 +23,175 @@ fn rot13_byte(b: u8) -> u8 {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rot13;
+
 impl Codec for Rot13 {
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<(Progress, Status), Error> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
         for (out, &inp) in output[..n].iter_mut().zip(&input[..n]) {
-            *out = rot13_byte(inp);
+            out.write(rot13_byte(inp));
         }
-        let status = if n == input.len() { Status::InputEmpty } else { Status::OutputFull };
-        Ok((Progress { consumed: n, written: n }, status))
+        if n == input.len() {
+            Ok(Progress::InputConsumed { written: n })
+        } else {
+            Ok(Progress::OutputFilled { consumed: n })
+        }
+    }
+}
+
+impl DrainCodec for Rot13 {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
     }
 
-    fn finish(&mut self, _output: &mut [u8]) -> Result<(Progress, Status), Error> {
-        Ok((Progress::default(), Status::StreamEnd))
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
     }
 }
 ```
 
-Notes on the trait contract:
+## The contract: fully consume, or fully fill
 
-- `process` pushes input bytes and pulls output bytes; `Status` tells the
-  caller which buffer ran out first (`InputEmpty`, `OutputFull`) or that
-  the stream ended (`StreamEnd`).
-- `finish` signals "no more input is coming" — flush any buffered state
-  and, for formats with one, write the trailer/checksum. Call it
-  repeatedly with a fresh output buffer until it reports `StreamEnd`.
-  A stateless, self-inverse codec like ROT13 has nothing to flush, so
-  `finish` returns `StreamEnd` immediately.
-- `Codec` also has `flush` (drain pending state to a sync boundary
-  *without* ending the stream — unlike `finish`, it never reports
-  `StreamEnd`). It has a no-op default; only override it if your format
-  defines an in-band sync marker (deflate/zlib/gzip do, ROT13 doesn't).
+There is one rule every `process` call must obey. Each call either
+consumes all of `input`, or fills all of `output`.
 
-A codec that reverses another one (e.g. a compressor and its matching
-decompressor) is a separate, independent value with its own `Codec`
-impl — there's no shared type or trait connecting the two.
+`Progress` is an enum with exactly those two variants. No other
+outcome can be reported. `Rot13::process` above shows the pattern:
+compute `n = input.len().min(output.len())`, then report which side
+ran out.
 
-## 2. Expose a constructor
+Why this matters: it avoids a class of bugs. Earlier, `Progress` was
+more relaxed. It had two fields, `consumed` and `written`. The driver
+code (`CodecReader`, `CodecWriter`, `stream_to_stream`, `Chain`) grew
+too complicated. It had many corner cases that were hard to reason
+about. Moving some of that complexity to the codec side keeps the
+driver simple. This helps the crate, and it helps anyone who writes
+their own driver.
+
+## A codec that cannot finish an atomic unit mid-buffer: the carry buffer
+
+Base64 shows why the contract above is not always easy to meet. Base64
+turns 3-byte groups of input into 4-byte groups of output. It can only
+produce output in whole 4-byte groups. It can only consume input in
+whole 3-byte groups.
+
+Two mismatches follow:
+
+- If `input` ends mid-group, `process` cannot consume the trailing 1
+  or 2 bytes yet. A partial group has nothing valid to produce. So
+  `process` must keep those bytes and wait for more input on the next
+  call.
+- If `output` has no room for a whole encoded group, `process` cannot
+  write a partial group either. It must render the group somewhere
+  else, pass as much as fits, and keep the rest for the next call.
+
+Base64 solves both with a small internal buffer sized to one atomic
+unit: `PendingInput<3>` on the input side, `PendingOutput<4>` on the
+output side (`core/src/codecs/base64_shared.rs`).
+
+`Base64Enc::process` (`core/src/codecs/base64_enc.rs`) uses them in a
+fixed order:
+
+1. drain whatever `PendingOutput` already holds into `output`
+2. fill `PendingInput`; if a full group just completed, encode it
+3. transform the rest of the input directly
+
+The general rule: a codec with an atomic transform unit needs a carry
+buffer. This makes every input or output buffer size legal, even a
+1-byte input or output slice.
+
+## `finish` is not always a no-op
+
+`Rot13::finish` above does nothing because ROT13 has no trailing
+state.
+
+Base64 is the counter-example: `finish` writes the format's padding.
+
+Only whole 3-byte groups pass through `Base64Enc::process`. A stream
+whose length is not a multiple of 3 always ends with 1 or 2 bytes
+still in `PendingInput` when the caller signals end-of-input. No more
+input follows to complete that group. The base64 format defines what
+to do: pad the short group with `=` bytes. This keeps the decoded
+length correct.
+
+The general rule: if a format has a trailer, a checksum, or padding
+rules, `finish` is not optional.
+
+## `flush` can write held output
+
+`flush` gives the codec an opportunity to write the output that it
+holds internally. The codec decides how much to write. The stream does
+not end.
+
+Base64 again: `Base64Enc::flush` writes what `PendingOutput` holds. A
+partial group in `PendingInput` stays. Only `finish` can encode it,
+because the encoding needs padding.
+
+## Boundary-aware codecs
+
+A `BoundaryAwareCodec` is like a `Codec`, but its `process_bounded` can also
+report `BoundaryAwareProgress::Boundary`. This means the input of the logical
+stream ended right here, inside this `input` slice. Bytes past that
+point belong to whatever comes next.
+
+One example is parsing a token embedded in a larger stream.
+`core/tests/tokenizer.rs` is the worked example: a small hand-written
+parser drives a `BoundaryAwareCodec` one step at a time instead of
+running it through `stream_to_stream` end to end.
+
+Every `Codec` already has a `BoundaryAwareCodec` implementation (it
+never returns `Boundary`). Drivers on the input side (`CodecReader`,
+`stream_to_stream`) accept either kind, without change.
+
+## Lending a codec as `&mut`
+
+A driver takes ownership of the codec that it gets. To keep the
+codec, the caller lends it as `&mut`:
 
 ```rust
-pub fn rot13() -> Rot13 {
-    Rot13
+let mut checksum = ChecksumCodec::default();
+stream_to_stream(&mut source, &mut checksum, &mut sink)?;
+let value = checksum.value();
+```
+
+For a plain `Codec`, you do not need to do anything. The crate
+implements `Codec` and `DrainCodec` for `&mut C`.
+
+The crate cannot provide a `BoundaryAwareCodec` impl for `&mut C`. It
+would conflict with the blanket impl that makes every `Codec` a
+`BoundaryAwareCodec`.
+
+For a concrete `BoundaryAwareCodec` type, add this forwarding impl to
+your crate:
+
+```rust
+impl BoundaryAwareCodec for &mut MyBoundaryAwareCodec {
+    fn process_bounded(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        (**self).process_bounded(input, output)
+    }
 }
 ```
 
-Plain functions need no trait import and no pairing machinery — callers
-just call `rot13()` and get a value ready to hand to `CodecReader`,
-`CodecWriter`, `to_vec`, etc.
+If you forget the impl, the compiler error can mislead you. It says
+that `Codec` is not implemented for `MyBoundaryAwareCodec`. Do not
+implement `Codec`. Add the forwarding impl instead.
 
-ROT13 is stateless and self-inverse — the same value handles both
-directions — so one `<name>()` constructor is enough. If encoding and
-decoding genuinely need different values (different initial state,
-different configuration), expose the pair as `<name>_enc()` /
-`<name>_dec()` instead, one returning each.
+## Helpers for the output buffer
 
-If your codec takes configuration (compression level, dictionary, …),
-give the constructor a parameter or add a `_with` variant — there's no
-associated-type machinery to satisfy.
+The output buffer is `&mut [MaybeUninit<u8>]`, not `&mut [u8]`. The
+module `rust_codecs_core::uninit` has two helpers for it:
 
-## 3. Test it
+- `copy_to_uninit(dst, src)` copies bytes into the buffer. Use it when
+  a codec copies input to output without a change.
+- `zero_init_mut(dst)` fills the buffer with zeros and returns it as
+  `&mut [u8]`. Use it to pass the buffer to a library that accepts
+  only `&mut [u8]`. The base64 codecs use it for the `base64` crate.
 
-At minimum, exercise:
-
-- One-shot round-trip via `rust_codecs_core::io::to_vec`.
-- The streaming adapters (`CodecReader`/`CodecWriter`) over a
-  `Cursor`/`Vec<u8>`, including a case where the output buffer is
-  smaller than the input, to confirm `Status::OutputFull` is handled and
-  the call resumes correctly.
-- `finish()` reaching `Status::StreamEnd`.
-
-That's the whole surface: implement `Codec`, expose constructor
-function(s), and the rest of RustCodecs (stream adapters, `Vec<u8>`
-helper) works with your codec for free.
+This crate supports Rust versions older than 1.93. So it cannot use
+the standard methods `write_copy_of_slice` and `assume_init_mut`,
+which are stable only since Rust 1.93. The helpers replace them.

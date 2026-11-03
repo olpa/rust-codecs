@@ -1,6 +1,6 @@
-//! Test harness for chaining codecs: builds a `CodecReader` chain from
-//! `--readers` and a `CodecWriter` chain from `--writers`, then copies
-//! stdin through the readers, through the writers, to stdout.
+//! Test harness for chaining codecs: folds `--readers` into one `Chain`
+//! and `--writers` into another, then copies stdin through the readers,
+//! through the writers, to stdout.
 //!
 //! ```text
 //! echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
@@ -11,34 +11,65 @@
 //! listed runs first, closest to the incoming bytes, before reaching
 //! stdout).
 
-use std::io::{self, Read};
+use std::io::{self, BufRead, Write};
 
-use rust_codecs_core::io::{CodecReader, CodecWriter, FinishWrite};
-use rust_codecs_core::Codec;
+use rust_codecs_core::sources_and_sinks::std_io::{
+    BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
+};
+use rust_codecs_core::{stream_to_stream, Chain, Codec};
+
+/// Staging buffer size for each link in a `--readers`/`--writers` chain.
+const STAGING: usize = 4 * 1024;
+
+/// A codec name paired with its constructor.
+type CodecEntry = (&'static str, fn() -> Box<dyn Codec>);
 
 /// Single source of truth for known codec names: `make_codec`, the
 /// "unknown codec" error, and `--help`'s codec list all read from
 /// this instead of repeating the name list.
-const CODECS: &[(&str, fn() -> Box<dyn Codec>)] = &[
-    ("identity", || Box::new(rust_codecs_core::identity::identity())),
+const CODECS: &[CodecEntry] = &[
+    ("identity", || {
+        Box::new(rust_codecs_core::identity::identity())
+    }),
     ("rot13", || Box::new(rust_codecs_core::rot13::rot13())),
-    ("base64-enc", || Box::new(rust_codecs_core::base64::base64_enc())),
-    ("base64-dec", || Box::new(rust_codecs_core::base64::base64_dec())),
-    ("json-enc", || Box::new(rust_codecs_core::json::json_enc())),
+    ("base64-enc", || {
+        Box::new(rust_codecs_core::base64_enc::base64_enc())
+    }),
+    ("base64-dec", || {
+        Box::new(rust_codecs_core::base64_dec::base64_dec())
+    }),
+    ("json-enc", || {
+        Box::new(rust_codecs_core::json_enc::json_enc())
+    }),
 ];
 
 fn usage() -> String {
-    let names = CODECS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+    let names = CODECS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "\
-Test harness for chaining codecs: builds a CodecReader chain from
---readers and a CodecWriter chain from --writers, then copies stdin
-through the readers, through the writers, to stdout.
+Test harness for chaining codecs: folds --readers into one Chain and
+--writers into another, then copies stdin through the readers, through
+the writers, to stdout.
 
 Usage:
-  cargo run -p cli -- [--readers CODEC...] [--writers CODEC...]
+  cargo run -p cli -- [--engine copy|stream] [--readers CODEC...] [--writers CODEC...]
 
 Codecs: {names}
+
+--engine selects which copy path drives the chain: `copy` (default)
+wraps the chain in BufReadCodecReader/CodecWriter and drives it with
+std::io::copy; `stream` drives the same chain directly via
+stream_to_stream over BufReadSource/StdSink, with no Read/Write adapter
+in between. BufReadCodecReader's read() returns as soon as a pull from the
+wrapped reader produced output, instead of chasing a full buffer. So
+it does not wait for enough input to fill std::io::copy's buffer on
+an interactive pipe (e.g. a terminal). A codec that holds bytes back,
+for example base64 with an incomplete group, can still delay its
+output until more input arrives.
 
 Reader codecs apply in the order listed (first listed runs on the raw
 bytes first). Writer codecs also apply in the order listed (first
@@ -52,10 +83,18 @@ Example:
 }
 
 fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
-    CODECS.iter().find(|(n, _)| *n == name).map(|(_, ctor)| ctor()).ok_or_else(|| {
-        let names = CODECS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ");
-        format!("unknown codec {name:?} (expected one of: {names})")
-    })
+    CODECS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, ctor)| ctor())
+        .ok_or_else(|| {
+            let names = CODECS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown codec {name:?} (expected one of: {names})")
+        })
 }
 
 enum Mode {
@@ -64,12 +103,41 @@ enum Mode {
     Writers,
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> Result<(Vec<String>, Vec<String>), String> {
+/// Which copy path drives the composed reader/writer chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    /// `BufReadCodecReader`/`CodecWriter` (a `Read`/`Write` adapter
+    /// pair) driven by `std::io::copy`.
+    Copy,
+    /// `BufReadSource`/`StdSink` driven directly by `stream_to_stream`,
+    /// with no `Read`/`Write` adapter in between.
+    Stream,
+}
+
+fn parse_args(
+    args: impl Iterator<Item = String>,
+) -> Result<(Engine, Vec<String>, Vec<String>), String> {
     let mut mode = Mode::None;
+    let mut engine = Engine::Copy;
     let mut readers = Vec::new();
     let mut writers = Vec::new();
-    for arg in args {
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--engine" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--engine requires a value (copy or stream)".to_string())?;
+                engine = match value.as_str() {
+                    "copy" => Engine::Copy,
+                    "stream" => Engine::Stream,
+                    other => {
+                        return Err(format!(
+                            "unknown engine {other:?} (expected copy or stream)"
+                        ))
+                    }
+                };
+            }
             "--readers" => mode = Mode::Readers,
             "--writers" => mode = Mode::Writers,
             _ => match mode {
@@ -83,30 +151,144 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<(Vec<String>, Vec<St
             },
         }
     }
-    Ok((readers, writers))
+    Ok((engine, readers, writers))
+}
+
+/// Fold `names` into a single `Codec`, first name applied first, closest
+/// to the raw bytes. The last codec is the base of the fold. An empty
+/// list gives a transparent `identity()`.
+fn compose(names: &[String]) -> Result<Box<dyn Codec>, String> {
+    let mut codecs = names.iter().rev().map(|name| make_codec(name));
+    let mut composed = match codecs.next() {
+        Some(codec) => codec?,
+        None => return Ok(Box::new(rust_codecs_core::identity::identity())),
+    };
+    for codec in codecs {
+        composed = Box::new(
+            Chain::new(codec?, composed, vec![0u8; STAGING]).expect("STAGING is non-zero"),
+        );
+    }
+    Ok(composed)
+}
+
+fn run_io<R: BufRead, W: Write>(
+    reader_names: &[String],
+    writer_names: &[String],
+    input: R,
+    output: W,
+) -> Result<W, String> {
+    let reader_codec = compose(reader_names)?;
+    let writer_codec = compose(writer_names)?;
+
+    let mut reader = BufReadCodecReader::new(input, reader_codec);
+    let mut writer =
+        CodecWriter::new(output, writer_codec, vec![0u8; STAGING]).expect("STAGING is non-zero");
+
+    io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
+    let (mut output, _) = writer.finish().map_err(|e| e.to_string())?;
+    output.flush().map_err(|e| e.to_string())?;
+    Ok(output)
+}
+
+/// Same end-to-end behavior as `run_io`, but drives the composed codec
+/// directly via `stream_to_stream` over `BufReadSource`/`StdSink` instead
+/// of wrapping it in `BufReadCodecReader`/`CodecWriter` and driving it with
+/// `std::io::copy`. The reader names and the writer names make one list,
+/// because `stream_to_stream` drives one codec between one `Source` and
+/// one `Sink`.
+fn run_io_stream<R: BufRead, W: Write>(
+    reader_names: &[String],
+    writer_names: &[String],
+    input: R,
+    output: W,
+) -> Result<W, String> {
+    let names: Vec<String> = reader_names.iter().chain(writer_names).cloned().collect();
+    let codec = compose(&names)?;
+
+    let mut source = BufReadSource::new(input);
+    let mut sink = StdSink::new(output, vec![0u8; STAGING]).expect("STAGING is non-zero");
+
+    stream_to_stream(&mut source, codec, &mut sink).map_err(|e| error_chain(&e))?;
+    let mut output = sink.into_inner();
+    output.flush().map_err(|e| e.to_string())?;
+    Ok(output)
+}
+
+/// Print an error and all its sources, separated by ": ".
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(inner) = source {
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    text
 }
 
 fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let (reader_names, writer_names) = parse_args(args)?;
-
-    let mut reader: Box<dyn Read> = Box::new(io::stdin());
-    for name in &reader_names {
-        let codec = make_codec(name)?;
-        reader = Box::new(CodecReader::new(reader, codec));
+    let (engine, reader_names, writer_names) = parse_args(args)?;
+    match engine {
+        Engine::Copy => {
+            run_io(
+                &reader_names,
+                &writer_names,
+                io::stdin().lock(),
+                io::stdout(),
+            )?;
+        }
+        Engine::Stream => {
+            run_io_stream(
+                &reader_names,
+                &writer_names,
+                io::stdin().lock(),
+                io::stdout(),
+            )?;
+        }
     }
-
-    let mut writer: Box<dyn FinishWrite> = Box::new(io::stdout());
-    for name in writer_names.iter().rev() {
-        let codec = make_codec(name)?;
-        writer = Box::new(CodecWriter::new(writer, codec));
-    }
-
-    io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
-    writer.finish_boxed().map_err(|e| e.to_string())?;
     Ok(())
 }
 
+/// Installs a no-op `SIGUSR1` handler so the retry-on-`EINTR` path in
+/// `BufReadSource` (see
+/// `core/src/sources_and_sinks/std_io/adapter.rs`) can be exercised
+/// against a real blocking read: send the running process `SIGUSR1`
+/// (`kill -USR1 <pid>`) while it's waiting on stdin.
+///
+/// Without a caught handler, `SIGUSR1`'s default disposition is to
+/// terminate the process, so it would never reach the retry logic at
+/// all.
+///
+/// The handler is installed with `sigaction` and without
+/// `SA_RESTART`. glibc's `signal()` sets `SA_RESTART`, and then the
+/// kernel restarts the interrupted `read` itself, so user space never
+/// sees `EINTR`.
+#[cfg(unix)]
+fn install_sigusr1_handler() {
+    extern "C" fn no_op(_signum: libc::c_int) {}
+    // SAFETY: `action` is zeroed, then its mask is set to empty and its
+    // handler to a plain C function that does nothing, which is safe to
+    // run in a signal handler context. `sa_flags` stays 0, so no
+    // `SA_RESTART`.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = no_op as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        if libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()) == -1 {
+            eprintln!(
+                "warning: cannot install the SIGUSR1 handler: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn install_sigusr1_handler() {}
+
 fn main() {
+    install_sigusr1_handler();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{}", usage());
@@ -116,5 +298,150 @@ fn main() {
     if let Err(err) = run(args.into_iter()) {
         eprintln!("error: {err}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::io::{Cursor, Write};
+    use std::rc::Rc;
+
+    use rust_codecs_core::rot13::rot13;
+    use rust_codecs_core::sources_and_sinks::vec::{VecSink, VecSource};
+    use rust_codecs_core::stream_to_stream;
+
+    use super::{compose, parse_args, run_io, run_io_stream, Engine};
+
+    fn collect(codec: impl rust_codecs_core::Codec, bytes: &[u8]) -> Vec<u8> {
+        let mut input = VecSource::new(bytes.to_vec());
+        let mut output = VecSink::default();
+        stream_to_stream(&mut input, codec, &mut output).unwrap();
+        output.into_inner()
+    }
+
+    fn names(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn end_to_end_round_trip_from_module_doc() {
+        // --readers identity identity rot13 nets out to a single rot13
+        // on the raw bytes; --writers rot13 rot13 identity nets out to
+        // the identity (the two rot13s cancel) — so the whole pipeline
+        // is equivalent to running the input through rot13 once.
+        let reader_names = names(&["identity", "identity", "rot13"]);
+        let writer_names = names(&["rot13", "rot13", "identity"]);
+        let input = b"hello";
+
+        let output = run_io(
+            &reader_names,
+            &writer_names,
+            Cursor::new(input.to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let expected = collect(rot13(), input);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn stream_engine_matches_copy_engine() {
+        // Same pipeline as `end_to_end_round_trip_from_module_doc`,
+        // driven through `stream_to_stream`/`BufReadSource`/`StdSink`
+        // instead of `std::io::copy`/`BufReadCodecReader`/`CodecWriter` — both
+        // engines must agree on the bytes they produce.
+        let reader_names = names(&["identity", "identity", "rot13"]);
+        let writer_names = names(&["rot13", "rot13", "identity"]);
+        let input = b"hello";
+
+        let copy_output = run_io(
+            &reader_names,
+            &writer_names,
+            Cursor::new(input.to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+        let stream_output = run_io_stream(
+            &reader_names,
+            &writer_names,
+            Cursor::new(input.to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(stream_output, copy_output);
+    }
+
+    #[test]
+    fn parse_args_reads_engine_flag() {
+        let (engine, readers, writers) =
+            parse_args(names(&["--engine", "stream", "--readers", "rot13"]).into_iter()).unwrap();
+        assert_eq!(engine, Engine::Stream);
+        assert_eq!(readers, names(&["rot13"]));
+        assert!(writers.is_empty());
+
+        let (engine, _, _) = parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
+        assert_eq!(engine, Engine::Copy);
+    }
+
+    #[test]
+    fn parse_args_rejects_unknown_engine() {
+        let err = parse_args(names(&["--engine", "bogus"]).into_iter()).unwrap_err();
+        assert!(err.contains("bogus"));
+    }
+
+    #[test]
+    fn compose_handles_one_name_and_no_names() {
+        let input = b"Hello, World! 123";
+
+        let one = compose(&names(&["rot13"])).unwrap();
+        assert_eq!(collect(one, input), collect(rot13(), input));
+
+        let none = compose(&[]).unwrap();
+        assert_eq!(collect(none, input), input);
+    }
+
+    /// A `Write` sink that shares its buffer via `Rc<RefCell<_>>`, so a
+    /// clone kept by the test can inspect what's arrived without going
+    /// through `CodecWriter::finish` (which consumes the writer).
+    #[derive(Clone, Default)]
+    struct SharedSink(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writer_stack_is_interactive() {
+        // `--writers rot13 identity` runs through a `Chain` in
+        // `compose`. After one write and a flush, the sink has the
+        // transformed bytes, and `finish` was not called.
+        //
+        // `rot13` holds no bytes back, so the write alone delivers them.
+        // This test does not show that `flush` delivers held bytes. The
+        // core test `flush_delivers_already_produced_output_without_finalizing_the_codec`
+        // checks that.
+        let writer_codec = compose(&names(&["rot13", "identity"])).unwrap();
+        let sink = SharedSink::default();
+        let mut writer = rust_codecs_core::sources_and_sinks::std_io::CodecWriter::new(
+            sink.clone(),
+            writer_codec,
+            vec![0u8; 64],
+        )
+        .unwrap();
+
+        writer.write_all(b"hi\n").unwrap();
+        writer.flush().unwrap();
+
+        let expected = collect(rot13(), b"hi\n");
+        assert_eq!(sink.0.borrow().as_slice(), expected.as_slice());
     }
 }

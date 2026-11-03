@@ -1,0 +1,329 @@
+//! Test-only codecs shared by more than one module of the crate.
+
+use core::fmt::Debug;
+use core::mem::MaybeUninit;
+
+use crate::uninit::copy_to_uninit;
+use crate::{
+    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, DriveErrorKind,
+    Error, ErrorKind, Progress, Source,
+};
+
+/// Check that `kind` is a latched codec error. A latched error has
+/// the kind from `FailsAfterInner` and zero counts.
+pub(crate) fn assert_latched<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
+    let latched = Error::new(ErrorKind::CorruptStream, 0, 0);
+    assert!(
+        matches!(kind, DriveErrorKind::Codec(e) if *e == latched),
+        "expected the latched codec error, got {kind:?}",
+    );
+}
+
+/// Check that `kind` is the error that replaces an overclaim:
+/// `ByteCountClaim` with zero counts.
+pub(crate) fn assert_overclaim_rejected<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
+    let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
+    assert!(
+        matches!(kind, DriveErrorKind::Codec(e) if *e == violation),
+        "expected ByteCountClaim with zero counts, got {kind:?}",
+    );
+}
+
+/// A codec that holds output:
+/// - At the start, holds `held` of 'X'.
+/// - For each input byte, adds `per_input` of 'X' to hold.
+/// - Each call releases the held 'X's, as many as fit.
+/// - Takes new input only after it releases all held 'X's.
+///
+/// `finish` first releases the held 'X's, then emits the trailer.
+///
+/// Counts its `flush` calls.
+#[derive(Default)]
+pub(crate) struct HoldsOutput {
+    pub(crate) held: usize,
+    pub(crate) per_input: usize,
+    pub(crate) trailer: &'static [u8],
+    pub(crate) trailer_written: usize,
+    pub(crate) flush_calls: usize,
+}
+
+impl HoldsOutput {
+    fn release_held(&mut self, output: &mut [MaybeUninit<u8>]) -> usize {
+        let n = self.held.min(output.len());
+        for slot in &mut output[..n] {
+            slot.write(b'X');
+        }
+        self.held -= n;
+        n
+    }
+}
+
+impl DrainCodec for HoldsOutput {
+    /// Releases the held 'X's. Does not emit the trailer.
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.flush_calls += 1;
+        let n = self.release_held(output);
+        if self.held > 0 {
+            return Ok(DrainProgress::OutputFilled);
+        }
+        Ok(DrainProgress::Done { written: n })
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        let n = self.release_held(output);
+        if self.held > 0 {
+            return Ok(DrainProgress::OutputFilled);
+        }
+        let rest = &mut output[n..];
+        let left = &self.trailer[self.trailer_written..];
+        let m = left.len().min(rest.len());
+        copy_to_uninit(&mut rest[..m], &left[..m]);
+        self.trailer_written += m;
+        if self.trailer_written == self.trailer.len() {
+            Ok(DrainProgress::Done { written: n + m })
+        } else {
+            Ok(DrainProgress::OutputFilled)
+        }
+    }
+}
+
+impl Codec for HoldsOutput {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        let n = self.release_held(output);
+        if self.held > 0 {
+            return Ok(Progress::OutputFilled { consumed: 0 });
+        }
+        self.held = self.per_input * input.len();
+        Ok(Progress::InputConsumed { written: n })
+    }
+}
+
+/// Adds an in-band end to a plain `Codec`:
+/// - Passes input bytes to `inner` until it finds a `|`.
+/// - Consumes the `|` and reports `Boundary`.
+/// - `finish` calls `inner.finish`. Then `inner` writes its remaining
+///   output.
+///
+/// Counts its `finish` calls.
+#[derive(Default)]
+pub(crate) struct EndsAtBar<C> {
+    pub(crate) inner: C,
+    pub(crate) finish_calls: usize,
+}
+
+impl<C: Codec> DrainCodec for EndsAtBar<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.inner.flush(output)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.finish_calls += 1;
+        self.inner.finish(output)
+    }
+}
+
+impl<C: Codec> BoundaryAwareCodec for EndsAtBar<C> {
+    fn process_bounded(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        let Some(marker) = input.iter().position(|&b| b == b'|') else {
+            return self.inner.process(input, output).map(Into::into);
+        };
+        Ok(match self.inner.process(&input[..marker], output)? {
+            Progress::InputConsumed { written } => BoundaryAwareProgress::Boundary {
+                consumed: marker + 1,
+                written,
+            },
+            Progress::OutputFilled { consumed } => BoundaryAwareProgress::OutputFilled { consumed },
+        })
+    }
+}
+
+/// Answers every `process` call with `process`, and every `finish`
+/// call with `drain`. Does not check the buffers, so a test can make
+/// it lie about its byte counts.
+pub(crate) struct Scripted {
+    pub(crate) process: BoundaryAwareProgress,
+    pub(crate) drain: DrainProgress,
+}
+
+impl DrainCodec for Scripted {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(self.drain)
+    }
+}
+
+impl BoundaryAwareCodec for Scripted {
+    fn process_bounded(
+        &mut self,
+        _input: &[u8],
+        _output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        Ok(self.process)
+    }
+}
+
+/// Fails every call. The error claims more bytes than the buffers of
+/// the call hold:
+/// - `process` claims 1 byte more than the input and 1 byte more
+///   than the output.
+/// - `flush` and `finish` claim 1 byte more than the output.
+///
+/// A driver must replace this error with `ByteCountClaim`.
+pub(crate) struct FailsWithOverclaim;
+
+impl DrainCodec for FailsWithOverclaim {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Err(Error::new(ErrorKind::CorruptStream, 0, output.len() + 1))
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Err(Error::new(ErrorKind::CorruptStream, 0, output.len() + 1))
+    }
+}
+
+impl Codec for FailsWithOverclaim {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        Err(Error::new(
+            ErrorKind::CorruptStream,
+            input.len() + 1,
+            output.len() + 1,
+        ))
+    }
+}
+
+/// Runs `inner`, then turns its result into an error. The error
+/// carries the counts of the result, so the bytes that `inner` wrote
+/// still count.
+///
+/// The first `ok_calls` calls return the result of `inner` without
+/// change. Then every `process`, `flush` and `finish` call fails.
+///
+/// Counts its calls.
+#[derive(Default)]
+pub(crate) struct FailsAfterInner<C> {
+    pub(crate) inner: C,
+    pub(crate) ok_calls: usize,
+    pub(crate) calls: usize,
+}
+
+impl<C> FailsAfterInner<C> {
+    fn fail_drain(
+        &mut self,
+        output_len: usize,
+        result: Result<DrainProgress, Error>,
+    ) -> Result<DrainProgress, Error> {
+        self.calls += 1;
+        if self.calls <= self.ok_calls {
+            return result;
+        }
+        let written = match result? {
+            DrainProgress::Done { written } => written,
+            DrainProgress::OutputFilled => output_len,
+        };
+        Err(Error::new(ErrorKind::CorruptStream, 0, written))
+    }
+}
+
+impl<C: Codec> DrainCodec for FailsAfterInner<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        let result = self.inner.flush(output);
+        self.fail_drain(output.len(), result)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        let result = self.inner.finish(output);
+        self.fail_drain(output.len(), result)
+    }
+}
+
+impl<C: Codec> Codec for FailsAfterInner<C> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        self.calls += 1;
+        let result = self.inner.process(input, output);
+        if self.calls <= self.ok_calls {
+            return result;
+        }
+        let (consumed, written) = match result? {
+            Progress::InputConsumed { written } => (input.len(), written),
+            Progress::OutputFilled { consumed } => (consumed, output.len()),
+        };
+        Err(Error::new(ErrorKind::CorruptStream, consumed, written))
+    }
+}
+
+/// Consumes everything and writes nothing, like a checksum pass with
+/// no output stream.
+pub(crate) struct DropEverything;
+
+impl DrainCodec for DropEverything {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+
+    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        Ok(DrainProgress::Done { written: 0 })
+    }
+}
+
+impl Codec for DropEverything {
+    fn process(
+        &mut self,
+        _input: &[u8],
+        _output: &mut [MaybeUninit<u8>],
+    ) -> Result<Progress, Error> {
+        Ok(Progress::InputConsumed { written: 0 })
+    }
+}
+
+/// A `Source` that gives a maximum of `chunk_size` bytes in each
+/// chunk.
+pub(crate) struct SplitSource<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) pos: usize,
+    pub(crate) chunk_size: usize,
+}
+
+impl Source for SplitSource<'_> {
+    type Error = core::convert::Infallible;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        let end = (self.pos + self.chunk_size).min(self.bytes.len());
+        Ok((self.pos < self.bytes.len()).then_some(&self.bytes[self.pos..end]))
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.pos += amount;
+    }
+}
+
+/// Collects bytes in a fixed array. It replaces `Vec`, so the tests
+/// do not need `alloc`.
+pub(crate) struct Collected {
+    bytes: [u8; 1024],
+    len: usize,
+}
+
+impl Collected {
+    pub(crate) fn new() -> Self {
+        Self {
+            bytes: [0; 1024],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn extend_from_slice(&mut self, data: &[u8]) {
+        self.bytes[self.len..self.len + data.len()].copy_from_slice(data);
+        self.len += data.len();
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}

@@ -1,0 +1,541 @@
+//! The vocabulary and contracts for codecs and I/O backends.
+
+use core::mem::MaybeUninit;
+
+// ----
+// I/O backend contracts
+// ----
+
+/// A byte source that lends its input in chunks.
+pub trait Source {
+    type Error;
+
+    /// Return the current non-empty chunk, or `None` at end of input.
+    ///
+    /// A caller may consume only part of the chunk; the next call
+    /// returns at least the rest, possibly with more data appended.
+    ///
+    /// A blocking `Source` should not read ahead for more. This avoids
+    /// blocking a transfer loop when the `Sink` has less room than
+    /// the chunk.
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error>;
+
+    /// Consume the first `amount` bytes of the current chunk.
+    ///
+    /// This method returns no error. It only updates accounting. Put any
+    /// fallible work in `chunk`.
+    ///
+    /// The caller must give a correct `amount`. The implementation
+    /// trusts it and cannot check most errors.
+    ///
+    /// One error is visible: an `amount` larger than the chunk. The
+    /// sources in this crate check it with `debug_assert!`. They also
+    /// clamp the amount to the chunk length.
+    ///
+    /// The exception is the `BufReadSource` types of `std_io` and
+    /// `embedded_io`. They pass `consume` to the wrapped reader and
+    /// follow the rules of that reader. For example,
+    /// `std::io::BufReader` clamps the amount, but `embedded_io::BufRead`
+    /// for `&[u8]` can panic, also in release builds.
+    fn consume(&mut self, amount: usize);
+}
+
+/// A byte destination that lends writable space to the caller.
+pub trait Sink {
+    type Error;
+
+    /// Return writable space, or `None` when the destination is full.
+    ///
+    /// The space must not be empty. When there is no space, return
+    /// `None`. The drivers report an empty slice as a stall
+    /// (`NoProgress`), not as a full sink (`SinkExhausted`).
+    ///
+    /// A caller can call this function again before it commits bytes.
+    /// Then the function can return the same space again. The caller
+    /// can then write over the bytes that it did not commit.
+    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error>;
+
+    /// Commit the first `amount` bytes of the space that `spare` returned.
+    ///
+    /// This method returns an error on failure. Unlike `Source::consume`,
+    /// it can do I/O.
+    ///
+    /// The caller must give a correct `amount`. It must initialize each
+    /// byte that it commits. The implementation trusts the caller. It
+    /// cannot check the initialization or most other errors.
+    ///
+    /// One error is visible: an `amount` larger than the space that
+    /// `spare` returned. The sinks in this crate check it with
+    /// `debug_assert!`. They also clamp the amount to the length of that
+    /// space.
+    fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
+}
+
+// ----
+// Codec traits
+// ----
+
+/// Shared supertrait with [`Self::flush`] and [`Self::finish`].
+///
+/// This trait is a technical artifact, not a standalone abstraction.
+/// Write code against [`Codec`] or [`BoundaryAwareCodec`] instead.
+pub trait DrainCodec {
+    /// Give the codec an opportunity to write the output that it holds
+    /// internally. The codec decides how much to write.
+    ///
+    /// One call may not be enough. If `output` is too small, `flush`
+    /// returns [`DrainProgress::OutputFilled`]. Call `flush` again until
+    /// it returns [`DrainProgress::Done`]. This is a recommendation, not a
+    /// contract.
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>;
+
+    /// Tell the codec that no more input will come. The codec flushes
+    /// any buffered state. If the format has a trailer or a checksum,
+    /// the codec writes it now.
+    ///
+    /// A generic driver does not use the codec again after `finish`
+    /// reports [`DrainProgress::Done`].
+    ///
+    /// One call may not be enough. If `output` is too small to hold
+    /// all pending output, `finish` returns [`DrainProgress::OutputFilled`]
+    /// instead of [`DrainProgress::Done`]. Call `finish` repeatedly until it
+    /// returns [`DrainProgress::Done`].
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>;
+}
+
+/// A stateful transform for a complete chunked stream.
+///
+/// See `CREATING-CODECS.md` for how to write one.
+pub trait Codec: DrainCodec {
+    /// Transform one chunk of input into output.
+    ///
+    /// 1) Each successful call does one of two things:
+    /// - it consumes **all** of `input`, reporting [`Progress::InputConsumed`], or
+    /// - it fills **all** of `output`, reporting [`Progress::OutputFilled`].
+    ///
+    /// 2) Each call reads `input` and writes `output` starting at byte 0 of
+    ///    the slices it was given.
+    ///
+    /// The codec does not remember a "leftover" position from the previous call.
+    /// If a call did not consume all of `input`, the caller must retain those
+    /// bytes and supply them again, together, at the start of the `input` of
+    /// the next call.
+    ///
+    /// 3) The codec state after `Err` is not defined. A later call can fail
+    ///    again or make normal progress.
+    ///
+    /// Recommendation for a failing call: write all valid output for the
+    /// input before the error. Set `consumed` and `written` to match this
+    /// work. Set `consumed` near the cause of the error.
+    ///
+    /// 4) This contract does not define a call to `process` after
+    ///    `finish`. Each codec chooses its behavior. For example:
+    /// - a codec without a trailer or terminal state may continue to
+    ///   process input, or
+    /// - a codec that has closed its format, for example by writing a
+    ///   final checksum, may return `Err`.
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error>;
+}
+
+/// A stateful transform that can recognize the logical end of its input
+/// inside a byte stream.
+///
+/// It leaves the rest of the source available to whatever comes next.
+///
+/// Every [`Codec`] is automatically a `BoundaryAwareCodec` that never
+/// returns [`Boundary`](BoundaryAwareProgress::Boundary); see the
+/// blanket implementation.
+pub trait BoundaryAwareCodec: DrainCodec {
+    /// This trait follows [`Codec::process`]'s contract, with one addition:
+    /// a successful `process_bounded` call may also resolve to
+    /// [`BoundaryAwareProgress::Boundary`].
+    ///
+    /// Once `process_bounded` reaches
+    /// [`Boundary`](BoundaryAwareProgress::Boundary), a driver must stop
+    /// calling `process_bounded` for the current logical
+    /// stream. Then the driver must call [`finish`](DrainCodec::finish)
+    /// until it reports [`Done`](DrainProgress::Done).
+    ///
+    /// This trait does not define what direct codec calls do after
+    /// `finish` reports [`Done`](DrainProgress::Done). A concrete codec
+    /// may document that its instance can be reused for another logical
+    /// stream; another may have entered a permanently terminal internal
+    /// state.
+    ///
+    /// If EOF arrives before `process_bounded` reports
+    /// [`Boundary`](BoundaryAwareProgress::Boundary), `finish` decides what that
+    /// means. If the format requires an in-band terminator, `finish` may
+    /// report [`ErrorKind::UnexpectedEnd`]. If the format treats EOF
+    /// itself as a valid end, `finish` may instead return
+    /// [`Done`](DrainProgress::Done).
+    fn process_bounded(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error>;
+}
+
+impl<C: Codec> BoundaryAwareCodec for C {
+    fn process_bounded(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        Codec::process(self, input, output).map(Into::into)
+    }
+}
+
+// ----
+// Progress
+// ----
+
+/// Progress of one [`Codec::process`] call.
+///
+/// A call may satisfy both conditions at once: it consumes all of
+/// `input` and fills all of `output` on the same call. The choice
+/// between the two variants is then not defined. The caller must
+/// accept either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// The call consumed all of `input` and produced `written` bytes.
+    /// `written` may be zero.
+    InputConsumed { written: usize },
+    /// The call filled all of `output` and took `consumed` bytes of
+    /// input. `consumed` may be zero.
+    OutputFilled { consumed: usize },
+}
+
+/// Progress of one [`BoundaryAwareCodec::process_bounded`] call: everything
+/// [`Progress`] can report, plus [`Boundary`](BoundaryAwareProgress::Boundary),
+/// an in-band signal that the logical stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryAwareProgress {
+    /// The call consumed all of `input` and produced `written` bytes.
+    /// `written` may be zero.
+    InputConsumed { written: usize },
+    /// The call filled all of `output` and took `consumed` bytes of
+    /// input. `consumed` may be zero.
+    OutputFilled { consumed: usize },
+    /// The input of the current logical stream ended in-band. `consumed` and
+    /// `written` need not reach the buffer lengths. The codec can have
+    /// more output to write. [`DrainCodec::finish`] writes it.
+    Boundary { consumed: usize, written: usize },
+}
+
+impl From<Progress> for BoundaryAwareProgress {
+    fn from(progress: Progress) -> Self {
+        match progress {
+            Progress::InputConsumed { written } => Self::InputConsumed { written },
+            Progress::OutputFilled { consumed } => Self::OutputFilled { consumed },
+        }
+    }
+}
+
+/// Progress of one [`DrainCodec::flush`] or [`DrainCodec::finish`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainProgress {
+    /// The call filled all of `output`. More output is pending.
+    OutputFilled,
+    /// The call wrote `written` bytes. It has no more output to write.
+    Done { written: usize },
+}
+
+impl Progress {
+    /// Check the reported byte counts against the buffer sizes the
+    /// call was given. This turns a lying codec into
+    /// [`ErrorKind::ByteCountClaim`].
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Progress, Error> {
+        let honest = match self {
+            Progress::InputConsumed { written } => written <= output_len,
+            Progress::OutputFilled { consumed } => consumed <= input_len,
+        };
+        if honest {
+            Ok(self)
+        } else {
+            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
+        }
+    }
+}
+
+impl BoundaryAwareProgress {
+    /// The [`Progress::validated`] counterpart for
+    /// [`BoundaryAwareCodec::process_bounded`].
+    pub fn validated(
+        self,
+        input_len: usize,
+        output_len: usize,
+    ) -> Result<BoundaryAwareProgress, Error> {
+        let honest = match self {
+            BoundaryAwareProgress::InputConsumed { written } => written <= output_len,
+            BoundaryAwareProgress::OutputFilled { consumed } => consumed <= input_len,
+            BoundaryAwareProgress::Boundary { consumed, written } => {
+                consumed <= input_len && written <= output_len
+            }
+        };
+        if honest {
+            Ok(self)
+        } else {
+            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
+        }
+    }
+}
+
+impl DrainProgress {
+    /// The [`Progress::validated`] counterpart for `flush` and `finish`.
+    pub fn validated(self, output_len: usize) -> Result<DrainProgress, Error> {
+        match self {
+            DrainProgress::Done { written } if written > output_len => {
+                Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
+            }
+            honest => Ok(honest),
+        }
+    }
+}
+
+/// Byte counts produced by a codec call or accumulated across a transfer.
+///
+/// The fields are `usize`. On a target with 32-bit `usize`, a transfer
+/// of more than 4 GiB overflows the totals. The totals wrap around.
+/// Each total is then the real total modulo 2^32. The transfer
+/// continues without error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferCounts {
+    pub consumed: usize,
+    pub written: usize,
+}
+
+// ----
+// Borrowing and boxing support
+// ----
+
+// Lets a `&mut C` stand in anywhere a `Codec` is expected, so the
+// caller keeps the codec.
+impl<C: DrainCodec + ?Sized> DrainCodec for &mut C {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        (**self).flush(output)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        (**self).finish(output)
+    }
+}
+
+impl<C: Codec + ?Sized> Codec for &mut C {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        (**self).process(input, output)
+    }
+}
+
+// Lets a `Box<dyn Codec>` stand in anywhere a `Codec` is expected.
+#[cfg(feature = "alloc")]
+use alloc::boxed::Box;
+
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        (**self).flush(output)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        (**self).finish(output)
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+impl<C: Codec + ?Sized> Codec for Box<C> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        (**self).process(input, output)
+    }
+}
+
+// Lets a `&mut dyn BoundaryAwareCodec` and a `Box<dyn BoundaryAwareCodec>`
+// stand in anywhere a `BoundaryAwareCodec` is expected.
+//
+// A generic `impl BoundaryAwareCodec for &mut C` would conflict with the
+// blanket impl for `Codec`. A trait object is not a `Codec`, so these
+// impls do not conflict.
+//
+// `dyn Trait + Send` is a different type from `dyn Trait`. So the macro
+// is called once for each set of auto traits that a caller needs to
+// move a codec between threads.
+macro_rules! forward_boundary_aware_for_dyn {
+    ($($auto_traits:tt)*) => {
+        impl BoundaryAwareCodec for &mut (dyn BoundaryAwareCodec $($auto_traits)* + '_) {
+            fn process_bounded(
+                &mut self,
+                input: &[u8],
+                output: &mut [MaybeUninit<u8>],
+            ) -> Result<BoundaryAwareProgress, Error> {
+                (**self).process_bounded(input, output)
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+        impl BoundaryAwareCodec for Box<dyn BoundaryAwareCodec $($auto_traits)* + '_> {
+            fn process_bounded(
+                &mut self,
+                input: &[u8],
+                output: &mut [MaybeUninit<u8>],
+            ) -> Result<BoundaryAwareProgress, Error> {
+                (**self).process_bounded(input, output)
+            }
+        }
+    };
+}
+
+forward_boundary_aware_for_dyn!();
+forward_boundary_aware_for_dyn!(+ Send);
+forward_boundary_aware_for_dyn!(+ Send + Sync);
+
+// ----
+// Errors and validation
+// ----
+
+/// A buffer given to a constructor is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyBufferError;
+
+/// What kind of failure a codec reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The encoded stream is malformed.
+    CorruptStream,
+    /// The stream ended where it should not have.
+    UnexpectedEnd,
+    /// The codec's internal carry buffer couldn't hold an atomic data unit.
+    CodecBufferTooSmall,
+    /// The codec reported byte counts exceeding the buffers it was
+    /// given. The error's `consumed`/`written` can't be trusted, so
+    /// validation (such as [`Progress::validated`]) zeroes them.
+    ByteCountClaim,
+    /// The codec was called after `finish`, but it does not allow this.
+    AfterFinish,
+}
+
+/// A codec failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error {
+    pub kind: ErrorKind,
+    /// Bytes of `input` consumed by this call before the failure.
+    pub consumed: usize,
+    /// Bytes written to `output` by this call before the failure.
+    pub written: usize,
+}
+
+impl Error {
+    pub fn new(kind: ErrorKind, consumed: usize, written: usize) -> Self {
+        Self {
+            kind,
+            consumed,
+            written,
+        }
+    }
+
+    /// The [`Progress::validated`] counterpart for a failing call.
+    pub fn validated(self, input_len: usize, output_len: usize) -> Result<Self, Self> {
+        if self.consumed <= input_len && self.written <= output_len {
+            Ok(self)
+        } else {
+            Err(Self::new(ErrorKind::ByteCountClaim, 0, 0))
+        }
+    }
+}
+
+/// Why a wrapper stopped the stream. See [`StreamError`].
+///
+/// `E` is the error type of the wrapped reader or writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorKind<E> {
+    /// The wrapped reader or writer failed.
+    Io(E),
+    /// The codec failed. The `consumed` and `written` fields of the
+    /// [`Error`] count only the codec call that failed.
+    /// [`StreamError::moved`] counts the bytes that the whole stream
+    /// moved.
+    Codec(Error),
+    /// The sink had no more room before the codec was done.
+    SinkExhausted,
+    /// One codec call read no input and wrote no output. The stream did
+    /// not end.
+    NoProgress,
+    /// The wrapped writer returned `Ok(0)` from `write`.
+    ZeroWrite,
+}
+
+/// An error of a stream, and the bytes that the stream moved before the
+/// error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamError<E> {
+    pub kind: StreamErrorKind<E>,
+    pub moved: TransferCounts,
+}
+
+impl<E> StreamError<E> {
+    pub fn new(kind: StreamErrorKind<E>, moved: TransferCounts) -> Self {
+        Self { kind, moved }
+    }
+}
+
+impl core::fmt::Display for EmptyBufferError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("buffer is empty")
+    }
+}
+
+impl core::error::Error for EmptyBufferError {}
+
+impl core::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::CorruptStream => "corrupt stream",
+            Self::UnexpectedEnd => "unexpected end of stream",
+            Self::CodecBufferTooSmall => "codec buffer too small",
+            Self::ByteCountClaim => "codec reported byte counts outside its buffers",
+            Self::AfterFinish => "call after finish",
+        })
+    }
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl core::error::Error for Error {}
+
+impl<E: core::fmt::Display> core::fmt::Display for StreamErrorKind<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Codec(error) => error.fmt(f),
+            Self::SinkExhausted => f.write_str("sink has no more room"),
+            Self::NoProgress => f.write_str("no progress on input or output"),
+            Self::ZeroWrite => f.write_str("writer wrote zero bytes"),
+        }
+    }
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for StreamError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} (after {} input bytes, {} output bytes)",
+            self.kind, self.moved.consumed, self.moved.written
+        )
+    }
+}
+
+/// `source` returns the codec [`Error`] only. An `Io` error would need
+/// a `'static` bound on `E`.
+impl<E: core::fmt::Debug + core::fmt::Display> core::error::Error for StreamError<E> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match &self.kind {
+            StreamErrorKind::Codec(error) => Some(error),
+            _ => None,
+        }
+    }
+}

@@ -1,0 +1,389 @@
+use std::io::{self, BufRead, Read, Write};
+
+use core::convert::Infallible;
+
+use crate::sources_and_sinks::shared_io::{
+    boundary_aware_pump_read, pump_finish, pump_flush, pump_write, CodecWriterFinishError,
+};
+use crate::stream::Pump;
+use crate::{
+    BoundaryAwareCodec, Codec, DriveError, DriveErrorKind, EmptyBufferError, ErrorKind,
+    StreamError, StreamErrorKind, TransferCounts,
+};
+
+use super::adapter::{BufReadSource, StdSink, StdSource};
+
+fn to_io_error(err: StreamError<io::Error>) -> io::Error {
+    let kind = match &err.kind {
+        StreamErrorKind::Io(error) => error.kind(),
+        StreamErrorKind::Codec(error) => match error.kind {
+            ErrorKind::CorruptStream => io::ErrorKind::InvalidData,
+            ErrorKind::UnexpectedEnd => io::ErrorKind::UnexpectedEof,
+            // Bugs in the codec or in the caller. The data is not at fault.
+            ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim | ErrorKind::AfterFinish => {
+                io::ErrorKind::Other
+            }
+        },
+        StreamErrorKind::SinkExhausted | StreamErrorKind::ZeroWrite => io::ErrorKind::WriteZero,
+        StreamErrorKind::NoProgress => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, err)
+}
+
+fn reader_error_to_io_error(err: DriveError<io::Error, Infallible>) -> io::Error {
+    let kind = match err.kind {
+        DriveErrorKind::Source(error) => StreamErrorKind::Io(error),
+        DriveErrorKind::Sink(never) => match never {},
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::SinkExhausted => StreamErrorKind::SinkExhausted,
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
+    };
+    to_io_error(StreamError::new(kind, err.moved))
+}
+
+fn writer_error_to_io_error(err: DriveError<Infallible, io::Error>) -> io::Error {
+    let kind = match err.kind {
+        DriveErrorKind::Source(never) => match never {},
+        DriveErrorKind::Sink(error) => StreamErrorKind::Io(error),
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::SinkExhausted => StreamErrorKind::SinkExhausted,
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
+    };
+    to_io_error(StreamError::new(kind, err.moved))
+}
+
+/// Wraps a `Read`, running `C` over the bytes as they're pulled through.
+///
+/// The input ends in one of two ways:
+///
+/// - End-of-stream: the wrapped reader hits EOF.
+/// - End-of-codec: the codec ends its input in-band, before the
+///   wrapped reader hits EOF.
+///
+/// At both ends, the reader runs the codec's `finish` (trailer,
+/// padding) and yields its output. Then it reports EOF.
+///
+/// The EOF stays: later reads return `Ok(0)`, and the reader does
+/// not pull from the wrapped reader again.
+///
+/// At end-of-codec, trailing input bytes already pulled from the
+/// wrapped reader are not yielded as output; retrieve them with
+/// [`CodecReader::pending`] before dropping the reader.
+///
+/// A failure is an `io::Error`. Its payload is a
+/// [`StreamError`](crate::StreamError).
+pub struct CodecReader<R, C: BoundaryAwareCodec, S> {
+    input: StdSource<R, S>,
+    pump: Pump<C>,
+}
+
+impl<R, C: BoundaryAwareCodec, S> core::fmt::Debug for CodecReader<R, C, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CodecReader")
+            .field("total", &self.pump.total())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> CodecReader<R, C, S> {
+    /// Build a `CodecReader`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an empty `inbuf`.
+    pub fn new(inner: R, codec: C, inbuf: S) -> Result<Self, EmptyBufferError> {
+        Ok(Self {
+            input: StdSource::new(inner, inbuf)?,
+            pump: Pump::new(codec),
+        })
+    }
+
+    pub fn into_inner(self) -> R {
+        self.input.into_inner()
+    }
+
+    /// Reclaim the reader, the codec, and the scratch buffer. If the
+    /// buffer holds unconsumed bytes, treat them as lost.
+    pub fn into_parts(self) -> (R, C, S) {
+        let (inner, buffer) = self.input.into_parts();
+        (inner, self.pump.into_inner(), buffer)
+    }
+
+    pub fn get_ref(&self) -> &R {
+        self.input.get_ref()
+    }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        self.input.get_mut()
+    }
+
+    pub fn codec_ref(&self) -> &C {
+        self.pump.get_ref()
+    }
+
+    pub fn codec_mut(&mut self) -> &mut C {
+        self.pump.get_mut()
+    }
+
+    /// The input bytes that the codec consumed and the output bytes that
+    /// it wrote, in all the calls so far.
+    pub fn total(&self) -> TransferCounts {
+        self.pump.total()
+    }
+}
+
+impl<R, C: BoundaryAwareCodec, S: AsRef<[u8]>> CodecReader<R, C, S> {
+    /// The bytes that the reader pulled into the scratch buffer and that
+    /// the codec did not consume yet.
+    pub fn pending(&self) -> &[u8] {
+        self.input.pending()
+    }
+}
+
+impl<R: Read, C: BoundaryAwareCodec, S: AsMut<[u8]>> Read for CodecReader<R, C, S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
+            .map_err(reader_error_to_io_error)
+    }
+}
+
+/// Like [`CodecReader`], but for an `R: std::io::BufRead`, using the
+/// `BufRead`'s buffer directly instead of a caller-provided scratch
+/// buffer. Same end-of-stream, end-of-codec, and error behavior as
+/// `CodecReader`.
+pub struct BufReadCodecReader<R, C: BoundaryAwareCodec> {
+    input: BufReadSource<R>,
+    pump: Pump<C>,
+}
+
+impl<R, C: BoundaryAwareCodec> core::fmt::Debug for BufReadCodecReader<R, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BufReadCodecReader")
+            .field("total", &self.pump.total())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: BufRead, C: BoundaryAwareCodec> BufReadCodecReader<R, C> {
+    /// Build a `BufReadCodecReader`.
+    pub fn new(inner: R, codec: C) -> Self {
+        Self {
+            input: BufReadSource::new(inner),
+            pump: Pump::new(codec),
+        }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.input.into_inner()
+    }
+
+    /// Reclaim the reader and the codec.
+    pub fn into_parts(self) -> (R, C) {
+        (self.input.into_inner(), self.pump.into_inner())
+    }
+
+    pub fn get_ref(&self) -> &R {
+        self.input.get_ref()
+    }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        self.input.get_mut()
+    }
+
+    pub fn codec_ref(&self) -> &C {
+        self.pump.get_ref()
+    }
+
+    pub fn codec_mut(&mut self) -> &mut C {
+        self.pump.get_mut()
+    }
+
+    /// The input bytes that the codec consumed and the output bytes that
+    /// it wrote, in all the calls so far.
+    pub fn total(&self) -> TransferCounts {
+        self.pump.total()
+    }
+}
+
+impl<R: BufRead, C: BoundaryAwareCodec> Read for BufReadCodecReader<R, C> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        boundary_aware_pump_read(&mut self.pump, &mut self.input, buf)
+            .map_err(reader_error_to_io_error)
+    }
+}
+
+/// Wraps a `Write`; bytes written to this wrapper are run through `C`
+/// before being written to the wrapped writer.
+///
+/// The caller must explicitly call [`finish`](CodecWriter::finish) to
+/// finalize the codec.
+///
+/// `CodecWriter` sends the codec output to the wrapped writer at each
+/// call to `write`. If the calls are small and the wrapped writer has
+/// no buffer, performance can decrease.
+///
+/// A failure is an `io::Error`. Its payload is a
+/// [`StreamError`](crate::StreamError).
+pub struct CodecWriter<W, C: Codec, S> {
+    output: StdSink<W, S>,
+    pump: Pump<C>,
+}
+
+impl<W, C: Codec, S> core::fmt::Debug for CodecWriter<W, C, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CodecWriter")
+            .field("total", &self.pump.total())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<W: Write, C: Codec, S: AsMut<[u8]>> CodecWriter<W, C, S> {
+    /// Build a `CodecWriter`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an empty `outbuf`.
+    pub fn new(inner: W, codec: C, outbuf: S) -> Result<Self, EmptyBufferError> {
+        Ok(Self {
+            output: StdSink::new(inner, outbuf)?,
+            pump: Pump::new(codec),
+        })
+    }
+
+    pub fn get_ref(&self) -> &W {
+        self.output.get_ref()
+    }
+
+    pub fn get_mut(&mut self) -> &mut W {
+        self.output.get_mut()
+    }
+
+    pub fn codec_ref(&self) -> &C {
+        self.pump.get_ref()
+    }
+
+    pub fn codec_mut(&mut self) -> &mut C {
+        self.pump.get_mut()
+    }
+
+    /// The input bytes that the codec consumed and the output bytes that
+    /// it wrote, in all the calls so far.
+    pub fn total(&self) -> TransferCounts {
+        self.pump.total()
+    }
+
+    /// This method calls the codec's `finish` repeatedly until it
+    /// returns `DrainProgress::Done`. This writes any remaining trailer,
+    /// checksum, or padding bytes.
+    ///
+    /// Then return ownership of the writer, and the total bytes that the
+    /// codec consumed and wrote.
+    ///
+    /// This method does not flush the wrapped writer. If the writer has a
+    /// buffer, call `flush` on the returned writer. If you only drop the
+    /// writer, it can lose bytes, and you cannot see a potential flush error.
+    ///
+    /// You must call this method to complete the output. Dropping a
+    /// `CodecWriter` without calling `finish` loses any remaining
+    /// trailer, checksum, or padding bytes. This produces no compiler
+    /// warning or runtime error.
+    ///
+    /// If the wrapped writer reports an error, do not call `finish` again.
+    pub fn finish(
+        mut self,
+    ) -> Result<(W, TransferCounts), CodecWriterFinishError<io::Error, Self>> {
+        match pump_finish(&mut self.pump, &mut self.output) {
+            Ok(()) => Ok((self.output.into_inner(), self.pump.total())),
+            Err(error) => Err(CodecWriterFinishError::new(
+                writer_error_to_io_error(error),
+                self,
+            )),
+        }
+    }
+
+    /// Reclaim the writer, the codec, and the scratch buffer. If the
+    /// buffer holds uncommitted bytes, treat them as lost.
+    pub fn into_parts(self) -> (W, C, S) {
+        let (inner, buffer) = self.output.into_parts();
+        (inner, self.pump.into_inner(), buffer)
+    }
+}
+
+impl<W: Write, C: Codec, S: AsMut<[u8]>> Write for CodecWriter<W, C, S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        pump_write(&mut self.pump, &mut self.output, buf).map_err(writer_error_to_io_error)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        pump_flush(&mut self.pump, &mut self.output).map_err(writer_error_to_io_error)?;
+        self.output.get_mut().flush().map_err(|error| {
+            to_io_error(StreamError::new(
+                StreamErrorKind::Io(error),
+                self.pump.total(),
+            ))
+        })
+    }
+}
+
+impl<T> From<CodecWriterFinishError<io::Error, T>> for io::Error {
+    fn from(error: CodecWriterFinishError<io::Error, T>) -> Self {
+        error.into_error()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Read};
+
+    use super::{BufReadCodecReader, CodecReader, CodecWriter};
+    use crate::codecs::test_support::{EndsAtBar, FailsAfterInner};
+    use crate::identity::identity;
+
+    #[test]
+    fn question_mark_turns_a_finish_error_into_an_io_error() {
+        fn run() -> io::Result<Vec<u8>> {
+            let codec = FailsAfterInner {
+                inner: identity(),
+                ok_calls: 0,
+                calls: 0,
+            };
+            let writer = CodecWriter::new(Vec::new(), codec, [0u8; 8]).unwrap();
+
+            // Act: the `?` operator calls the `From` impl.
+            Ok(writer.finish()?.0)
+        }
+
+        assert_eq!(run().unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    fn ends_at_bar() -> EndsAtBar<crate::identity::Identity> {
+        EndsAtBar {
+            inner: identity(),
+            finish_calls: 0,
+        }
+    }
+
+    #[test]
+    fn codec_reader_returns_the_tail_after_an_in_band_end_as_pending() {
+        let mut reader = CodecReader::new(&b"abc|tail"[..], ends_at_bar(), [0u8; 16]).unwrap();
+        let mut output = Vec::new();
+
+        // Act
+        reader.read_to_end(&mut output).unwrap();
+
+        assert_eq!(output, b"abc");
+        assert_eq!(reader.pending(), b"tail");
+    }
+
+    #[test]
+    fn buf_read_codec_reader_leaves_the_tail_in_the_wrapped_reader() {
+        let mut reader = BufReadCodecReader::new(&b"abc|tail"[..], ends_at_bar());
+        let mut output = Vec::new();
+
+        // Act
+        reader.read_to_end(&mut output).unwrap();
+
+        assert_eq!(output, b"abc");
+        assert_eq!(reader.into_inner(), b"tail");
+    }
+}

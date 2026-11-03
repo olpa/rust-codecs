@@ -1,15 +1,14 @@
 # cli
 
 A small command-line tool for exercising codec chains by hand, without
-writing any Rust. It wires a `--readers` list into a chain of
-[`CodecReader`](../core/README.md)s around stdin, a `--writers` list into
-a chain of `CodecWriter`s around stdout, and copies bytes from one to the
-other.
+writing any Rust. It folds the `--readers` list into one `Chain` and the
+`--writers` list into another. It then copies stdin through the reader
+chain and the writer chain to stdout.
 
 ## Usage
 
 ```
-cargo run -p cli -- [--readers <name>...] [--writers <name>...]
+cargo run -p cli -- [--engine copy|stream] [--readers <name>...] [--writers <name>...]
 ```
 
 Both lists are optional and each codec name may repeat. Reader codecs
@@ -18,7 +17,19 @@ first, the next runs on its output, and so on. Writer codecs also apply
 in the order listed — the first name runs first, closest to the incoming
 bytes, before the result reaches stdout.
 
-Currently known codec names: `identity`, `rot13`.
+`--engine` selects how the tool drives the chains. The default, `copy`,
+wraps the reader chain in a [`BufReadCodecReader`](../README.md) over the
+locked stdin, and the writer chain in a `CodecWriter`. Then it calls
+`std::io::copy`. The `BufReadCodecReader` reads from the stdin buffer
+directly, so it needs no buffer of its own. The option `stream` calls
+`stream_to_stream` directly, over a `BufReadSource` and a `StdSink`,
+with no `Read` or `Write` adapter in between.
+
+Currently known codec names: `identity`, `rot13`, `base64-enc`,
+`base64-dec`, `json-enc`.
+
+`base64-dec` ignores ASCII whitespace, so it accepts the output of the
+`base64` tool, with its line breaks.
 
 ## Example
 

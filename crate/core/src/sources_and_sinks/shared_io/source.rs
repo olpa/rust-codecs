@@ -1,0 +1,396 @@
+use super::retry::{retry_fill_buf, retry_on_interrupted};
+use crate::{EmptyBufferError, Source};
+
+/// A backend's raw, unretried `read`, plus how that backend's error
+/// says "interrupted" (`std::io::ErrorKind::Interrupted`,
+/// `embedded_io::ErrorKind::Interrupted`, ...).
+pub trait EintrRead {
+    type Error;
+
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+
+    fn is_interrupted(err: &Self::Error) -> bool;
+}
+
+/// A `Source`, Eintr-reading into an owned scratch buffer.
+pub struct ScratchSource<R, S> {
+    inner: R,
+    buffer: S,
+    pos: usize,
+    len: usize,
+}
+
+/// It shows the number of pending bytes, but not the bytes.
+impl<R: core::fmt::Debug, S> core::fmt::Debug for ScratchSource<R, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ScratchSource")
+            .field("inner", &self.inner)
+            .field("pending", &(self.len - self.pos))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: EintrRead, S: AsMut<[u8]>> ScratchSource<R, S> {
+    /// Build a `ScratchSource`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an empty `buffer`.
+    pub fn new(inner: R, mut buffer: S) -> Result<Self, EmptyBufferError> {
+        if buffer.as_mut().is_empty() {
+            return Err(EmptyBufferError);
+        }
+        Ok(Self {
+            inner,
+            buffer,
+            pos: 0,
+            len: 0,
+        })
+    }
+
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
+    /// Reclaim the reader, discarding the scratch buffer and any
+    /// buffered, unconsumed bytes (already read from `inner` into the
+    /// buffer via `chunk`, but not yet passed to `consume`).
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    /// Reclaim both the reader and the scratch buffer. If the buffer
+    /// holds unconsumed bytes, treat them as lost.
+    pub fn into_parts(self) -> (R, S) {
+        (self.inner, self.buffer)
+    }
+}
+
+impl<R: EintrRead, S: AsMut<[u8]>> Source for ScratchSource<R, S> {
+    type Error = R::Error;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        if self.pos == self.len {
+            let count =
+                retry_on_interrupted(|| self.inner.read(self.buffer.as_mut()), R::is_interrupted)?;
+            let capacity = self.buffer.as_mut().len();
+            debug_assert!(
+                count <= capacity,
+                "read returned {count}, more than the {capacity}-byte buffer"
+            );
+            self.len = count.min(capacity);
+            self.pos = 0;
+        }
+        if self.pos < self.len {
+            let unconsumed = &self.buffer.as_mut()[self.pos..self.len];
+            Ok(Some(unconsumed))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn consume(&mut self, amount: usize) {
+        let remaining = self.len - self.pos;
+        debug_assert!(
+            amount <= remaining,
+            "consume({amount}) exceeds the {remaining} bytes remaining in the current chunk"
+        );
+        self.pos += amount.min(remaining);
+    }
+}
+
+impl<R, S: AsRef<[u8]>> ScratchSource<R, S> {
+    /// The bytes that the reader pulled into the scratch buffer and that
+    /// the caller did not `consume` yet.
+    pub fn pending(&self) -> &[u8] {
+        &self.buffer.as_ref()[self.pos..self.len]
+    }
+}
+
+/// A backend's raw, unretried `BufRead::fill_buf`, plus how that
+/// backend's error says "interrupted" (`std::io::ErrorKind::Interrupted`,
+/// `embedded_io::ErrorKind::Interrupted`, ...).
+pub trait EintrFillBuf {
+    type Error;
+
+    /// Like `std::io::BufRead::fill_buf`/`embedded_io::BufRead::fill_buf`.
+    /// As in both, refill the buffer only "if it is empty": while
+    /// unconsumed bytes remain, return them and do not fail.
+    fn fill_buf(&mut self) -> Result<&[u8], Self::Error>;
+
+    /// Whether `err` means "the call was interrupted, try again".
+    fn is_interrupted(err: &Self::Error) -> bool;
+
+    /// Like `std::io::BufRead::consume`/`embedded_io::BufRead::consume`.
+    fn consume(&mut self, amount: usize);
+}
+
+/// A `Source`, Eintr-reading into the buffer of `inner`, so that
+/// a `BufRead`-implementing reader can be adapted with no extra copy.
+#[derive(Debug)]
+pub struct LendingSource<R> {
+    inner: R,
+}
+
+impl<R: EintrFillBuf> LendingSource<R> {
+    pub fn new(inner: R) -> Self {
+        Self { inner }
+    }
+
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: EintrFillBuf> Source for LendingSource<R> {
+    type Error = R::Error;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        let buf = retry_fill_buf(&mut self.inner, R::fill_buf, R::is_interrupted)?;
+        Ok((!buf.is_empty()).then_some(buf))
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.inner.consume(amount);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EintrFillBuf, EintrRead, LendingSource, ScratchSource};
+    use crate::Source;
+    use core::convert::Infallible;
+
+    /// The error of the test readers. It is the "interrupted" error of
+    /// a real backend, for example `std::io::ErrorKind::Interrupted`.
+    /// With this type, the tests do not need `std`.
+    #[derive(Debug)]
+    struct Interrupted;
+
+    /// A minimal [`EintrRead`]/[`EintrFillBuf`] over a borrowed
+    /// byte slice — stands in for a real `std::io`/`embedded_io` reader
+    /// when testing `ScratchSource`/`LendingSource`, which don't care
+    /// which backend supplies bytes.
+    struct SliceReader<'a>(&'a [u8]);
+
+    impl<'a> EintrRead for SliceReader<'a> {
+        type Error = Interrupted;
+
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = buf.len().min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            true
+        }
+    }
+
+    impl<'a> EintrFillBuf for SliceReader<'a> {
+        type Error = Interrupted;
+
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            Ok(self.0)
+        }
+
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            true
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.0 = &self.0[amount..];
+        }
+    }
+
+    /// Fails its first `read`/`fill_buf` with `Interrupted`, then
+    /// delegates — proves `ScratchSource`/`LendingSource` route a
+    /// reader's error through `retry_on_interrupted`/`retry_fill_buf`
+    /// rather than a bare, unretried call.
+    struct FlakyOnce<R> {
+        inner: R,
+        failed: bool,
+    }
+
+    impl<R: EintrRead<Error = Interrupted>> EintrRead for FlakyOnce<R> {
+        type Error = Interrupted;
+
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(Interrupted);
+            }
+            self.inner.read(buf)
+        }
+
+        fn is_interrupted(err: &Self::Error) -> bool {
+            R::is_interrupted(err)
+        }
+    }
+
+    impl<R: EintrFillBuf<Error = Interrupted>> EintrFillBuf for FlakyOnce<R> {
+        type Error = Interrupted;
+
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(Interrupted);
+            }
+            self.inner.fill_buf()
+        }
+
+        fn is_interrupted(err: &Self::Error) -> bool {
+            R::is_interrupted(err)
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.inner.consume(amount);
+        }
+    }
+
+    /// A [`EintrFillBuf`] that yields `b"hi"`, then an empty fill,
+    /// then `b"more"` — stands in for a transport whose "nothing right
+    /// now" isn't forever (a growing file, a pipe), proving a
+    /// `LendingSource` doesn't latch itself shut after a single empty
+    /// fill.
+    #[derive(Default)]
+    struct GrowsAfterAnEmptyFill {
+        stage: usize,
+        buf: &'static [u8],
+    }
+
+    impl EintrFillBuf for GrowsAfterAnEmptyFill {
+        type Error = Infallible;
+
+        fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
+            if self.buf.is_empty() {
+                self.buf = match self.stage {
+                    0 => b"hi",
+                    1 => b"",
+                    2 => b"more",
+                    _ => b"",
+                };
+                self.stage += 1;
+            }
+            Ok(self.buf)
+        }
+
+        fn is_interrupted(_err: &Self::Error) -> bool {
+            false
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.buf = &self.buf[amount..];
+        }
+    }
+
+    #[test]
+    fn chunk_returns_none_at_genuine_eof() {
+        let mut input = ScratchSource::new(SliceReader(b""), [0u8; 4]).unwrap();
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn partial_consume_leaves_remainder_visible_on_next_chunk() {
+        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]).unwrap();
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(1);
+        // The unconsumed remainder reappears, overlapping the previous
+        // chunk — no new bytes were pulled in to produce it.
+        assert_eq!(input.chunk().unwrap(), Some(b"bcd".as_slice()));
+    }
+
+    #[test]
+    fn full_consume_triggers_a_refill() {
+        let mut input = ScratchSource::new(SliceReader(b"abcdef"), [0u8; 4]).unwrap();
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        input.consume(4);
+        assert_eq!(input.chunk().unwrap(), Some(b"ef".as_slice()));
+    }
+
+    #[test]
+    fn repeated_chunk_without_consume_is_idempotent() {
+        let mut input = ScratchSource::new(SliceReader(b"abcd"), [0u8; 4]).unwrap();
+
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+        assert_eq!(input.chunk().unwrap(), Some(b"abcd".as_slice()));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn consume_more_than_available_panics_in_debug() {
+        let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]).unwrap();
+        input.chunk().unwrap();
+        input.consume(3);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn consume_more_than_available_clamps_in_release() {
+        let mut input = ScratchSource::new(SliceReader(b"ab"), [0u8; 4]).unwrap();
+        input.chunk().unwrap();
+        input.consume(3);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn chunk_retries_an_interrupted_read() {
+        let flaky = FlakyOnce {
+            inner: SliceReader(b"retry me"),
+            failed: false,
+        };
+        let mut input = ScratchSource::new(flaky, [0u8; 8]).unwrap();
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me".as_slice()));
+    }
+
+    #[test]
+    fn lending_source_retries_an_interrupted_fill() {
+        let flaky = FlakyOnce {
+            inner: SliceReader(b"retry me too"),
+            failed: false,
+        };
+        let mut input = LendingSource::new(flaky);
+        assert_eq!(input.chunk().unwrap(), Some(b"retry me too".as_slice()));
+    }
+
+    #[test]
+    fn lending_source_forwards_to_fill_buf() {
+        let mut input = LendingSource::new(SliceReader(b"hello"));
+        assert_eq!(input.chunk().unwrap(), Some(b"hello".as_slice()));
+        input.consume(5);
+        assert_eq!(input.chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn lending_source_leaves_unconsumed_remainder_visible() {
+        let mut input = LendingSource::new(SliceReader(b"abcdef"));
+        assert_eq!(input.chunk().unwrap(), Some(b"abcdef".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), Some(b"cdef".as_slice()));
+    }
+
+    #[test]
+    fn lending_source_revisits_the_wrapped_reader_after_an_empty_fill() {
+        let mut input = LendingSource::new(GrowsAfterAnEmptyFill::default());
+        assert_eq!(input.chunk().unwrap(), Some(b"hi".as_slice()));
+        input.consume(2);
+        assert_eq!(input.chunk().unwrap(), None);
+        assert_eq!(input.chunk().unwrap(), Some(b"more".as_slice()));
+    }
+}

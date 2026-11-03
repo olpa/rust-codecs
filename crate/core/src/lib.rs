@@ -1,29 +1,272 @@
-//! Core crate for RustCodecs: re-exports the shared vocabulary and stream
-//! adapters a codec crate and its clients build on, so neither ever has to
-//! `use compcol` directly — `compcol` is an implementation detail behind
-//! this crate's boundary.
+#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+//! Provides a stream interface for rewriting input and output byte
+//! streams. The core is `no_std`-compatible, runs incrementally, and
+//! does not allocate.
 //!
-//! - [`Codec`]: implement this to add a codec.
-//! - [`Error`], [`Progress`], [`Status`]: the shared vocabulary [`Codec`]'s
-//!   methods speak in.
-//! - [`io`]: stream adapters (`std::io::Read`/`Write`) and one-shot
-//!   `Vec<u8>` helpers built on top of [`Codec`].
+//! - Introduces [`Source`] and [`Sink`] abstractions for I/O backends,
+//!   and [`Codec`] for byte rewriting.
+//! - The entry points are [`stream_to_stream`] and
+//!   [`encode_str`]/[`encode_string`].
+//! - Bundles [`identity`] and [`rot13`] codecs, and, until they get
+//!   their own crates, [`base64_enc`]/[`base64_dec`] and [`json_enc`]
+//!   escaping.
+//! - Bundled I/O backends for `std::io` and `embedded_io` provide
+//!   [`CodecReader`](sources_and_sinks::std_io::CodecReader),
+//!   [`BufReadCodecReader`](sources_and_sinks::std_io::BufReadCodecReader),
+//!   and [`CodecWriter`](sources_and_sinks::std_io::CodecWriter)
+//!   wrappers around a `Read`, `BufRead`, or `Write`.
+//! - Invites third-party codecs and I/O backends.
+//!
+//! # Examples
+//!
+//! ## Wrapping an output
+//!
+//! This example writes a JSON string and lets `json_enc` escape its
+//! content. The surrounding quotes pass through to the base writer
+//! unchanged.
+//!
+//! ```
+//! # #[cfg(all(feature = "json", feature = "std"))]
+//! # {
+//! use std::io::Write;
+//!
+//! use rust_codecs_core::json_enc::json_enc;
+//! use rust_codecs_core::sources_and_sinks::std_io::CodecWriter;
+//!
+//! // Arrange
+//! let json_codec = json_enc();
+//! let scratch_buffer = vec![0u8; 64];
+//! let mut base_writer: Vec<u8> = Vec::new(); // implements std::io::Write
+//!
+//! // Act
+//! write!(base_writer, r#"""#).unwrap();
+//!
+//! let mut codec_writer = CodecWriter::new(base_writer, json_codec, scratch_buffer).unwrap();
+//! write!(codec_writer, r#""\"#).unwrap();
+//!
+//! let (mut base_writer, _) = codec_writer.finish().unwrap();
+//! write!(base_writer, r#"""#).unwrap();
+//!
+//! // Assert
+//! let output = base_writer;
+//! assert_eq!(output, br#""\"\\""#);
+//! # }
+//! ```
+//!
+//! ## Wrapping an input
+//!
+//! Decode a base64 stream. This example uses `embedded_io` streams and
+//! wrappers instead of `std::io`.
+//!
+//! ```
+//! # #[cfg(all(feature = "base64", feature = "embedded-io"))]
+//! # {
+//! use embedded_io::Read;
+//!
+//! use rust_codecs_core::base64_dec::base64_dec;
+//! use rust_codecs_core::sources_and_sinks::embedded_io::CodecReader;
+//!
+//! // Arrange
+//! let base64_codec = base64_dec();
+//! let scratch_buffer = [0u8; 64];
+//! let mut read_buffer = [0u8; 4];
+//!
+//! // Act
+//! let input: &[u8] = b"8J+mgA==";
+//! let mut codec_reader = CodecReader::new(input, base64_codec, scratch_buffer).unwrap();
+//! // `read_exact` is `embedded_io::Read`'s, imported above
+//! codec_reader.read_exact(&mut read_buffer).unwrap();
+//!
+//! // Assert
+//! let text = std::str::from_utf8(&read_buffer).unwrap();
+//! assert_eq!(text, "🦀");
+//! # }
+//! ```
+//!
+//! ## Any stream to any stream
+//!
+//! [`stream_to_stream`] applies a codec from a [`Source`] to a
+//! [`Sink`]. Here the source borrows a `&str`'s bytes. The sink grows
+//! a `Vec<u8>`.
+//!
+//! ```
+//! # #[cfg(all(feature = "rot13", feature = "alloc"))]
+//! # {
+//! use rust_codecs_core::rot13::rot13;
+//! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
+//! use rust_codecs_core::sources_and_sinks::vec::VecSink;
+//! use rust_codecs_core::stream_to_stream;
+//!
+//! // Arrange
+//! let rot13_codec = rot13();
+//! let mut sink = VecSink::default();
+//!
+//! // Act
+//! let input: &str = "hello";
+//! let mut source = SliceSource::new(input.as_bytes());
+//!
+//! stream_to_stream(&mut source, rot13_codec, &mut sink).unwrap();
+//!
+//! // Assert
+//! let output = String::from_utf8(sink.into_inner()).unwrap();
+//! assert_eq!(output, "uryyb");
+//! # }
+//! ```
+//!
+//! Notes:
+//!
+//! - This slice-to-`Vec` wiring is a simplified reimplementation of
+//!   [`encode_str`]/[`encode_string`]. Use those functions instead of
+//!   repeating this pattern.
+//! - With the [`identity`](identity::identity) codec,
+//!   [`stream_to_stream`] works as a generic copy function. It can
+//!   copy between streams that are otherwise incompatible, for
+//!   example `std::io` and `embedded_io`.
+//!
+//! ## Chain of codecs
+//!
+//! [`Chain`] composes two codecs into one.
+//!
+//! ```
+//! # #[cfg(all(feature = "base64", feature = "rot13", feature = "alloc"))]
+//! # {
+//! use rust_codecs_core::base64_enc::base64_enc;
+//! use rust_codecs_core::rot13::rot13;
+//! use rust_codecs_core::Chain;
+//! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
+//! use rust_codecs_core::sources_and_sinks::vec::VecSink;
+//! use rust_codecs_core::stream_to_stream;
+//!
+//! let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 64]).unwrap();
+//!
+//! let mut source = SliceSource::new(b"hello");
+//! let mut sink = VecSink::default();
+//! stream_to_stream(&mut source, chain, &mut sink).unwrap();
+//! assert_eq!(sink.into_inner(), b"nTIfoT8=");
+//! # }
+//! ```
+//!
+//! ## Parsing using early-stop codecs
+//!
+//! You can use a [`BoundaryAwareCodec`] in a small hand-written
+//! parser, one step at a time.
+//!
+//! The example lives in `core/tests/tokenizer.rs`, a tokenizer
+//! for input made of plain text with quoted strings inside it. Its
+//! codec, `QuoteEnd`, copies bytes unchanged until it reaches a `"`.
+//! It treats that quote as an in-band end. It does not consume the
+//! quote byte itself.
+//!
+//! The tokenizer moves through the input in two ways:
+//!
+//! - Inside a span of plain text, or inside a quoted string, the
+//!   codec does the reading. The test helper `drive_to_string` runs
+//!   it over a shared [`Source`] through [`stream_to_stream`]. The
+//!   source's position moves forward as a side effect.
+//! - The quote character itself is not handled by a codec. The driver
+//!   loop reads it directly, with plain [`Source`] calls: `chunk()`
+//!   and `consume()`. This moves the source's position forward by
+//!   hand.
+//!
+//! ```text
+//! while source.chunk().unwrap().is_some() {
+//!     state = match state {
+//!         ...
+//!         State::String => {
+//!             let text = drive_to_string(&mut source, quote_end()).unwrap();
+//!
+//!             tokens.push(("string", text));
+//!
+//!             State::QuoteThenSpan
+//!         }
+//!         State::QuoteThenString | State::QuoteThenSpan => {
+//!             let chunk = source.chunk().unwrap().unwrap();
+//!             assert_eq!(chunk[0], b'"');
+//!             source.consume(1);
+//!
+//!             tokens.push(("quote", "\"".to_string()));
+//!
+//!             if state == State::QuoteThenString {
+//!                 State::String
+//!             } else {
+//!                 State::Span
+//!             }
+//!         }
+//!     };
+//! }
+//! ```
+//!
+//! See `tokenize_string_array_literal` in that same file for the
+//! full working version.
+//!
+//! # A note on `base64` and `json`
+//!
+//! These two codecs live in this crate as a chicken-and-egg bootstrap:
+//! the [`Codec`] trait needed real implementations to shake out its
+//! design before this crate had any users, and there was no separate
+//! codec crate yet to put them in. Long-term they belong in their own
+//! crates outside `rust-codecs-core`, each depending on this crate
+//! rather than living inside it.
 
-pub use compcol::{Error, Progress, Status};
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
-mod codec;
-pub use codec::Codec;
+mod protocol;
+pub use protocol::{
+    BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, EmptyBufferError,
+    Error, ErrorKind, Progress, Sink, Source, StreamError, StreamErrorKind, TransferCounts,
+};
 
-pub mod io;
+pub mod uninit;
 
-#[cfg(feature = "identity")]
-pub mod identity;
+mod step;
 
-#[cfg(feature = "rot13")]
-pub mod rot13;
+mod stream;
+pub use stream::{stream_to_stream, DriveError, DriveErrorKind, Pump};
 
-#[cfg(feature = "base64")]
-pub mod base64;
+mod chain;
+pub use chain::Chain;
 
-#[cfg(feature = "json")]
-pub mod json;
+pub mod sources_and_sinks;
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+#[doc(inline)]
+pub use sources_and_sinks::vec::{encode_str, encode_string, EncodeError};
+
+mod codecs;
+#[allow(unused_imports)]
+pub use codecs::*;
+
+#[cfg(test)]
+mod feature_coverage {
+    // A plain `cargo test` silently skips whatever optional features
+    // aren't enabled — no error, just fewer tests run. Surface that
+    // instead of letting it pass quietly: this test only actually runs
+    // (and only then needs to pass) under `--all-features`; otherwise
+    // it's skipped as "ignored" with the reason below, which shows up
+    // in the summary line without failing the narrower run.
+    #[test]
+    #[cfg_attr(
+        not(all(
+            feature = "std",
+            feature = "base64",
+            feature = "json",
+            feature = "embedded-io",
+            feature = "rot13"
+        )),
+        ignore = "some optional features are disabled — run `cargo test --all-features`"
+    )]
+    #[allow(clippy::assertions_on_constants)]
+    fn all_optional_features_are_enabled() {
+        assert!(cfg!(feature = "std"), "feature \"std\" is off");
+        assert!(cfg!(feature = "base64"), "feature \"base64\" is off");
+        assert!(cfg!(feature = "json"), "feature \"json\" is off");
+        assert!(cfg!(feature = "rot13"), "feature \"rot13\" is off");
+        assert!(
+            cfg!(feature = "embedded-io"),
+            "feature \"embedded-io\" is off"
+        );
+    }
+}

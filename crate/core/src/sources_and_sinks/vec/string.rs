@@ -1,0 +1,83 @@
+//! Convenience combinators for running a codec over a borrowed
+//! string, collecting the result into an in-memory `Vec<u8>`/`String`.
+
+use core::convert::Infallible;
+
+use super::VecSink;
+use crate::{stream_to_stream, Codec, DriveError, DriveErrorKind, StreamError, StreamErrorKind};
+
+/// Everything that can go wrong in [`encode_str`]/[`encode_string`].
+#[derive(Debug)]
+pub enum EncodeError {
+    /// The codec failed. [`StreamError::moved`] counts the input bytes
+    /// that the codec consumed and the output bytes that it wrote before
+    /// the failure.
+    Stream(StreamError<Infallible>),
+    Utf8(alloc::string::FromUtf8Error),
+}
+
+fn from_drive_error(error: DriveError<Infallible, Infallible>) -> EncodeError {
+    let kind = match error.kind {
+        DriveErrorKind::Source(never) | DriveErrorKind::Sink(never) => match never {},
+        DriveErrorKind::Codec(error) => StreamErrorKind::Codec(error),
+        DriveErrorKind::NoProgress => StreamErrorKind::NoProgress,
+        // VecSink's spare capacity always grows to fit; it can
+        // never decline to offer any.
+        DriveErrorKind::SinkExhausted => unreachable!("VecSink always has spare capacity"),
+    };
+    EncodeError::Stream(StreamError::new(kind, error.moved))
+}
+
+impl core::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Stream(error) => error.fmt(f),
+            Self::Utf8(_) => f.write_str("output is not UTF-8"),
+        }
+    }
+}
+
+impl core::error::Error for EncodeError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Stream(error) => Some(error),
+            Self::Utf8(error) => Some(error),
+        }
+    }
+}
+
+impl From<alloc::string::FromUtf8Error> for EncodeError {
+    fn from(error: alloc::string::FromUtf8Error) -> Self {
+        Self::Utf8(error)
+    }
+}
+
+/// Run `codec` over a `str`, collecting the result into a `Vec<u8>`.
+///
+/// A convenience combinator over
+/// [`crate::sources_and_sinks::slice::SliceSource`]/[`VecSink`]/
+/// [`stream_to_stream`].
+///
+/// Behind the `alloc` feature flag.
+pub fn encode_str(
+    codec: impl Codec,
+    input: impl AsRef<str>,
+) -> Result<alloc::vec::Vec<u8>, EncodeError> {
+    let input = input.as_ref().as_bytes();
+    let mut source = crate::sources_and_sinks::slice::SliceSource::new(input);
+    let mut sink = VecSink::new(alloc::vec::Vec::with_capacity(input.len()));
+    stream_to_stream(&mut source, codec, &mut sink).map_err(from_drive_error)?;
+    Ok(sink.into_inner())
+}
+
+/// Run `codec` over a `str`, collecting the result into a `String`.
+///
+/// Built on [`encode_str`], for codecs whose output is text.
+///
+/// Behind the `alloc` feature flag.
+pub fn encode_string(
+    codec: impl Codec,
+    input: impl AsRef<str>,
+) -> Result<alloc::string::String, EncodeError> {
+    Ok(alloc::string::String::from_utf8(encode_str(codec, input)?)?)
+}

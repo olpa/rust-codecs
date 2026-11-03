@@ -2,17 +2,28 @@
 name = "rust-codecs-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
+description = "Streaming byte codecs with a no_std core."
+license = "MIT"
+repository = "https://github.com/olpa/rust-codecs"
 
 [dependencies]
-compcol = { version = "0.6", default-features = false, features = ["std"] }
-base64 = { version = "0.22", optional = true }
-json-escape = { git = "https://github.com/olpa/json-escape", branch = "feat/escape-bytes-try2", optional = true }
+base64 = { version = "0.22", optional = true, default-features = false }
+json-escape = { git = "https://github.com/olpa/json-escape", rev = "f08a2f26d308738a5c48957d8eb151f1e5bdea60", optional = true }
+embedded-io = { version = "0.7.1", optional = true, default-features = false }
 
 [features]
-identity = []
+default = ["std"]
+alloc = []
+std = ["alloc"]
 rot13 = []
 base64 = ["dep:base64"]
 json = ["dep:json-escape"]
+embedded-io = ["dep:embedded-io"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "rust_codecs_core"
