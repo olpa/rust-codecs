@@ -205,7 +205,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         error
     }
 
-    /// Mirrors `rebase_first_failed`, but for `second`.
+    /// Rebase a validated error of `second` onto the position of the
+    /// chain before the step. `pre_out_pos` grows by the bytes that
+    /// `second` wrote. `consumed` stays the same: `second` consumed
+    /// bytes from `staging`, not from `input`.
     fn rebase_second_failed(error: Error, consumed: usize, pre_out_pos: usize) -> Error {
         Error::new(error.kind, consumed, pre_out_pos + error.written)
     }
