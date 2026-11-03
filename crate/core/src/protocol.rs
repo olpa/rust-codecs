@@ -85,7 +85,8 @@ pub trait DrainCodec {
     ///
     /// One call may not be enough. If `output` is too small, `flush`
     /// returns [`DrainProgress::OutputFilled`]. Call `flush` again until
-    /// it returns [`DrainProgress::Done`].
+    /// it returns [`DrainProgress::Done`]. This is a recommendation, not a
+    /// contract.
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>;
 
     /// Tell the codec that no more input will come. The codec flushes
