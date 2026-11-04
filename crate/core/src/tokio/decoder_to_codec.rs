@@ -94,14 +94,14 @@ mod tests {
     use super::TokioDecoderCodec;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::VecSink;
-    use crate::tokio::test_support::{three_strings_input, MyStringDecoder};
+    use crate::tokio::test_support::{three_strings_input, LengthPrefixedStringTokioDecoder};
     use crate::{stream_to_stream, BoundaryAwareCodec};
 
     #[test]
     fn stream_to_stream_stops_after_each_object() {
         let input = three_strings_input();
         let mut source = SliceSource::new(&input);
-        let mut adapter = TokioDecoderCodec::new(MyStringDecoder {});
+        let mut adapter = TokioDecoderCodec::new(LengthPrefixedStringTokioDecoder {});
 
         let mut items = Vec::new();
         for _ in 0..3 {

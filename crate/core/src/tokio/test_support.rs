@@ -3,17 +3,20 @@
 use bytes::{Buf, BytesMut};
 use tokio_util::codec::Decoder;
 
+use core::convert::Infallible;
+use core::mem::MaybeUninit;
+
 use crate::sources_and_sinks::slice::SliceSource;
-use crate::Source;
+use crate::{Sink, Source};
 
 // Copied from the `tokio_util::codec` module documentation:
 // a four-byte little-endian length followed by that many bytes of
 // UTF-8 string data.
-pub struct MyStringDecoder {}
+pub struct LengthPrefixedStringTokioDecoder {}
 
 const MAX: usize = 8 * 1024 * 1024;
 
-impl Decoder for MyStringDecoder {
+impl Decoder for LengthPrefixedStringTokioDecoder {
     type Item = String;
     type Error = std::io::Error;
 
@@ -86,9 +89,30 @@ impl Source for Chunked<'_> {
     }
 }
 
+/// A sink that ignores everything written to it, like `/dev/null`.
+pub struct NullSink([MaybeUninit<u8>; 64]);
+
+impl Default for NullSink {
+    fn default() -> Self {
+        Self([MaybeUninit::uninit(); 64])
+    }
+}
+
+impl Sink for NullSink {
+    type Error = Infallible;
+
+    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+        Ok(Some(&mut self.0))
+    }
+
+    fn commit(&mut self, _amount: usize) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 #[test]
 fn sample_decoder_decodes_three_strings() {
-    let mut decoder = MyStringDecoder {};
+    let mut decoder = LengthPrefixedStringTokioDecoder {};
     let mut buf = BytesMut::from(&three_strings_input()[..]);
 
     assert_eq!(decoder.decode(&mut buf).unwrap().as_deref(), Some("hello"));

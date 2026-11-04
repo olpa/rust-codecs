@@ -132,13 +132,18 @@ impl<S: Source, D: Decoder> Iterator for TokioReader<S, D> {
 mod tests {
     use super::{ReadError, TokioReader};
     use crate::sources_and_sinks::slice::SliceSource;
-    use crate::tokio::test_support::{frame, three_strings_input, Chunked, MyStringDecoder};
+    use crate::tokio::test_support::{
+        frame, three_strings_input, Chunked, LengthPrefixedStringTokioDecoder,
+    };
     use crate::Source;
 
     #[test]
     fn reader_iterates_three_strings() {
         let input = three_strings_input();
-        let reader = TokioReader::new(SliceSource::new(&input), MyStringDecoder {});
+        let reader = TokioReader::new(
+            SliceSource::new(&input),
+            LengthPrefixedStringTokioDecoder {},
+        );
 
         let items: Vec<String> = reader.map(Result::unwrap).collect();
 
@@ -148,7 +153,10 @@ mod tests {
     #[test]
     fn reader_handles_objects_across_chunks() {
         let input = three_strings_input();
-        let reader = TokioReader::new(Chunked(SliceSource::new(&input), 3), MyStringDecoder {});
+        let reader = TokioReader::new(
+            Chunked(SliceSource::new(&input), 3),
+            LengthPrefixedStringTokioDecoder {},
+        );
 
         let items: Vec<String> = reader.map(Result::unwrap).collect();
 
@@ -160,7 +168,10 @@ mod tests {
         let mut input = frame("hello");
         input.push(b'#');
         input.extend(frame("world"));
-        let mut reader = TokioReader::new(SliceSource::new(&input), MyStringDecoder {});
+        let mut reader = TokioReader::new(
+            SliceSource::new(&input),
+            LengthPrefixedStringTokioDecoder {},
+        );
 
         assert_eq!(reader.next_item().unwrap().as_deref(), Some("hello"));
         let source = reader.source_mut();
@@ -174,7 +185,8 @@ mod tests {
     fn reader_reports_a_truncated_object_once() {
         let input = frame("hello");
         let input = &input[..input.len() - 1];
-        let mut reader = TokioReader::new(SliceSource::new(input), MyStringDecoder {});
+        let mut reader =
+            TokioReader::new(SliceSource::new(input), LengthPrefixedStringTokioDecoder {});
 
         assert!(matches!(
             reader.next_item(),
