@@ -1,4 +1,4 @@
-//! `BoundaryAwareCodecTokioDecoder`: a boundary-aware codec as a tokio
+//! `BoundaryAwareCodecAsTokioDecoder`: a boundary-aware codec as a tokio
 //! `Decoder`.
 
 use std::io;
@@ -23,7 +23,7 @@ use crate::{BoundaryAwareCodec, BoundaryAwareProgress};
 ///
 /// The error type is `std::io::Error`. The crate [`Error`](crate::Error)
 /// is its source.
-pub struct BoundaryAwareCodecTokioDecoder<C: BoundaryAwareCodec> {
+pub struct BoundaryAwareCodecAsTokioDecoder<C: BoundaryAwareCodec> {
     codec: C,
     /// The output of the current stream.
     out: BytesMut,
@@ -31,7 +31,7 @@ pub struct BoundaryAwareCodecTokioDecoder<C: BoundaryAwareCodec> {
     has_input: bool,
 }
 
-impl<C: BoundaryAwareCodec> BoundaryAwareCodecTokioDecoder<C> {
+impl<C: BoundaryAwareCodec> BoundaryAwareCodecAsTokioDecoder<C> {
     pub fn new(codec: C) -> Self {
         Self {
             codec,
@@ -60,7 +60,7 @@ impl<C: BoundaryAwareCodec> BoundaryAwareCodecTokioDecoder<C> {
     }
 }
 
-impl<C: BoundaryAwareCodec> Decoder for BoundaryAwareCodecTokioDecoder<C> {
+impl<C: BoundaryAwareCodec> Decoder for BoundaryAwareCodecAsTokioDecoder<C> {
     type Item = BytesMut;
     type Error = io::Error;
 
@@ -98,14 +98,14 @@ mod tests {
     use bytes::BytesMut;
     use tokio_util::codec::Decoder;
 
-    use super::BoundaryAwareCodecTokioDecoder;
+    use super::BoundaryAwareCodecAsTokioDecoder;
     use crate::codecs::rot13::Rot13;
     use crate::codecs::test_support::{EndsAtBar, HoldsOutput};
 
     /// A stream that gives no output is still a stream.
     #[test]
     fn empty_stream_is_an_empty_item() {
-        let mut decoder = BoundaryAwareCodecTokioDecoder::new(EndsAtBar::<Rot13>::default());
+        let mut decoder = BoundaryAwareCodecAsTokioDecoder::new(EndsAtBar::<Rot13>::default());
         let mut buf = BytesMut::from(&b"|"[..]);
 
         let item = decoder.decode(&mut buf).unwrap().unwrap();
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn eof_without_input_gives_nothing() {
-        let mut decoder = BoundaryAwareCodecTokioDecoder::new(EndsAtBar::<Rot13>::default());
+        let mut decoder = BoundaryAwareCodecAsTokioDecoder::new(EndsAtBar::<Rot13>::default());
         let mut buf = BytesMut::from(&b"uryyb|"[..]);
 
         assert!(decoder.decode(&mut buf).unwrap().is_some());
@@ -133,7 +133,7 @@ mod tests {
             inner,
             finish_calls: 0,
         };
-        let mut decoder = BoundaryAwareCodecTokioDecoder::new(codec);
+        let mut decoder = BoundaryAwareCodecAsTokioDecoder::new(codec);
         let mut buf = BytesMut::from(&b"ab|"[..]);
 
         let item = decoder.decode(&mut buf).unwrap().unwrap();

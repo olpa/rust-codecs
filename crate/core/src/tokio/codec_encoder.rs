@@ -1,4 +1,4 @@
-//! `CodecTokioEncoder`: a plain codec as a tokio `Encoder`.
+//! `CodecAsTokioEncoder`: a plain codec as a tokio `Encoder`.
 
 use std::io;
 
@@ -8,7 +8,7 @@ use tokio_util::codec::Encoder;
 use super::codec_support::{finish_all, process_all, to_io_error};
 use crate::Codec;
 
-/// The item that ends the stream of a [`CodecTokioEncoder`].
+/// The item that ends the stream of a [`CodecAsTokioEncoder`].
 ///
 /// Tokio does not tell an `Encoder` that the stream is over, so the
 /// client sends this item as the last one. The encoder then calls
@@ -27,11 +27,11 @@ pub struct Finish;
 ///
 /// The error type is `std::io::Error`. The crate [`Error`](crate::Error)
 /// is its source.
-pub struct CodecTokioEncoder<C: Codec> {
+pub struct CodecAsTokioEncoder<C: Codec> {
     codec: C,
 }
 
-impl<C: Codec> CodecTokioEncoder<C> {
+impl<C: Codec> CodecAsTokioEncoder<C> {
     pub fn new(codec: C) -> Self {
         Self { codec }
     }
@@ -49,7 +49,7 @@ impl<C: Codec> CodecTokioEncoder<C> {
     }
 }
 
-impl<C: Codec, T: AsRef<[u8]>> Encoder<T> for CodecTokioEncoder<C> {
+impl<C: Codec, T: AsRef<[u8]>> Encoder<T> for CodecAsTokioEncoder<C> {
     type Error = io::Error;
 
     fn encode(&mut self, item: T, dst: &mut BytesMut) -> Result<(), io::Error> {
@@ -60,7 +60,7 @@ impl<C: Codec, T: AsRef<[u8]>> Encoder<T> for CodecTokioEncoder<C> {
     }
 }
 
-impl<C: Codec> Encoder<Finish> for CodecTokioEncoder<C> {
+impl<C: Codec> Encoder<Finish> for CodecAsTokioEncoder<C> {
     type Error = io::Error;
 
     fn encode(&mut self, _item: Finish, dst: &mut BytesMut) -> Result<(), io::Error> {
@@ -75,7 +75,7 @@ mod tests {
     use bytes::BytesMut;
     use tokio_util::codec::Encoder;
 
-    use super::{CodecTokioEncoder, Finish};
+    use super::{CodecAsTokioEncoder, Finish};
     use crate::codecs::rot13::Rot13;
     use crate::codecs::test_support::{FailsAfterInner, FailsWithOverclaim, HoldsOutput};
     use crate::{Error, ErrorKind};
@@ -87,7 +87,7 @@ mod tests {
             trailer: b"END",
             ..Default::default()
         };
-        let mut encoder = CodecTokioEncoder::new(codec);
+        let mut encoder = CodecAsTokioEncoder::new(codec);
         let mut dst = BytesMut::new();
 
         encoder.encode("ab", &mut dst).unwrap();
@@ -104,7 +104,7 @@ mod tests {
             per_input: 10_000,
             ..Default::default()
         };
-        let mut encoder = CodecTokioEncoder::new(codec);
+        let mut encoder = CodecAsTokioEncoder::new(codec);
         let mut dst = BytesMut::new();
 
         encoder.encode("a", &mut dst).unwrap();
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn codec_error_is_the_source_of_the_io_error() {
         let codec = FailsAfterInner::<Rot13>::default();
-        let mut encoder = CodecTokioEncoder::new(codec);
+        let mut encoder = CodecAsTokioEncoder::new(codec);
 
         let error = encoder.encode("a", &mut BytesMut::new()).unwrap_err();
 
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn lying_codec_gives_a_byte_count_error() {
-        let mut encoder = CodecTokioEncoder::new(FailsWithOverclaim);
+        let mut encoder = CodecAsTokioEncoder::new(FailsWithOverclaim);
 
         let error = encoder.encode("a", &mut BytesMut::new()).unwrap_err();
 

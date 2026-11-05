@@ -1,4 +1,4 @@
-//! `CodecTokioDecoder`: a plain codec as a tokio `Decoder`.
+//! `CodecAsTokioDecoder`: a plain codec as a tokio `Decoder`.
 
 use std::io;
 
@@ -18,12 +18,12 @@ use crate::Codec;
 ///
 /// The error type is `std::io::Error`. The crate [`Error`](crate::Error)
 /// is its source.
-pub struct CodecTokioDecoder<C: Codec> {
+pub struct CodecAsTokioDecoder<C: Codec> {
     codec: C,
     finished: bool,
 }
 
-impl<C: Codec> CodecTokioDecoder<C> {
+impl<C: Codec> CodecAsTokioDecoder<C> {
     pub fn new(codec: C) -> Self {
         Self {
             codec,
@@ -44,7 +44,7 @@ impl<C: Codec> CodecTokioDecoder<C> {
     }
 }
 
-impl<C: Codec> Decoder for CodecTokioDecoder<C> {
+impl<C: Codec> Decoder for CodecAsTokioDecoder<C> {
     type Item = BytesMut;
     type Error = io::Error;
 
@@ -80,7 +80,7 @@ mod tests {
     use bytes::BytesMut;
     use tokio_util::codec::Decoder;
 
-    use super::CodecTokioDecoder;
+    use super::CodecAsTokioDecoder;
     use crate::codecs::rot13::Rot13;
     use crate::codecs::test_support::HoldsOutput;
 
@@ -91,7 +91,7 @@ mod tests {
             trailer: b"END",
             ..Default::default()
         };
-        let mut decoder = CodecTokioDecoder::new(codec);
+        let mut decoder = CodecAsTokioDecoder::new(codec);
         let mut buf = BytesMut::from(&b"ab"[..]);
 
         assert_eq!(decoder.decode(&mut buf).unwrap(), None);
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn empty_buffer_gives_nothing() {
-        let mut decoder = CodecTokioDecoder::new(Rot13);
+        let mut decoder = CodecAsTokioDecoder::new(Rot13);
 
         assert_eq!(decoder.decode(&mut BytesMut::new()).unwrap(), None);
     }

@@ -1,6 +1,6 @@
 //! `ReadError`: the failure type of `TokioReader`.
 
-/// A failure of [`TokioReader::next_item`].
+/// A failure of [`TokioReader::next_item`](super::TokioReader::next_item).
 #[derive(Debug)]
 pub enum ReadError<ES, ED> {
     /// The source failed.

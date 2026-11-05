@@ -1,4 +1,4 @@
-//! `TokioDecoderCodec`: a tokio `Decoder` as a boundary-aware codec.
+//! `TokioDecoderAsBoundaryAwareCodec`: a tokio `Decoder` as a boundary-aware codec.
 
 use core::mem::MaybeUninit;
 
@@ -16,13 +16,13 @@ use crate::{
 /// The codec writes nothing to its output; the object travels only
 /// through `take_item`. An object that the client did not take is
 /// overwritten by the next one.
-pub struct TokioDecoderCodec<D: Decoder> {
+pub struct TokioDecoderAsBoundaryAwareCodec<D: Decoder> {
     decoder: D,
     buf: BytesMut,
     item: Option<D::Item>,
 }
 
-impl<D: Decoder> TokioDecoderCodec<D> {
+impl<D: Decoder> TokioDecoderAsBoundaryAwareCodec<D> {
     pub fn new(decoder: D) -> Self {
         Self {
             decoder,
@@ -37,7 +37,7 @@ impl<D: Decoder> TokioDecoderCodec<D> {
     }
 }
 
-impl<D: Decoder> DrainCodec for TokioDecoderCodec<D> {
+impl<D: Decoder> DrainCodec for TokioDecoderAsBoundaryAwareCodec<D> {
     fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
@@ -61,7 +61,7 @@ impl<D: Decoder> DrainCodec for TokioDecoderCodec<D> {
     }
 }
 
-impl<D: Decoder> BoundaryAwareCodec for TokioDecoderCodec<D> {
+impl<D: Decoder> BoundaryAwareCodec for TokioDecoderAsBoundaryAwareCodec<D> {
     fn process_bounded(
         &mut self,
         input: &[u8],
@@ -91,7 +91,7 @@ impl<D: Decoder> BoundaryAwareCodec for TokioDecoderCodec<D> {
 
 #[cfg(test)]
 mod tests {
-    use super::TokioDecoderCodec;
+    use super::TokioDecoderAsBoundaryAwareCodec;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::VecSink;
     use crate::tokio::test_support::{three_strings_input, LengthPrefixedStringTokioDecoder};
@@ -101,7 +101,8 @@ mod tests {
     fn stream_to_stream_stops_after_each_object() {
         let input = three_strings_input();
         let mut source = SliceSource::new(&input);
-        let mut adapter = TokioDecoderCodec::new(LengthPrefixedStringTokioDecoder {});
+        let mut adapter =
+            TokioDecoderAsBoundaryAwareCodec::new(LengthPrefixedStringTokioDecoder {});
 
         let mut items = Vec::new();
         for _ in 0..3 {
