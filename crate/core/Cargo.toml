@@ -24,6 +24,11 @@ json = ["dep:json-escape"]
 embedded-io = ["dep:embedded-io"]
 tokio = ["std", "dep:tokio-util", "dep:bytes"]
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "io-util"] }
+tokio-stream = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
