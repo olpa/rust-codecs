@@ -34,6 +34,7 @@ mod codec_decoder;
 mod codec_encoder;
 mod codec_support;
 mod decoder_to_codec;
+mod encoder_to_codec;
 mod read_error;
 mod reader;
 #[cfg(test)]
@@ -45,5 +46,6 @@ pub use boundary_decoder::BoundaryAwareCodecAsTokioDecoder;
 pub use codec_decoder::CodecAsTokioDecoder;
 pub use codec_encoder::{CodecAsTokioEncoder, Finish};
 pub use decoder_to_codec::TokioDecoderAsBoundaryAwareCodec;
+pub use encoder_to_codec::TokioEncoderAsBoundaryAwareCodec;
 pub use read_error::ReadError;
 pub use reader::TokioReader;

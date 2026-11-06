@@ -12,14 +12,18 @@ use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use super::test_support::{three_strings_input, LengthPrefixedStringTokioDecoder, NullSink};
+use super::test_support::{
+    three_strings_input, LengthPrefixedStringTokioDecoder, LengthPrefixedStringTokioEncoder,
+    NullSink, NullSource,
+};
 use super::{
     BoundaryAwareCodecAsTokioDecoder, CodecAsTokioDecoder, CodecAsTokioEncoder, Finish,
-    TokioDecoderAsBoundaryAwareCodec,
+    TokioDecoderAsBoundaryAwareCodec, TokioEncoderAsBoundaryAwareCodec,
 };
 use crate::codecs::rot13::Rot13;
 use crate::codecs::test_support::EndsAtBar;
 use crate::sources_and_sinks::slice::SliceSource;
+use crate::sources_and_sinks::vec::VecSink;
 use crate::{stream_to_stream, BoundaryAwareCodec};
 
 // ----
@@ -52,6 +56,27 @@ fn read_three_strings_and_then_nothing() {
     assert_eq!(next_object(), Some("tokio".to_string()));
     assert_eq!(next_object(), Some("world".to_string()));
     assert_eq!(next_object(), None);
+}
+
+// ----
+// A tokio Encoder to rust-codecs BoundaryAwareCodec
+// ----
+
+/// The codec ignores its input, so the source is empty. The pump goes
+/// to `finish`, and the codec writes the encoded items there, as one
+/// stream.
+#[test]
+fn encode_three_items() {
+    let mut source = NullSource;
+    let mut sink = VecSink::default();
+    let codec = TokioEncoderAsBoundaryAwareCodec::with_items(
+        LengthPrefixedStringTokioEncoder {},
+        ["hello", "tokio", "world"],
+    );
+
+    stream_to_stream(&mut source, codec, &mut sink).unwrap();
+
+    assert_eq!(sink.into_inner(), three_strings_input());
 }
 
 // ----

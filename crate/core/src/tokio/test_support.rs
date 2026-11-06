@@ -1,7 +1,7 @@
 //! Shared helpers for the tests: a sample tokio `Decoder`, inputs and a chunked source.
 
-use bytes::{Buf, BytesMut};
-use tokio_util::codec::Decoder;
+use bytes::{Buf, BufMut, BytesMut};
+use tokio_util::codec::{Decoder, Encoder};
 
 use core::convert::Infallible;
 use core::mem::MaybeUninit;
@@ -62,6 +62,21 @@ impl Decoder for LengthPrefixedStringTokioDecoder {
     }
 }
 
+/// The encoder for `LengthPrefixedStringTokioDecoder`: a four-byte
+/// little-endian length followed by the bytes of the string.
+pub struct LengthPrefixedStringTokioEncoder {}
+
+impl<'a> Encoder<&'a str> for LengthPrefixedStringTokioEncoder {
+    type Error = std::io::Error;
+
+    fn encode(&mut self, item: &'a str, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        dst.reserve(4 + item.len());
+        dst.put_u32_le(item.len() as u32);
+        dst.put_slice(item.as_bytes());
+        Ok(())
+    }
+}
+
 pub fn frame(s: &str) -> Vec<u8> {
     let mut v = (s.len() as u32).to_le_bytes().to_vec();
     v.extend_from_slice(s.as_bytes());
@@ -87,6 +102,19 @@ impl Source for Chunked<'_> {
     fn consume(&mut self, amount: usize) {
         self.0.consume(amount)
     }
+}
+
+/// A source that is at its end at once, like `/dev/null`.
+pub struct NullSource;
+
+impl Source for NullSource {
+    type Error = Infallible;
+
+    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
+        Ok(None)
+    }
+
+    fn consume(&mut self, _amount: usize) {}
 }
 
 /// A sink that ignores everything written to it, like `/dev/null`.
