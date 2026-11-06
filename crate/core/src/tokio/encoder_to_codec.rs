@@ -148,7 +148,7 @@ mod tests {
     use super::TokioEncoderAsBoundaryAwareCodec;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::VecSink;
-    use crate::tokio::test_support::{frame, LengthPrefixedStringTokioEncoder};
+    use crate::tokio::test_support::{bar_delimited_codec, NullSource};
     use crate::{stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, ErrorKind};
 
     struct FailingEncoder;
@@ -164,14 +164,11 @@ mod tests {
     /// An output that is smaller than the item needs several calls.
     #[test]
     fn small_output_needs_several_calls() {
-        let mut codec = TokioEncoderAsBoundaryAwareCodec::with_item(
-            LengthPrefixedStringTokioEncoder {},
-            "hello",
-        );
+        let mut codec = TokioEncoderAsBoundaryAwareCodec::with_item(bar_delimited_codec(), "hello");
         let mut output = [MaybeUninit::<u8>::uninit(); 3];
         let mut bytes = Vec::new();
 
-        for _ in 0..3 {
+        for _ in 0..2 {
             let progress = codec.process_bounded(b"", &mut output).unwrap();
             assert_eq!(
                 progress,
@@ -188,7 +185,7 @@ mod tests {
                 written: 0
             }
         );
-        assert_eq!(bytes, frame("hello"));
+        assert_eq!(bytes, b"hello|");
     }
 
     /// With a source that has data, the codec reports the boundary
@@ -197,14 +194,11 @@ mod tests {
     fn a_source_with_data_stays_untouched() {
         let mut source = SliceSource::new(b"abc");
         let mut sink = VecSink::default();
-        let codec = TokioEncoderAsBoundaryAwareCodec::with_item(
-            LengthPrefixedStringTokioEncoder {},
-            "hello",
-        );
+        let codec = TokioEncoderAsBoundaryAwareCodec::with_item(bar_delimited_codec(), "hello");
 
         stream_to_stream(&mut source, codec, &mut sink).unwrap();
 
-        assert_eq!(sink.into_inner(), frame("hello"));
+        assert_eq!(sink.into_inner(), b"hello|");
         assert_eq!(source.consumed(), 0);
     }
 
@@ -226,16 +220,11 @@ mod tests {
     fn no_items_give_an_empty_stream() {
         let mut sink = VecSink::default();
         let codec = TokioEncoderAsBoundaryAwareCodec::with_items(
-            LengthPrefixedStringTokioEncoder {},
+            bar_delimited_codec(),
             std::iter::empty::<&str>(),
         );
 
-        stream_to_stream(
-            &mut crate::tokio::test_support::NullSource,
-            codec,
-            &mut sink,
-        )
-        .unwrap();
+        stream_to_stream(&mut NullSource, codec, &mut sink).unwrap();
 
         assert!(sink.into_inner().is_empty());
     }

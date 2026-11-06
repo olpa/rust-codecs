@@ -7,15 +7,13 @@
 //!   - `Rot13`: a plain `Codec`. It has no boundary.
 //!   - `EndsAtBar<Rot13>`: a boundary-aware codec. A stream ends at `|`.
 
+use bytes::Bytes;
 use futures_util::SinkExt;
 use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use super::test_support::{
-    three_strings_input, LengthPrefixedStringTokioDecoder, LengthPrefixedStringTokioEncoder,
-    NullSink, NullSource,
-};
+use super::test_support::{bar_delimited_codec, three_strings_input, NullSink, NullSource};
 use super::{
     BoundaryAwareCodecAsTokioDecoder, CodecAsTokioDecoder, CodecAsTokioEncoder, Finish,
     TokioDecoderAsBoundaryAwareCodec, TokioEncoderAsBoundaryAwareCodec,
@@ -42,7 +40,7 @@ fn read_three_strings_and_then_nothing() {
     let mut sink = NullSink::default();
 
     // A tokio decoder, wrapped by our adapter.
-    let mut adapter = TokioDecoderAsBoundaryAwareCodec::new(LengthPrefixedStringTokioDecoder {});
+    let mut adapter = TokioDecoderAsBoundaryAwareCodec::new(bar_delimited_codec());
 
     // Run one logical stream and return the decoded object. `&mut dyn`
     // lets the closure keep the adapter for `take_item`.
@@ -52,9 +50,9 @@ fn read_three_strings_and_then_nothing() {
         adapter.take_item()
     };
 
-    assert_eq!(next_object(), Some("hello".to_string()));
-    assert_eq!(next_object(), Some("tokio".to_string()));
-    assert_eq!(next_object(), Some("world".to_string()));
+    assert_eq!(next_object(), Some(Bytes::from("hello")));
+    assert_eq!(next_object(), Some(Bytes::from("tokio")));
+    assert_eq!(next_object(), Some(Bytes::from("world")));
     assert_eq!(next_object(), None);
 }
 
@@ -70,7 +68,7 @@ fn encode_three_items() {
     let mut source = NullSource;
     let mut sink = VecSink::default();
     let codec = TokioEncoderAsBoundaryAwareCodec::with_items(
-        LengthPrefixedStringTokioEncoder {},
+        bar_delimited_codec(),
         ["hello", "tokio", "world"],
     );
 

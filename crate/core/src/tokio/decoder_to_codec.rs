@@ -91,18 +91,19 @@ impl<D: Decoder> BoundaryAwareCodec for TokioDecoderAsBoundaryAwareCodec<D> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::TokioDecoderAsBoundaryAwareCodec;
     use crate::sources_and_sinks::slice::SliceSource;
     use crate::sources_and_sinks::vec::VecSink;
-    use crate::tokio::test_support::{three_strings_input, LengthPrefixedStringTokioDecoder};
+    use crate::tokio::test_support::{bar_delimited_codec, three_strings_input};
     use crate::{stream_to_stream, BoundaryAwareCodec};
 
     #[test]
     fn stream_to_stream_stops_after_each_object() {
         let input = three_strings_input();
         let mut source = SliceSource::new(&input);
-        let mut adapter =
-            TokioDecoderAsBoundaryAwareCodec::new(LengthPrefixedStringTokioDecoder {});
+        let mut adapter = TokioDecoderAsBoundaryAwareCodec::new(bar_delimited_codec());
 
         let mut items = Vec::new();
         for _ in 0..3 {
@@ -113,6 +114,6 @@ mod tests {
             items.push(adapter.take_item().unwrap());
         }
 
-        assert_eq!(items, ["hello", "tokio", "world"]);
+        assert_eq!(items, ["hello", "tokio", "world"].map(Bytes::from));
     }
 }
