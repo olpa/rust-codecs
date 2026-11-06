@@ -6,7 +6,6 @@ use tokio_util::codec::{Decoder, Encoder};
 use core::convert::Infallible;
 use core::mem::MaybeUninit;
 
-use crate::sources_and_sinks::slice::SliceSource;
 use crate::{Sink, Source};
 
 // Copied from the `tokio_util::codec` module documentation:
@@ -88,20 +87,6 @@ pub fn three_strings_input() -> Vec<u8> {
     input.extend(frame("tokio"));
     input.extend(frame("world"));
     input
-}
-
-/// A source with small chunks, so objects span chunk boundaries.
-pub struct Chunked<'a>(pub SliceSource<'a>, pub usize);
-
-impl Source for Chunked<'_> {
-    type Error = core::convert::Infallible;
-    fn chunk(&mut self) -> Result<Option<&[u8]>, Self::Error> {
-        let n = self.1;
-        Ok(self.0.chunk()?.map(|c| &c[..c.len().min(n)]))
-    }
-    fn consume(&mut self, amount: usize) {
-        self.0.consume(amount)
-    }
 }
 
 /// A source that is at its end at once, like `/dev/null`.

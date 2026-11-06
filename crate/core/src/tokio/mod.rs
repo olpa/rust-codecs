@@ -1,9 +1,12 @@
-//! Adapters between `tokio_util::codec::Decoder` and this crate's codecs.
+//! Adapters between tokio codecs and this crate's codecs.
 //!
-//! - [`TokioDecoderAsBoundaryAwareCodec`] runs a `Decoder` as a [`BoundaryAwareCodec`](crate::BoundaryAwareCodec).
-//! - [`TokioReader`] reads the objects of a `Decoder` from a [`Source`](crate::Source).
+//! A tokio codec runs as a codec of this crate:
+//! - [`TokioDecoderAsBoundaryAwareCodec`] runs a `Decoder` as a
+//!   [`BoundaryAwareCodec`](crate::BoundaryAwareCodec).
+//! - [`TokioEncoderAsBoundaryAwareCodec`] runs an `Encoder` as a
+//!   [`BoundaryAwareCodec`](crate::BoundaryAwareCodec).
 //!
-//! The other direction runs a codec of this crate as a tokio codec:
+//! A codec of this crate runs as a tokio codec:
 //! - [`CodecAsTokioDecoder`] runs a [`Codec`](crate::Codec) as a `Decoder`.
 //! - [`BoundaryAwareCodecAsTokioDecoder`] runs a
 //!   [`BoundaryAwareCodec`](crate::BoundaryAwareCodec) as a `Decoder`.
@@ -35,8 +38,6 @@ mod codec_encoder;
 mod codec_support;
 mod decoder_to_codec;
 mod encoder_to_codec;
-mod read_error;
-mod reader;
 #[cfg(test)]
 mod samples;
 #[cfg(test)]
@@ -47,5 +48,3 @@ pub use codec_decoder::CodecAsTokioDecoder;
 pub use codec_encoder::{CodecAsTokioEncoder, Finish};
 pub use decoder_to_codec::TokioDecoderAsBoundaryAwareCodec;
 pub use encoder_to_codec::TokioEncoderAsBoundaryAwareCodec;
-pub use read_error::ReadError;
-pub use reader::TokioReader;
