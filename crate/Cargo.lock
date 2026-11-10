@@ -17,6 +17,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "compcol"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9657f9d47c2bc36be681f158d208f40bafdd1c8c32003dac8e7dfe0cb68a97"
+
+[[package]]
 name = "embedded-io"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -47,6 +53,7 @@ name = "rust-codecs-core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "compcol",
  "embedded-io",
  "json-escape",
 ]
