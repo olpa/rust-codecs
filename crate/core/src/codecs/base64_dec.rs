@@ -70,19 +70,24 @@ impl<E: Engine> Base64Dec<E> {
         let engine = &self.engine;
         // Only `finish`'s deferred/partial call can ever hand this a
         // short group; every `process`-time call passes a full one. A
-        // full group failing to decode is malformed data; a short one
-        // failing just means the stream ended before completing a
-        // unit — the base64 crate's own error variant for "too short"
-        // isn't consistent enough across lengths to key off instead
-        // (e.g. a 2-byte tail reports `InvalidPadding`, not
-        // `InvalidLength`).
-        let kind = if group.len() < ENCODED_GROUP {
-            ErrorKind::UnexpectedEnd
+        // full group failing to decode is malformed data (subcode 0); a
+        // short one failing just means the stream ended before
+        // completing a unit (`SUBCODE_UNEXPECTED_END`) — the base64
+        // crate's own error variant for "too short" isn't consistent
+        // enough across lengths to key off instead (e.g. a 2-byte tail
+        // reports `InvalidPadding`, not `InvalidLength`).
+        let failure = if group.len() < ENCODED_GROUP {
+            Error::new(
+                ErrorKind::CorruptStream,
+                base64_shared::SUBCODE_UNEXPECTED_END,
+                0,
+                0,
+            )
         } else {
-            ErrorKind::CorruptStream
+            Error::new(ErrorKind::CorruptStream, 0, 0, 0)
         };
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
-            engine.decode_slice(group, buffer).map_err(|_| kind)
+            engine.decode_slice(group, buffer).map_err(|_| failure)
         })?;
         Ok(self.pending_output.len())
     }
@@ -159,11 +164,11 @@ impl<E: Engine> Codec for Base64Dec<E> {
                     });
                 }
                 Err(error) => {
-                    return Err(Error::new(
-                        error.kind,
-                        in_pos + error.consumed,
-                        out_pos + error.written,
-                    ));
+                    return Err(Error {
+                        consumed: in_pos + error.consumed,
+                        written: out_pos + error.written,
+                        ..error
+                    });
                 }
             }
             if in_pos == input.len() {
@@ -195,7 +200,7 @@ impl<E: Engine> Base64Dec<E> {
 
         if self.done {
             if !input.is_empty() {
-                return Err(Error::new(ErrorKind::CorruptStream, 0, out_pos));
+                return Err(Error::new(ErrorKind::CorruptStream, 0, 0, out_pos));
             }
             return Ok(Progress::InputConsumed { written: out_pos });
         }
@@ -227,7 +232,7 @@ impl<E: Engine> Base64Dec<E> {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
             if self.done && in_pos < input.len() {
-                return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
+                return Err(Error::new(ErrorKind::CorruptStream, 0, in_pos, out_pos));
             }
         }
 
@@ -261,7 +266,7 @@ impl<E: Engine> Base64Dec<E> {
                 if written < out_bytes {
                     self.done = true;
                     if in_pos < input.len() {
-                        return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
+                        return Err(Error::new(ErrorKind::CorruptStream, 0, in_pos, out_pos));
                     }
                     return Ok(Progress::InputConsumed { written: out_pos });
                 }
@@ -293,7 +298,7 @@ impl<E: Engine> Base64Dec<E> {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
             if self.done && in_pos < input.len() {
-                return Err(Error::new(ErrorKind::CorruptStream, in_pos, out_pos));
+                return Err(Error::new(ErrorKind::CorruptStream, 0, in_pos, out_pos));
             }
         }
 
@@ -325,6 +330,7 @@ mod tests {
 
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+    use super::super::base64_shared::SUBCODE_UNEXPECTED_END;
     use super::{base64_dec, Base64Dec};
     use crate::codecs::base64_enc::{base64_enc, Base64Enc};
     use crate::sources_and_sinks::vec::encode_string;
@@ -358,15 +364,16 @@ mod tests {
         // erroring (so no-pad engines' final 2-3 char group works),
         // but STANDARD requires padding and must still reject a
         // stream cut off mid-symbol. That's the stream ending too
-        // early, not malformed data, so it must be UnexpectedEnd
-        // rather than CorruptStream.
+        // early, not malformed data, so the subcode is
+        // UNEXPECTED_END.
         let truncated = &ENCODED[..ENCODED.len() - 2];
         let mut dec = base64_dec();
         let mut out = [0u8; 32];
         dec.process(truncated.as_bytes(), as_uninit_mut(&mut out))
             .unwrap();
         let error = dec.finish(as_uninit_mut(&mut out)).unwrap_err();
-        assert_eq!(error.kind, ErrorKind::UnexpectedEnd);
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.codec_subcode, SUBCODE_UNEXPECTED_END);
     }
 
     #[test]
@@ -377,6 +384,7 @@ mod tests {
         let mut out = [0u8; 32];
         let error = dec.process(b"A=BC", as_uninit_mut(&mut out)).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.codec_subcode, 0);
     }
 
     #[test]
@@ -483,6 +491,7 @@ mod tests {
         let mut out = [0u8; 16];
         let error = dec.process(b"SGVs", as_uninit_mut(&mut out)).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 0);
         assert_eq!(error.written, 1);
         assert_eq!(&out[..1], b"o");
@@ -514,6 +523,7 @@ mod tests {
                     }
                     Err(error) => {
                         assert_eq!(error.kind, ErrorKind::CorruptStream);
+                        assert_eq!(error.codec_subcode, 0);
                         decoded.extend_from_slice(&out[..error.written]);
                         return (decoded, offset + pos + error.consumed);
                     }
@@ -562,6 +572,7 @@ mod tests {
                 .process(completion, as_uninit_mut(&mut out))
                 .unwrap_err();
             assert_eq!(error.kind, ErrorKind::CorruptStream);
+            assert_eq!(error.codec_subcode, 0);
             assert_eq!(error.consumed, position, "completion {completion:?}");
             assert_eq!(error.written, 0, "completion {completion:?}");
         }
@@ -630,6 +641,7 @@ mod tests {
         assert_eq!(progress, Progress::InputConsumed { written: 0 });
         let error = dec.process(b"\nQQ==", as_uninit_mut(&mut out)).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 1);
     }
 
@@ -659,6 +671,7 @@ mod tests {
             .process(b"YWJj\nA=BC", as_uninit_mut(&mut out))
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 5);
         assert_eq!(error.written, 3);
     }
@@ -675,6 +688,7 @@ mod tests {
             .process(b"YWJjA=BC", as_uninit_mut(&mut out))
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 4);
         assert_eq!(error.written, 3);
         assert_eq!(&out[..3], b"abc");

@@ -12,7 +12,7 @@ use crate::{
 /// Check that `kind` is a latched codec error. A latched error has
 /// the kind from `FailsAfterInner` and zero counts.
 pub(crate) fn assert_latched<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
-    let latched = Error::new(ErrorKind::CorruptStream, 0, 0);
+    let latched = Error::new(ErrorKind::CorruptStream, 0, 0, 0);
     assert!(
         matches!(kind, DriveErrorKind::Codec(e) if *e == latched),
         "expected the latched codec error, got {kind:?}",
@@ -20,12 +20,17 @@ pub(crate) fn assert_latched<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>
 }
 
 /// Check that `kind` is the error that replaces an overclaim:
-/// `ByteCountClaim` with zero counts.
+/// the kind `ContractViolation` and zero counts.
 pub(crate) fn assert_overclaim_rejected<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
-    let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
+    let violation = Error::new(
+        ErrorKind::ContractViolation,
+        Error::SUBCODE_BYTE_COUNT_CLAIM,
+        0,
+        0,
+    );
     assert!(
         matches!(kind, DriveErrorKind::Codec(e) if *e == violation),
-        "expected ByteCountClaim with zero counts, got {kind:?}",
+        "expected the byte count claim error with zero counts, got {kind:?}",
     );
 }
 
@@ -175,16 +180,17 @@ impl BoundaryAwareCodec for Scripted {
 ///   than the output.
 /// - `flush` and `finish` claim 1 byte more than the output.
 ///
-/// A driver must replace this error with `ByteCountClaim`.
+/// A driver must replace this error with the error of the kind
+/// `ContractViolation`.
 pub(crate) struct FailsWithOverclaim;
 
 impl DrainCodec for FailsWithOverclaim {
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        Err(Error::new(ErrorKind::CorruptStream, 0, output.len() + 1))
+        Err(Error::new(ErrorKind::CorruptStream, 0, 0, output.len() + 1))
     }
 
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        Err(Error::new(ErrorKind::CorruptStream, 0, output.len() + 1))
+        Err(Error::new(ErrorKind::CorruptStream, 0, 0, output.len() + 1))
     }
 }
 
@@ -192,6 +198,7 @@ impl Codec for FailsWithOverclaim {
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         Err(Error::new(
             ErrorKind::CorruptStream,
+            0,
             input.len() + 1,
             output.len() + 1,
         ))
@@ -203,7 +210,8 @@ impl Codec for FailsWithOverclaim {
 /// still count.
 ///
 /// The first `ok_calls` calls return the result of `inner` without
-/// change. Then every `process`, `flush` and `finish` call fails.
+/// change. Then every `process`, `flush` and `finish` call fails. The
+/// error has the kind `CorruptStream` and the subcode `codec_subcode`.
 ///
 /// Counts its calls.
 #[derive(Default)]
@@ -211,6 +219,7 @@ pub(crate) struct FailsAfterInner<C> {
     pub(crate) inner: C,
     pub(crate) ok_calls: usize,
     pub(crate) calls: usize,
+    pub(crate) codec_subcode: usize,
 }
 
 impl<C> FailsAfterInner<C> {
@@ -227,7 +236,12 @@ impl<C> FailsAfterInner<C> {
             DrainProgress::Done { written } => written,
             DrainProgress::OutputFilled => output_len,
         };
-        Err(Error::new(ErrorKind::CorruptStream, 0, written))
+        Err(Error::new(
+            ErrorKind::CorruptStream,
+            self.codec_subcode,
+            0,
+            written,
+        ))
     }
 }
 
@@ -254,7 +268,12 @@ impl<C: Codec> Codec for FailsAfterInner<C> {
             Progress::InputConsumed { written } => (input.len(), written),
             Progress::OutputFilled { consumed } => (consumed, output.len()),
         };
-        Err(Error::new(ErrorKind::CorruptStream, consumed, written))
+        Err(Error::new(
+            ErrorKind::CorruptStream,
+            self.codec_subcode,
+            consumed,
+            written,
+        ))
     }
 }
 

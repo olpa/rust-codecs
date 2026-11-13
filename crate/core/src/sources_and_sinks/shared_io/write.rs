@@ -25,7 +25,7 @@ use crate::{Codec, DriveError, DriveErrorKind, Sink};
 /// errors.)
 ///
 /// After [`pump_finish`], the function takes no bytes. It returns
-/// `DriveErrorKind::Codec` with `ErrorKind::AfterFinish`.
+/// `DriveErrorKind::Codec` with the kind `ErrorKind::ContractViolation`.
 pub fn pump_write<O: Sink, C: Codec>(
     pump: &mut Pump<C>,
     output: &mut O,
@@ -65,7 +65,7 @@ pub fn pump_write<O: Sink, C: Codec>(
 /// - If `output` is full before the codec is done, the function
 ///   returns `DriveErrorKind::SinkExhausted`.
 /// - After [`pump_finish`], the function returns
-///   `DriveErrorKind::Codec` with `ErrorKind::AfterFinish`.
+///   `DriveErrorKind::Codec` with the kind `ErrorKind::ContractViolation`.
 /// - The function returns all errors from `pump` and from `output`
 ///   without change.
 pub fn pump_flush<O: Sink, C: Codec>(
@@ -179,6 +179,7 @@ mod tests {
             inner: identity(),
             ok_calls: 1,
             calls: 0,
+            codec_subcode: 0,
         });
         let mut bytes = [0u8; 4];
         let mut sink = SliceSink::new(&mut bytes);
@@ -203,6 +204,7 @@ mod tests {
             inner: identity(),
             ok_calls: 3,
             calls: 0,
+            codec_subcode: 0,
         });
         let mut bytes = [0u8; 16];
         let mut sink = SliceSink::new(&mut bytes);
@@ -267,7 +269,12 @@ mod tests {
         pump_finish(&mut pump, &mut sink).unwrap();
         let total = pump.total();
 
-        let after_finish = DriveErrorKind::Codec(Error::new(ErrorKind::AfterFinish, 0, 0));
+        let after_finish = DriveErrorKind::Codec(Error::new(
+            ErrorKind::ContractViolation,
+            Error::SUBCODE_AFTER_FINISH,
+            0,
+            0,
+        ));
         let error = pump_write(&mut pump, &mut sink, b"b").unwrap_err();
         assert_eq!(error.kind, after_finish);
         let error = pump_flush(&mut pump, &mut sink).unwrap_err();

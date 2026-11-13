@@ -67,8 +67,24 @@ pub struct Chain<A, B, S> {
 /// and how the chain changes it, refer to `Chain::deliver_error_if_due`.
 #[derive(Clone, Copy, Debug)]
 enum Failure {
-    FirstPending(ErrorKind),
-    Latched(ErrorKind),
+    FirstPending {
+        kind: ErrorKind,
+        codec_subcode: usize,
+    },
+    LatchedFromFirst {
+        kind: ErrorKind,
+        codec_subcode: usize,
+    },
+    LatchedFromSecond {
+        kind: ErrorKind,
+        codec_subcode: usize,
+    },
+    LatchedFromBoth {
+        first_kind: ErrorKind,
+        first_codec_subcode: usize,
+        second_kind: ErrorKind,
+        second_codec_subcode: usize,
+    },
 }
 
 /// It shows the number of staged bytes, but not the bytes.
@@ -144,17 +160,60 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         (self.first, self.second, self.staging)
     }
 
+    /// Get the errors of `first` and `second`, as `(first, second)`.
+    ///
+    /// Each error has the kind and the subcode that the codec returned.
+    /// `consumed` and `written` are zero.
+    ///
+    /// There is one exception. If `first` or `second` does not follow
+    /// the contract, the slot has an error of the kind
+    /// [`crate::ErrorKind::ContractViolation`] that the core made,
+    /// not the error that the codec returned.
+    pub fn failures(&self) -> (Option<Error>, Option<Error>) {
+        match self.failure {
+            None => (None, None),
+            Some(
+                Failure::FirstPending {
+                    kind,
+                    codec_subcode,
+                }
+                | Failure::LatchedFromFirst {
+                    kind,
+                    codec_subcode,
+                },
+            ) => (Some(Error::new(kind, codec_subcode, 0, 0)), None),
+            Some(Failure::LatchedFromSecond {
+                kind,
+                codec_subcode,
+            }) => (None, Some(Error::new(kind, codec_subcode, 0, 0))),
+            Some(Failure::LatchedFromBoth {
+                first_kind,
+                first_codec_subcode,
+                second_kind,
+                second_codec_subcode,
+            }) => (
+                Some(Error::new(first_kind, first_codec_subcode, 0, 0)),
+                Some(Error::new(second_kind, second_codec_subcode, 0, 0)),
+            ),
+        }
+    }
+
     /// Report the error of the chain when it is due.
     ///
     /// The states of `Failure`:
     /// - `FirstPending`: `first` failed, and the chain did not return
     ///   the error yet.
-    /// - `Latched`: the chain returned the error.
+    /// - `LatchedFromFirst`: the chain returned the error of `first`.
+    /// - `LatchedFromSecond`: the chain returned the error of `second`.
+    /// - `LatchedFromBoth`: the chain returned the error of `first`.
+    ///   `second` also failed, and the chain keeps this error too.
     ///
     /// When this function reports a `FirstPending` error, it changes
-    /// the state to `Latched`.
+    /// the state to `LatchedFromFirst` or `LatchedFromBoth`.
     ///
-    /// A `Latched` error is always due. A repeated error moves no bytes.
+    /// A latched error is always due. The chain returns the kind and the
+    /// subcode of the reported error. `consumed` and `written` are zero:
+    /// a repeated error moves no bytes.
     ///
     /// A `FirstPending` error is due when these two conditions are true:
     /// - `first` failed.
@@ -173,36 +232,92 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
         out_pos: usize,
         consumed: usize,
     ) -> ErrorDelivery {
-        let kind = match self.failure {
+        let (kind, codec_subcode) = match self.failure {
             None => return ErrorDelivery::NotDue,
-            Some(Failure::Latched(kind)) => {
-                return ErrorDelivery::Report(Error::new(kind, 0, 0));
+            Some(
+                Failure::LatchedFromFirst {
+                    kind,
+                    codec_subcode,
+                }
+                | Failure::LatchedFromSecond {
+                    kind,
+                    codec_subcode,
+                }
+                | Failure::LatchedFromBoth {
+                    first_kind: kind,
+                    first_codec_subcode: codec_subcode,
+                    ..
+                },
+            ) => {
+                return ErrorDelivery::Report(Error::new(kind, codec_subcode, 0, 0));
             }
-            Some(Failure::FirstPending(kind)) => kind,
+            Some(Failure::FirstPending {
+                kind,
+                codec_subcode,
+            }) => (kind, codec_subcode),
         };
+        // Here the state is `FirstPending`. `second` must take all the
+        // valid bytes in `staging` first.
         if !self.is_staging_empty() {
             return ErrorDelivery::NotDue;
         }
         // Not `finish`: the stream has an error, so no trailer.
-        let written = match flush_step(&mut self.second, &mut output[out_pos..]) {
+        let (written, second_error) = match flush_step(&mut self.second, &mut output[out_pos..]) {
             Ok(DrainProgress::OutputFilled) => return ErrorDelivery::OutputFilled,
-            Ok(DrainProgress::Done { written }) => written,
+            Ok(DrainProgress::Done { written }) => (written, None),
             // Keep the bytes that `second` wrote before it failed.
             Err(error) => {
-                error
+                let error = error
                     .validated(0, output.len() - out_pos)
-                    .unwrap_or_else(|violation| violation)
-                    .written
+                    .unwrap_or_else(|violation| violation);
+                (error.written, Some(error))
             }
         };
-        self.failure = Some(Failure::Latched(kind));
-        ErrorDelivery::Report(Error::new(kind, consumed, out_pos + written))
+        self.failure = Some(match second_error {
+            None => Failure::LatchedFromFirst {
+                kind,
+                codec_subcode,
+            },
+            Some(second) => Failure::LatchedFromBoth {
+                first_kind: kind,
+                first_codec_subcode: codec_subcode,
+                second_kind: second.kind,
+                second_codec_subcode: second.codec_subcode,
+            },
+        });
+        ErrorDelivery::Report(Error::new(kind, codec_subcode, consumed, out_pos + written))
     }
 
-    /// Latch the kind of `error`. Return `error`.
-    fn latch(&mut self, error: Error) -> Error {
-        self.failure = Some(Failure::Latched(error.kind));
-        error
+    /// Latch an error of `second`. Return the error to report. If
+    /// `first` failed earlier, this is its error, with the counts of
+    /// `rebased`.
+    fn latch_second(&mut self, error: Error, rebased: Error) -> Error {
+        match self.failure {
+            Some(Failure::FirstPending {
+                kind,
+                codec_subcode,
+            }) => {
+                self.failure = Some(Failure::LatchedFromBoth {
+                    first_kind: kind,
+                    first_codec_subcode: codec_subcode,
+                    second_kind: error.kind,
+                    second_codec_subcode: error.codec_subcode,
+                });
+                Error::new(kind, codec_subcode, rebased.consumed, rebased.written)
+            }
+            None
+            | Some(
+                Failure::LatchedFromFirst { .. }
+                | Failure::LatchedFromSecond { .. }
+                | Failure::LatchedFromBoth { .. },
+            ) => {
+                self.failure = Some(Failure::LatchedFromSecond {
+                    kind: error.kind,
+                    codec_subcode: error.codec_subcode,
+                });
+                rebased
+            }
+        }
     }
 
     /// Rebase a validated error of `second` onto the position of the
@@ -210,7 +325,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// `second` wrote. `consumed` stays the same: `second` consumed
     /// bytes from `staging`, not from `input`.
     fn rebase_second_failed(error: Error, consumed: usize, pre_out_pos: usize) -> Error {
-        Error::new(error.kind, consumed, pre_out_pos + error.written)
+        Error::new(
+            error.kind,
+            error.codec_subcode,
+            consumed,
+            pre_out_pos + error.written,
+        )
     }
 
     fn is_staging_empty(&self) -> bool {
@@ -262,16 +382,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     .validated(staged_len, output_len)
                     .unwrap_or_else(|violation| violation);
                 self.drop_staged(error.consumed);
-                let error = Self::rebase_second_failed(error, caller_consumed_so_far, out_pos);
+                let rebased = Self::rebase_second_failed(error, caller_consumed_so_far, out_pos);
                 // If `first` failed earlier, its error wins. The bytes
                 // that `second` wrote before it failed stay in `written`.
-                let error = match self.failure {
-                    Some(Failure::FirstPending(kind)) => {
-                        Error::new(kind, error.consumed, error.written)
-                    }
-                    _ => error,
-                };
-                return Err(self.latch(error));
+                return Err(self.latch_second(error, rebased));
             }
         };
         self.drop_staged(moved.consumed);
@@ -337,8 +451,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                         let error = error
                             .validated(0, output.len() - out_pos)
                             .unwrap_or_else(|violation| violation);
-                        let error = Self::rebase_second_failed(error, 0, out_pos);
-                        return Err(self.latch(error));
+                        let rebased = Self::rebase_second_failed(error, 0, out_pos);
+                        return Err(self.latch_second(error, rebased));
                     }
                 };
                 return Ok(match moved {
@@ -374,7 +488,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     // The next pass drains the bytes of `first`. Then
                     // it returns the error.
                     self.stage_end = error.written;
-                    self.failure = Some(Failure::FirstPending(error.kind));
+                    self.failure = Some(Failure::FirstPending {
+                        kind: error.kind,
+                        codec_subcode: error.codec_subcode,
+                    });
                     continue;
                 }
             };
@@ -417,11 +534,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     /// Flush `first` through `staging` to `second`, then flush
     /// `second`.
     ///
-    /// On an error, the chain delivers as many bytes as possible
-    /// before it reports the error. After an error, the chain latches
-    /// it: see [`Chain::process`](Codec::process).
-    ///
-    /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
+    /// The chain handles errors as in [`Chain::process`](Codec::process).
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.finish_phase.check_open()?;
         let progress = self.drain_through(output, DrainMode::Flush);
@@ -440,12 +553,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     /// Finish `first` through `staging` to `second`, then finish
     /// `second`.
     ///
-    /// On an error, the chain delivers as many bytes as possible
-    /// before it reports the error. After an error, the chain latches
-    /// it: see [`Chain::process`](Codec::process).
-    ///
-    /// After `finish` reports `Done`, a repeated call writes nothing
-    /// and reports `Done` again.
+    /// The chain handles errors in the same way as
+    /// [`Chain::process`](Codec::process). But if `finish` reported `Done`,
+    /// a new call of `finish` is not an error. It writes no bytes and
+    /// reports `Done` again.
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         if self.finish_phase.is_finished() {
             return Ok(DrainProgress::Done { written: 0 });
@@ -470,6 +581,8 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     /// `second` sets the pace: `first` runs only after `second` has
     /// taken all the bytes in `staging`.
     ///
+    /// # Errors
+    ///
     /// On an error, the chain delivers as many bytes as possible
     /// before it reports the error. When `first` fails, the chain
     /// sends the bytes that `first` wrote through `second` into
@@ -478,12 +591,17 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     /// in this flush, the chain reports the error of `first`, because
     /// `first` failed first in time.
     ///
-    /// The chain latches the first error that it returns, from `first`
-    /// or from `second`. Later calls of `process`, `flush` and
-    /// `finish` return the same error kind, with no bytes moved. They
-    /// do not call `first` or `second`.
+    /// The contract of [`Codec`] does not say what a call does after
+    /// `finish` or after an error. This implementation defines both cases:
     ///
-    /// After `finish`, returns `Err` with [`ErrorKind::AfterFinish`].
+    /// After `finish`, `process` returns `Err` with the kind
+    /// [`crate::ErrorKind::ContractViolation`].
+    ///
+    /// The chain latches the error that it returns. A later call of
+    /// `process`, `flush` or `finish` returns the same error kind and
+    /// subcode. For a latched error, `consumed` and `written` are zero.
+    ///
+    /// See also [`Chain::failures`].
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
         self.finish_phase.check_open()?;
         // New input starts a new flush cycle.
@@ -557,7 +675,10 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
                     // it returns the error. The error reports the
                     // input that `first` consumed.
                     self.stage_end = error.written;
-                    self.failure = Some(Failure::FirstPending(error.kind));
+                    self.failure = Some(Failure::FirstPending {
+                        kind: error.kind,
+                        codec_subcode: error.codec_subcode,
+                    });
                     in_pos += error.consumed;
                     continue;
                 }
@@ -590,6 +711,10 @@ mod tests {
         stream_to_stream, Codec, DrainCodec, DrainProgress, DriveError, DriveErrorKind,
         EmptyBufferError, Error, ErrorKind, Progress, Pump, Sink, StreamError, StreamErrorKind,
     };
+
+    /// A subcode that is not zero, so a test can see when a latch drops
+    /// the subcode.
+    const DISTINCT_SUBCODE: usize = 0x1234;
 
     const INPUT: &str = "Hello, World! 123";
     // rot13(base64_enc(INPUT)): $ echo -n "Hello, World! 123" | base64 | rot13
@@ -870,7 +995,12 @@ mod tests {
         let progress = chain.finish(as_uninit_mut(&mut output)).unwrap();
         assert_eq!(progress, DrainProgress::Done { written: 0 });
 
-        let after_finish = Error::new(ErrorKind::AfterFinish, 0, 0);
+        let after_finish = Error::new(
+            ErrorKind::ContractViolation,
+            Error::SUBCODE_AFTER_FINISH,
+            0,
+            0,
+        );
         assert_eq!(
             chain.process(b"b", as_uninit_mut(&mut output)),
             Err(after_finish)
@@ -1017,14 +1147,16 @@ mod tests {
     fn lying_inner_codec_is_an_error_not_index_corruption() {
         // Unchecked, the overclaimed count would push the staging
         // indices out of bounds. Validation turns it into a
-        // ByteCountClaim error instead.
+        // byte count claim error instead.
         let chain = Chain::new(rot13(), Overclaimer, vec![0u8; 8]).unwrap();
         match encode_string(chain, INPUT).unwrap_err() {
             EncodeError::Stream(StreamError {
                 kind: StreamErrorKind::Codec(error),
                 ..
             }) => {
-                assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
+                // The counts are not part of this test.
+                assert_eq!(error.kind, ErrorKind::ContractViolation);
+                assert_eq!(error.codec_subcode, Error::SUBCODE_BYTE_COUNT_CLAIM);
             }
             other => panic!("expected a codec error, got {other:?}"),
         }
@@ -1064,12 +1196,25 @@ mod tests {
         let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]).unwrap();
         let mut output = [0u8; 8];
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
-        assert_eq!(error.kind, crate::ErrorKind::ByteCountClaim);
+        assert_eq!(
+            error,
+            Error::new(
+                ErrorKind::ContractViolation,
+                Error::SUBCODE_BYTE_COUNT_CLAIM,
+                0,
+                0
+            )
+        );
     }
 
     #[test]
     fn an_overclaim_in_an_error_of_first_is_rejected() {
-        let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
+        let violation = Error::new(
+            ErrorKind::ContractViolation,
+            Error::SUBCODE_BYTE_COUNT_CLAIM,
+            0,
+            0,
+        );
         let mut output = [0u8; 8];
 
         let mut chain = Chain::new(FailsWithOverclaim, identity(), vec![0u8; 4]).unwrap();
@@ -1093,11 +1238,27 @@ mod tests {
         let error = chain
             .process(b"abc", as_uninit_mut(&mut output))
             .unwrap_err();
-        assert_eq!(error, Error::new(ErrorKind::ByteCountClaim, 3, 0));
+        assert_eq!(
+            error,
+            Error::new(
+                ErrorKind::ContractViolation,
+                Error::SUBCODE_BYTE_COUNT_CLAIM,
+                3,
+                0
+            )
+        );
 
         let mut chain = Chain::new(identity(), FailsWithOverclaim, vec![0u8; 4]).unwrap();
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
-        assert_eq!(error, Error::new(ErrorKind::ByteCountClaim, 0, 0));
+        assert_eq!(
+            error,
+            Error::new(
+                ErrorKind::ContractViolation,
+                Error::SUBCODE_BYTE_COUNT_CLAIM,
+                0,
+                0
+            )
+        );
     }
 
     /// Fails once, echoing 1 byte of real input in the error, then
@@ -1129,7 +1290,7 @@ mod tests {
             if !self.failed {
                 self.failed = true;
                 copy_to_uninit(&mut output[..1], &input[..1]);
-                return Err(Error::new(crate::ErrorKind::CorruptStream, 1, 1));
+                return Err(Error::new(crate::ErrorKind::CorruptStream, 0, 1, 1));
             }
             self.inner.process(input, output)
         }
@@ -1142,6 +1303,7 @@ mod tests {
     struct FailsAtByte {
         marker: u8,
         kind: ErrorKind,
+        codec_subcode: usize,
     }
 
     impl FailsAtByte {
@@ -1149,13 +1311,15 @@ mod tests {
             Self {
                 marker,
                 kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
             }
         }
 
-        fn unexpected_end_at(marker: u8) -> Self {
+        fn distinct_subcode_at(marker: u8) -> Self {
             Self {
                 marker,
-                kind: ErrorKind::UnexpectedEnd,
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: DISTINCT_SUBCODE,
             }
         }
     }
@@ -1183,7 +1347,7 @@ mod tests {
             let n = good.min(output.len());
             copy_to_uninit(&mut output[..n], &input[..n]);
             if n == good && n < input.len() {
-                return Err(Error::new(self.kind, n, n));
+                return Err(Error::new(self.kind, self.codec_subcode, n, n));
             }
             if n == input.len() {
                 Ok(Progress::InputConsumed { written: n })
@@ -1208,7 +1372,7 @@ mod tests {
             copy_to_uninit(&mut output[..n], &left[..n]);
             self.emitted += n;
             if self.emitted == self.text.len() {
-                return Err(Error::new(ErrorKind::CorruptStream, 0, n));
+                return Err(Error::new(ErrorKind::CorruptStream, 0, 0, n));
             }
             Ok(DrainProgress::OutputFilled)
         }
@@ -1268,9 +1432,11 @@ mod tests {
         }
     }
 
-    fn codec_error_kind(error: &DriveError<Infallible, Infallible>) -> ErrorKind {
+    /// The kind and the subcode of the codec error. The tests use the
+    /// subcode to tell the error of `first` from the error of `second`.
+    fn codec_error_cause(error: &DriveError<Infallible, Infallible>) -> (ErrorKind, usize) {
         match &error.kind {
-            DriveErrorKind::Codec(error) => error.kind,
+            DriveErrorKind::Codec(error) => (error.kind, error.codec_subcode),
             other => panic!("not a codec error: {other:?}"),
         }
     }
@@ -1294,7 +1460,7 @@ mod tests {
         let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), identity(), vec![0u8; 64]).unwrap();
         let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
         let error = process_until_error(chain, b"abcde!!!!", &mut sink);
-        assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream);
+        assert_eq!(codec_error_cause(&error), (ErrorKind::CorruptStream, 0));
         assert_eq!(sink.bytes, b"abcde");
         assert_eq!(error.moved.consumed, 5);
     }
@@ -1311,7 +1477,11 @@ mod tests {
             let chain = Chain::new(first, identity(), vec![0u8; 64]).unwrap();
             let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
             let error = drain_until_error(chain, mode, &mut sink);
-            assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream, "{name}");
+            assert_eq!(
+                codec_error_cause(&error),
+                (ErrorKind::CorruptStream, 0),
+                "{name}"
+            );
             assert_eq!(sink.bytes, b"01234", "{name}");
             assert_eq!(error.moved.consumed, 0, "{name}");
         }
@@ -1324,11 +1494,11 @@ mod tests {
     /// failed.
     #[test]
     fn process_reports_the_error_of_first_when_second_fails_on_its_bytes() {
-        let second = FailsAtByte::unexpected_end_at(b'e');
+        let second = FailsAtByte::distinct_subcode_at(b'e');
         let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), second, vec![0u8; 64]).unwrap();
         let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
         let error = process_until_error(chain, b"abcdef!!!!", &mut sink);
-        assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream);
+        assert_eq!(codec_error_cause(&error), (ErrorKind::CorruptStream, 0));
         assert_eq!(sink.bytes, b"abcd");
     }
 
@@ -1341,11 +1511,15 @@ mod tests {
                 text: b"012345",
                 emitted: 0,
             };
-            let second = FailsAtByte::unexpected_end_at(b'4');
+            let second = FailsAtByte::distinct_subcode_at(b'4');
             let chain = Chain::new(first, second, vec![0u8; 64]).unwrap();
             let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
             let error = drain_until_error(chain, mode, &mut sink);
-            assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream, "{name}");
+            assert_eq!(
+                codec_error_cause(&error),
+                (ErrorKind::CorruptStream, 0),
+                "{name}"
+            );
             assert_eq!(sink.bytes, b"0123", "{name}");
         }
     }
@@ -1363,7 +1537,7 @@ mod tests {
         let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), second, vec![0u8; 64]).unwrap();
         let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
         let error = process_until_error(chain, b"a!", &mut sink);
-        assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream);
+        assert_eq!(codec_error_cause(&error), (ErrorKind::CorruptStream, 0));
         assert_eq!(sink.bytes, b"XX");
         assert_eq!(error.moved.consumed, 1);
     }
@@ -1384,7 +1558,11 @@ mod tests {
             let chain = Chain::new(first, second, vec![0u8; 64]).unwrap();
             let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
             let error = drain_until_error(chain, mode, &mut sink);
-            assert_eq!(codec_error_kind(&error), ErrorKind::CorruptStream, "{name}");
+            assert_eq!(
+                codec_error_cause(&error),
+                (ErrorKind::CorruptStream, 0),
+                "{name}"
+            );
             assert_eq!(sink.bytes, b"XX", "{name}");
             assert_eq!(error.moved.consumed, 0, "{name}");
         }
@@ -1402,11 +1580,14 @@ mod tests {
             text: b"XY",
             emitted: 0,
         };
-        let first = FailsAtByte::unexpected_end_at(b'!');
+        let first = FailsAtByte::distinct_subcode_at(b'!');
         let chain = Chain::new(first, second, vec![0u8; 64]).unwrap();
         let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
         let error = process_until_error(chain, b"a!", &mut sink);
-        assert_eq!(codec_error_kind(&error), ErrorKind::UnexpectedEnd);
+        assert_eq!(
+            codec_error_cause(&error),
+            (ErrorKind::CorruptStream, DISTINCT_SUBCODE)
+        );
         assert_eq!(sink.bytes, b"XY");
         assert_eq!(error.moved.consumed, 1);
     }
@@ -1427,15 +1608,46 @@ mod tests {
         let error = chain
             .process(b"abc", as_uninit_mut(&mut output))
             .unwrap_err();
-        assert_eq!(error, Error::new(crate::ErrorKind::CorruptStream, 3, 1));
+        assert_eq!(error, Error::new(crate::ErrorKind::CorruptStream, 0, 3, 1));
         assert_eq!(&output[..1], b"a");
 
         // The chain latched the error. It does not offer `bc` to
         // `second` again.
         assert_eq!(
             chain.process(b"", as_uninit_mut(&mut output)),
-            Err(Error::new(crate::ErrorKind::CorruptStream, 0, 0))
+            Err(Error::new(crate::ErrorKind::CorruptStream, 0, 0, 0))
         );
+    }
+
+    /// `failures` names the codec that failed, also after the chain
+    /// reported the error. Both slots have an error when `second` fails
+    /// on the bytes of `first`.
+    #[test]
+    fn failures_tell_which_codec_failed() {
+        let mut output = [0; 16];
+        let from_first = Error::new(ErrorKind::CorruptStream, 0, 0, 0);
+        let from_second = Error::new(ErrorKind::CorruptStream, DISTINCT_SUBCODE, 0, 0);
+
+        let chain = Chain::new(identity(), identity(), vec![0; 8]).unwrap();
+        assert_eq!(chain.failures(), (None, None));
+
+        let first = FailsAtByte::corrupt_at(b'!');
+        let mut chain = Chain::new(first, identity(), vec![0; 8]).unwrap();
+        let _ = chain.process(b"ab!", as_uninit_mut(&mut output));
+        assert_eq!(chain.failures(), (Some(from_first), None));
+
+        let second = FailsAtByte::distinct_subcode_at(b'!');
+        let mut chain = Chain::new(identity(), second, vec![0; 8]).unwrap();
+        let _ = chain.process(b"ab!", as_uninit_mut(&mut output));
+        assert_eq!(chain.failures(), (None, Some(from_second)));
+
+        let first = FailsAtByte::corrupt_at(b'!');
+        let second = FailsAtByte::distinct_subcode_at(b'b');
+        let mut chain = Chain::new(first, second, vec![0; 8]).unwrap();
+        let _ = chain.process(b"abc!", as_uninit_mut(&mut output));
+        assert_eq!(chain.failures(), (Some(from_first), Some(from_second)));
+        let _ = chain.process(b"abc!", as_uninit_mut(&mut output));
+        assert_eq!(chain.failures(), (Some(from_first), Some(from_second)));
     }
 
     #[test]
@@ -1583,7 +1795,7 @@ mod tests {
         fn enter(&mut self) -> Result<(), Error> {
             self.calls += 1;
             if self.calls == 1 {
-                Err(Error::new(ErrorKind::CorruptStream, 0, 0))
+                Err(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
             } else {
                 Ok(())
             }
@@ -1616,7 +1828,7 @@ mod tests {
     /// A repeated call returns this error: the kind of the first error,
     /// and no bytes moved.
     fn repeated_error() -> Error {
-        Error::new(ErrorKind::CorruptStream, 0, 0)
+        Error::new(ErrorKind::CorruptStream, 0, 0, 0)
     }
 
     #[test]

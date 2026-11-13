@@ -22,6 +22,11 @@ use core::mem::MaybeUninit;
 use crate::uninit::copy_to_uninit;
 use crate::{Error, ErrorKind};
 
+/// The stream ended where it should not have.
+pub(super) const SUBCODE_UNEXPECTED_END: usize = 1;
+/// The codec's internal carry buffer couldn't hold an atomic data unit.
+pub(super) const SUBCODE_CODEC_BUFFER_TOO_SMALL: usize = 2;
+
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
 // of the base64 algorithm itself, not a detail of any one alphabet or
 // padding config. It's also a documented requirement of every `Engine`
@@ -200,21 +205,39 @@ impl<const N: usize> Default for PendingOutput<N> {
 /// Render one transform unit into `pending_output` via `render`
 /// (`Engine::decode_slice`/`encode_slice`), staging it for `drain`.
 /// Shared by `Base64Dec`/`Base64Enc`'s `stage_group`, which differ only
-/// in which `Engine` method they pass as `render` and which
-/// `ErrorKind` a rendering failure maps to.
+/// in which `Engine` method they pass as `render` and which `Error`
+/// a rendering failure maps to.
+///
+/// The error that `render` returns can have any counts. This function
+/// replaces them with `consumed` and `written`. The kind and the
+/// subcode stay the same.
 pub(super) fn stage_group<const N: usize>(
     pending_output: &mut PendingOutput<N>,
     consumed: usize,
     written: usize,
-    render: impl FnOnce(&mut [u8]) -> Result<usize, ErrorKind>,
+    render: impl FnOnce(&mut [u8]) -> Result<usize, Error>,
 ) -> Result<(), Error> {
-    let buffer = pending_output
-        .buffer()
-        .map_err(|_| Error::new(ErrorKind::CodecBufferTooSmall, consumed, written))?;
-    let n = render(buffer).map_err(|kind| Error::new(kind, consumed, written))?;
-    pending_output
-        .set_len(n)
-        .map_err(|_| Error::new(ErrorKind::CodecBufferTooSmall, consumed, written))
+    let buffer = pending_output.buffer().map_err(|_| {
+        Error::new(
+            ErrorKind::BehindLimits,
+            SUBCODE_CODEC_BUFFER_TOO_SMALL,
+            consumed,
+            written,
+        )
+    })?;
+    let n = render(buffer).map_err(|error| Error {
+        consumed,
+        written,
+        ..error
+    })?;
+    pending_output.set_len(n).map_err(|_| {
+        Error::new(
+            ErrorKind::BehindLimits,
+            SUBCODE_CODEC_BUFFER_TOO_SMALL,
+            consumed,
+            written,
+        )
+    })
 }
 
 #[cfg(test)]

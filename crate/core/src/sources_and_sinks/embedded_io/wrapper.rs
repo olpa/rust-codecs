@@ -41,14 +41,14 @@ impl<E: embedded_io::Error> embedded_io::Error for StreamError<E> {
         match &self.kind {
             StreamErrorKind::Io(error) => error.kind(),
             StreamErrorKind::Codec(error) => match error.kind {
-                ErrorKind::CorruptStream | ErrorKind::UnexpectedEnd => {
-                    embedded_io::ErrorKind::InvalidData
-                }
+                ErrorKind::CorruptStream => embedded_io::ErrorKind::InvalidData,
+                ErrorKind::Unsupported => embedded_io::ErrorKind::Unsupported,
+                // `embedded_io` has no kind for a limit. The data is not
+                // at fault.
+                ErrorKind::BehindLimits => embedded_io::ErrorKind::Other,
                 // Bugs in the codec or in the caller. The data is not at
                 // fault.
-                ErrorKind::CodecBufferTooSmall
-                | ErrorKind::ByteCountClaim
-                | ErrorKind::AfterFinish => embedded_io::ErrorKind::Other,
+                ErrorKind::ContractViolation => embedded_io::ErrorKind::Other,
             },
             StreamErrorKind::ZeroWrite | StreamErrorKind::SinkExhausted => {
                 embedded_io::ErrorKind::WriteZero
@@ -330,6 +330,7 @@ mod tests {
                 inner: identity(),
                 ok_calls: 0,
                 calls: 0,
+                codec_subcode: 0,
             };
             let writer = CodecWriter::new(bytes, codec, [0u8; 8]).unwrap();
 

@@ -162,8 +162,8 @@ pub(crate) enum PumpDrain {
 /// A bufferless lifecycle wrapper around a codec: processes input
 /// until the stream ends, then drains what's owed.
 ///
-/// After `pump_finish`, `pump_write` and `pump_flush` fail with
-/// [`ErrorKind::AfterFinish`].
+/// After `pump_finish`, `pump_write` and `pump_flush` fail with an
+/// error of the kind [`crate::ErrorKind::ContractViolation`].
 ///
 /// Used by [`stream_to_stream`] and by I/O backend wrappers.
 ///
@@ -185,7 +185,7 @@ pub struct Pump<C> {
     ///
     /// After `Err`, the codec state is not defined. So the pump does
     /// not call the codec again. It returns this error instead.
-    failed: Option<ErrorKind>,
+    failed: Option<(ErrorKind, usize)>,
     /// The bytes that the pump moved since its creation. The pump counts a
     /// byte after the source or the sink has taken it.
     total: TransferCounts,
@@ -229,7 +229,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// The counts are zero: they describe the call that returns the
     /// error, and that call moves no bytes.
     pub(crate) fn failure(&self) -> Option<Error> {
-        self.failed.map(|kind| Error::new(kind, 0, 0))
+        self.failed
+            .map(|(kind, codec_subcode)| Error::new(kind, codec_subcode, 0, 0))
     }
 
     /// The bytes that the pump moved since its creation. See [`Self::total`].
@@ -272,7 +273,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// before it does anything that can fail. Source and sink errors
     /// are not latched: they can be temporary.
     fn latch_failure(&mut self, error: &Error) {
-        self.failed = Some(error.kind);
+        self.failed = Some((error.kind, error.codec_subcode));
     }
 
     /// Drive the codec by repeatedly pulling chunks from `input` and
@@ -317,9 +318,11 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// progress it validly reported.
     ///
     /// After a codec error, the pump latches it. Later calls return
-    /// the error and do not call the codec.
+    /// the same error, with `consumed` and `written` set to zero. They
+    /// do not call the codec.
     ///
-    /// After `finish_to`, fails with [`ErrorKind::AfterFinish`].
+    /// After `finish_to`, fails with an error of the kind
+    /// [`crate::ErrorKind::ContractViolation`].
     pub(crate) fn transfer_step<I: Source, O: Sink>(
         &mut self,
         input: &mut I,
@@ -432,7 +435,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// Flush the codec into `output`. The codec decides how much of its
     /// held output to write. The codec stream does not end.
     ///
-    /// After `finish_to`, fails with [`ErrorKind::AfterFinish`].
+    /// After `finish_to`, fails with an error of the kind
+    /// [`crate::ErrorKind::ContractViolation`].
     pub(crate) fn flush_to<O: Sink>(
         &mut self,
         output: &mut O,
@@ -470,7 +474,8 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// whatever progress it validly reported.
     ///
     /// After a codec error, the pump latches it. Later calls return
-    /// the error and do not call the codec.
+    /// the same error, with `consumed` and `written` set to zero. They
+    /// do not call the codec.
     fn drain_loop<O: Sink>(
         &mut self,
         output: &mut O,
@@ -569,6 +574,10 @@ mod tests {
         BoundaryAwareProgress, DrainProgress, DriveErrorKind, Error, ErrorKind, Sink,
         TransferCounts,
     };
+
+    /// A subcode that is not zero, so a test can see when a latch drops
+    /// the subcode.
+    const DISTINCT_SUBCODE: usize = 0x1234;
 
     /// A `Sink` that always gives an empty slice and never reports a
     /// full sink. This sink does not obey the `Sink::spare` contract.
@@ -702,6 +711,7 @@ mod tests {
             error.kind,
             DriveErrorKind::Codec(Error {
                 kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
                 consumed: 3,
                 written: 2
             })
@@ -739,6 +749,39 @@ mod tests {
         assert_eq!(pump.get_ref().calls, 1);
         assert_eq!(input.consumed(), 3);
         assert_eq!(output.written, 2);
+    }
+
+    #[test]
+    fn the_latch_keeps_the_kind_and_the_subcode() {
+        let mut input = SliceSource::new(b"abc");
+        let mut output = RecordingSink {
+            bytes: [0; 8],
+            written: 0,
+        };
+        let mut pump = Pump::new(FailsAfterInner {
+            inner: identity(),
+            codec_subcode: DISTINCT_SUBCODE,
+            ..Default::default()
+        });
+        let expected =
+            DriveErrorKind::Codec(Error::new(ErrorKind::CorruptStream, DISTINCT_SUBCODE, 0, 0));
+
+        // The first error has the counts of the failing call. Set them
+        // to zero, as in a latched error.
+        let mut error = pump.transfer_from(&mut input, &mut output).unwrap_err();
+        if let DriveErrorKind::Codec(codec_error) = &mut error.kind {
+            codec_error.consumed = 0;
+            codec_error.written = 0;
+        }
+        assert_eq!(error.kind, expected);
+        // The pump does not call the codec again. It returns the
+        // latched error, with the same kind and the same subcode.
+        let error = pump.transfer_from(&mut input, &mut output).unwrap_err();
+        assert_eq!(error.kind, expected);
+        let error = pump.flush_to(&mut output).unwrap_err();
+        assert_eq!(error.kind, expected);
+        let error = pump.finish_to(&mut output).unwrap_err();
+        assert_eq!(error.kind, expected);
     }
 
     #[test]
@@ -797,6 +840,7 @@ mod tests {
             inner: identity(),
             ok_calls: 3,
             calls: 0,
+            codec_subcode: 0,
         });
         let mut bytes = [0u8; 16];
         let mut output = SliceSink::new(&mut bytes);
@@ -824,7 +868,7 @@ mod tests {
         );
         assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 0, 0))
+            Some(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
         );
     }
 
@@ -904,6 +948,7 @@ mod tests {
             error.kind,
             DriveErrorKind::Codec(Error {
                 kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
                 consumed: 0,
                 written: 1
             })
@@ -1004,6 +1049,7 @@ mod tests {
             },
             ok_calls: 2,
             calls: 0,
+            codec_subcode: 0,
         })
     }
 
@@ -1030,7 +1076,7 @@ mod tests {
         );
         assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 0, 0))
+            Some(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
         );
     }
 
@@ -1164,7 +1210,7 @@ mod tests {
         );
         assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 0, 0))
+            Some(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
         );
     }
 

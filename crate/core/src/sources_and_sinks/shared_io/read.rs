@@ -351,7 +351,7 @@ mod tests {
         let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
         assert!(matches!(
             error.kind,
-            DriveErrorKind::Codec(e) if e == Error::new(ErrorKind::CorruptStream, 0, 0)
+            DriveErrorKind::Codec(e) if e == Error::new(ErrorKind::CorruptStream, 0, 0, 0)
         ));
         assert_eq!(pump.get_ref().calls, 1);
     }
@@ -417,6 +417,7 @@ mod tests {
             inner: identity(),
             ok_calls: 3,
             calls: 0,
+            codec_subcode: 0,
         });
         let mut buf = [0u8; 16];
 
@@ -462,6 +463,7 @@ mod tests {
             inner: identity(),
             ok_calls: 5,
             calls: 0,
+            codec_subcode: 0,
         });
         let mut buf = [0u8; 16];
 
