@@ -24,8 +24,13 @@ use crate::{Error, ErrorKind};
 
 /// The stream ended where it should not have.
 pub(super) const SUBCODE_UNEXPECTED_END: usize = 1;
-/// The codec's internal carry buffer couldn't hold an atomic data unit.
-pub(super) const SUBCODE_CODEC_BUFFER_TOO_SMALL: usize = 2;
+/// A bug in the codec: an internal buffer does not fit a unit of
+/// output, or the codec uses the buffer before it is empty.
+///
+/// The kind is `ContractViolation`, not `BehindLimits`. The buffer
+/// holds one base64 group, and a group always has the same size. No
+/// input and no setting can make the buffer too small. Only a bug can.
+pub(super) const SUBCODE_INTERNAL_BUFFER: usize = 2;
 
 // 3 bytes (24 bits) = four 6-bit groups, always — this ratio is part
 // of the base64 algorithm itself, not a detail of any one alphabet or
@@ -219,8 +224,8 @@ pub(super) fn stage_group<const N: usize>(
 ) -> Result<(), Error> {
     let buffer = pending_output.buffer().map_err(|_| {
         Error::new(
-            ErrorKind::BehindLimits,
-            SUBCODE_CODEC_BUFFER_TOO_SMALL,
+            ErrorKind::ContractViolation,
+            SUBCODE_INTERNAL_BUFFER,
             consumed,
             written,
         )
@@ -232,8 +237,8 @@ pub(super) fn stage_group<const N: usize>(
     })?;
     pending_output.set_len(n).map_err(|_| {
         Error::new(
-            ErrorKind::BehindLimits,
-            SUBCODE_CODEC_BUFFER_TOO_SMALL,
+            ErrorKind::ContractViolation,
+            SUBCODE_INTERNAL_BUFFER,
             consumed,
             written,
         )
@@ -242,8 +247,9 @@ pub(super) fn stage_group<const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingOutput, PendingOutputError};
+    use super::{stage_group, PendingOutput, PendingOutputError, SUBCODE_INTERNAL_BUFFER};
     use crate::uninit::as_uninit_mut;
+    use crate::{Error, ErrorKind};
 
     fn fill(pending: &mut PendingOutput<4>, bytes: &[u8]) -> Result<(), PendingOutputError> {
         pending.buffer()?[..bytes.len()].copy_from_slice(bytes);
@@ -280,5 +286,24 @@ mod tests {
     fn committed_output_larger_than_capacity_is_an_error() {
         let mut pending = PendingOutput::<4>::new();
         assert_eq!(pending.set_len(5), Err(PendingOutputError::OutputTooLarge));
+    }
+
+    /// A failure of the internal buffer is a bug in the codec, not a
+    /// limit that the user can change.
+    #[test]
+    fn stage_group_reports_a_buffer_failure_as_a_contract_violation() {
+        let bug = Err(Error::new(
+            ErrorKind::ContractViolation,
+            SUBCODE_INTERNAL_BUFFER,
+            7,
+            9,
+        ));
+
+        let mut pending = PendingOutput::<4>::new();
+        fill(&mut pending, b"abcd").unwrap();
+        assert_eq!(stage_group(&mut pending, 7, 9, |_| Ok(0)), bug);
+
+        let mut pending = PendingOutput::<4>::new();
+        assert_eq!(stage_group(&mut pending, 7, 9, |_| Ok(5)), bug);
     }
 }

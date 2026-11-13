@@ -56,8 +56,8 @@ impl<E: Engine> Base64Enc<E> {
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
             engine.encode_slice(group, buffer).map_err(|_| {
                 Error::new(
-                    ErrorKind::BehindLimits,
-                    base64_shared::SUBCODE_CODEC_BUFFER_TOO_SMALL,
+                    ErrorKind::ContractViolation,
+                    base64_shared::SUBCODE_INTERNAL_BUFFER,
                     0,
                     0,
                 )
@@ -153,8 +153,8 @@ impl<E: Engine> Codec for Base64Enc<E> {
                 .encode_slice(&input[in_pos..in_pos + in_bytes], dst)
                 .map_err(|_| {
                     Error::new(
-                        ErrorKind::BehindLimits,
-                        base64_shared::SUBCODE_CODEC_BUFFER_TOO_SMALL,
+                        ErrorKind::ContractViolation,
+                        base64_shared::SUBCODE_INTERNAL_BUFFER,
                         in_pos,
                         out_pos,
                     )
