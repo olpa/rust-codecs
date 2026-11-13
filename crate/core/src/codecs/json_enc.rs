@@ -121,12 +121,12 @@ impl DrainCodec for JsonEnc {
         // full input consumed, which keeps the driver calling `process`
         // again instead of `finish`.
         if self.pending_literal_len > 0 {
-            return Err(Error::new(
-                ErrorKind::CorruptStream,
-                SUBCODE_UNEXPECTED_END,
-                0,
-                0,
-            ));
+            return Err(Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: SUBCODE_UNEXPECTED_END,
+                consumed: 0,
+                written: 0,
+            });
         }
         let (_, written) = self.flush_pending(&[], output)?;
         if matches!(self.pending_escape, PendingEscape::Started(_)) {

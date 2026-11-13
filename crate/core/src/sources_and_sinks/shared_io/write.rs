@@ -269,12 +269,12 @@ mod tests {
         pump_finish(&mut pump, &mut sink).unwrap();
         let total = pump.total();
 
-        let after_finish = DriveErrorKind::Codec(Error::new(
-            ErrorKind::ContractViolation,
-            Error::SUBCODE_AFTER_FINISH,
-            0,
-            0,
-        ));
+        let after_finish = DriveErrorKind::Codec(Error {
+            kind: ErrorKind::ContractViolation,
+            codec_subcode: Error::SUBCODE_AFTER_FINISH,
+            consumed: 0,
+            written: 0,
+        });
         let error = pump_write(&mut pump, &mut sink, b"b").unwrap_err();
         assert_eq!(error.kind, after_finish);
         let error = pump_flush(&mut pump, &mut sink).unwrap_err();

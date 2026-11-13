@@ -77,14 +77,19 @@ impl<E: Engine> Base64Dec<E> {
         // enough across lengths to key off instead (e.g. a 2-byte tail
         // reports `InvalidPadding`, not `InvalidLength`).
         let failure = if group.len() < ENCODED_GROUP {
-            Error::new(
-                ErrorKind::CorruptStream,
-                base64_shared::SUBCODE_UNEXPECTED_END,
-                0,
-                0,
-            )
+            Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: base64_shared::SUBCODE_UNEXPECTED_END,
+                consumed: 0,
+                written: 0,
+            }
         } else {
-            Error::new(ErrorKind::CorruptStream, 0, 0, 0)
+            Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
+                consumed: 0,
+                written: 0,
+            }
         };
         base64_shared::stage_group(&mut self.pending_output, consumed, written, |buffer| {
             engine.decode_slice(group, buffer).map_err(|_| failure)
@@ -200,7 +205,12 @@ impl<E: Engine> Base64Dec<E> {
 
         if self.done {
             if !input.is_empty() {
-                return Err(Error::new(ErrorKind::CorruptStream, 0, 0, out_pos));
+                return Err(Error {
+                    kind: ErrorKind::CorruptStream,
+                    codec_subcode: 0,
+                    consumed: 0,
+                    written: out_pos,
+                });
             }
             return Ok(Progress::InputConsumed { written: out_pos });
         }
@@ -232,7 +242,12 @@ impl<E: Engine> Base64Dec<E> {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
             if self.done && in_pos < input.len() {
-                return Err(Error::new(ErrorKind::CorruptStream, 0, in_pos, out_pos));
+                return Err(Error {
+                    kind: ErrorKind::CorruptStream,
+                    codec_subcode: 0,
+                    consumed: in_pos,
+                    written: out_pos,
+                });
             }
         }
 
@@ -266,7 +281,12 @@ impl<E: Engine> Base64Dec<E> {
                 if written < out_bytes {
                     self.done = true;
                     if in_pos < input.len() {
-                        return Err(Error::new(ErrorKind::CorruptStream, 0, in_pos, out_pos));
+                        return Err(Error {
+                            kind: ErrorKind::CorruptStream,
+                            codec_subcode: 0,
+                            consumed: in_pos,
+                            written: out_pos,
+                        });
                     }
                     return Ok(Progress::InputConsumed { written: out_pos });
                 }
@@ -298,7 +318,12 @@ impl<E: Engine> Base64Dec<E> {
                 return Ok(Progress::OutputFilled { consumed: in_pos });
             }
             if self.done && in_pos < input.len() {
-                return Err(Error::new(ErrorKind::CorruptStream, 0, in_pos, out_pos));
+                return Err(Error {
+                    kind: ErrorKind::CorruptStream,
+                    codec_subcode: 0,
+                    consumed: in_pos,
+                    written: out_pos,
+                });
             }
         }
 

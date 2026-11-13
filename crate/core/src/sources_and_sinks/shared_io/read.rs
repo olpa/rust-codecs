@@ -351,7 +351,7 @@ mod tests {
         let error = boundary_aware_pump_read(&mut pump, &mut source, &mut buf).unwrap_err();
         assert!(matches!(
             error.kind,
-            DriveErrorKind::Codec(e) if e == Error::new(ErrorKind::CorruptStream, 0, 0, 0)
+            DriveErrorKind::Codec(e) if e == Error { kind: ErrorKind::CorruptStream, codec_subcode: 0, consumed: 0, written: 0 }
         ));
         assert_eq!(pump.get_ref().calls, 1);
     }

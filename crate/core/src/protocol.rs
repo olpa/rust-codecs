@@ -252,12 +252,12 @@ impl Progress {
         if honest {
             Ok(self)
         } else {
-            Err(Error::new(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                0,
-                0,
-            ))
+            Err(Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            })
         }
     }
 }
@@ -280,12 +280,12 @@ impl BoundaryAwareProgress {
         if honest {
             Ok(self)
         } else {
-            Err(Error::new(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                0,
-                0,
-            ))
+            Err(Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            })
         }
     }
 }
@@ -294,12 +294,12 @@ impl DrainProgress {
     /// The [`Progress::validated`] counterpart for `flush` and `finish`.
     pub fn validated(self, output_len: usize) -> Result<DrainProgress, Error> {
         match self {
-            DrainProgress::Done { written } if written > output_len => Err(Error::new(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                0,
-                0,
-            )),
+            DrainProgress::Done { written } if written > output_len => Err(Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            }),
             honest => Ok(honest),
         }
     }
@@ -448,26 +448,17 @@ impl Error {
     /// The codec was called after `finish`, but it does not allow this.
     pub(crate) const SUBCODE_AFTER_FINISH: usize = 0xFFF3;
 
-    pub fn new(kind: ErrorKind, codec_subcode: usize, consumed: usize, written: usize) -> Self {
-        Self {
-            kind,
-            codec_subcode,
-            consumed,
-            written,
-        }
-    }
-
     /// The [`Progress::validated`] counterpart for a failing call.
     pub fn validated(self, input_len: usize, output_len: usize) -> Result<Self, Self> {
         if self.consumed <= input_len && self.written <= output_len {
             Ok(self)
         } else {
-            Err(Self::new(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                0,
-                0,
-            ))
+            Err(Self {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            })
         }
     }
 }

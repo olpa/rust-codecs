@@ -222,26 +222,22 @@ pub(super) fn stage_group<const N: usize>(
     written: usize,
     render: impl FnOnce(&mut [u8]) -> Result<usize, Error>,
 ) -> Result<(), Error> {
-    let buffer = pending_output.buffer().map_err(|_| {
-        Error::new(
-            ErrorKind::ContractViolation,
-            SUBCODE_INTERNAL_BUFFER,
-            consumed,
-            written,
-        )
+    let buffer = pending_output.buffer().map_err(|_| Error {
+        kind: ErrorKind::ContractViolation,
+        codec_subcode: SUBCODE_INTERNAL_BUFFER,
+        consumed,
+        written,
     })?;
     let n = render(buffer).map_err(|error| Error {
         consumed,
         written,
         ..error
     })?;
-    pending_output.set_len(n).map_err(|_| {
-        Error::new(
-            ErrorKind::ContractViolation,
-            SUBCODE_INTERNAL_BUFFER,
-            consumed,
-            written,
-        )
+    pending_output.set_len(n).map_err(|_| Error {
+        kind: ErrorKind::ContractViolation,
+        codec_subcode: SUBCODE_INTERNAL_BUFFER,
+        consumed,
+        written,
     })
 }
 
@@ -292,12 +288,12 @@ mod tests {
     /// limit that the user can change.
     #[test]
     fn stage_group_reports_a_buffer_failure_as_a_contract_violation() {
-        let bug = Err(Error::new(
-            ErrorKind::ContractViolation,
-            SUBCODE_INTERNAL_BUFFER,
-            7,
-            9,
-        ));
+        let bug = Err(Error {
+            kind: ErrorKind::ContractViolation,
+            codec_subcode: SUBCODE_INTERNAL_BUFFER,
+            consumed: 7,
+            written: 9,
+        });
 
         let mut pending = PendingOutput::<4>::new();
         fill(&mut pending, b"abcd").unwrap();

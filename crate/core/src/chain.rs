@@ -181,19 +181,45 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     kind,
                     codec_subcode,
                 },
-            ) => (Some(Error::new(kind, codec_subcode, 0, 0)), None),
+            ) => (
+                Some(Error {
+                    kind,
+                    codec_subcode,
+                    consumed: 0,
+                    written: 0,
+                }),
+                None,
+            ),
             Some(Failure::LatchedFromSecond {
                 kind,
                 codec_subcode,
-            }) => (None, Some(Error::new(kind, codec_subcode, 0, 0))),
+            }) => (
+                None,
+                Some(Error {
+                    kind,
+                    codec_subcode,
+                    consumed: 0,
+                    written: 0,
+                }),
+            ),
             Some(Failure::LatchedFromBoth {
                 first_kind,
                 first_codec_subcode,
                 second_kind,
                 second_codec_subcode,
             }) => (
-                Some(Error::new(first_kind, first_codec_subcode, 0, 0)),
-                Some(Error::new(second_kind, second_codec_subcode, 0, 0)),
+                Some(Error {
+                    kind: first_kind,
+                    codec_subcode: first_codec_subcode,
+                    consumed: 0,
+                    written: 0,
+                }),
+                Some(Error {
+                    kind: second_kind,
+                    codec_subcode: second_codec_subcode,
+                    consumed: 0,
+                    written: 0,
+                }),
             ),
         }
     }
@@ -249,7 +275,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     ..
                 },
             ) => {
-                return ErrorDelivery::Report(Error::new(kind, codec_subcode, 0, 0));
+                return ErrorDelivery::Report(Error {
+                    kind,
+                    codec_subcode,
+                    consumed: 0,
+                    written: 0,
+                });
             }
             Some(Failure::FirstPending {
                 kind,
@@ -285,7 +316,12 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                 second_codec_subcode: second.codec_subcode,
             },
         });
-        ErrorDelivery::Report(Error::new(kind, codec_subcode, consumed, out_pos + written))
+        ErrorDelivery::Report(Error {
+            kind,
+            codec_subcode,
+            consumed,
+            written: out_pos + written,
+        })
     }
 
     /// Latch an error of `second`. Return the error to report. If
@@ -303,7 +339,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     second_kind: error.kind,
                     second_codec_subcode: error.codec_subcode,
                 });
-                Error::new(kind, codec_subcode, rebased.consumed, rebased.written)
+                Error {
+                    kind,
+                    codec_subcode,
+                    ..rebased
+                }
             }
             None
             | Some(
@@ -325,12 +365,11 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// `second` wrote. `consumed` stays the same: `second` consumed
     /// bytes from `staging`, not from `input`.
     fn rebase_second_failed(error: Error, consumed: usize, pre_out_pos: usize) -> Error {
-        Error::new(
-            error.kind,
-            error.codec_subcode,
+        Error {
             consumed,
-            pre_out_pos + error.written,
-        )
+            written: pre_out_pos + error.written,
+            ..error
+        }
     }
 
     fn is_staging_empty(&self) -> bool {
@@ -995,12 +1034,12 @@ mod tests {
         let progress = chain.finish(as_uninit_mut(&mut output)).unwrap();
         assert_eq!(progress, DrainProgress::Done { written: 0 });
 
-        let after_finish = Error::new(
-            ErrorKind::ContractViolation,
-            Error::SUBCODE_AFTER_FINISH,
-            0,
-            0,
-        );
+        let after_finish = Error {
+            kind: ErrorKind::ContractViolation,
+            codec_subcode: Error::SUBCODE_AFTER_FINISH,
+            consumed: 0,
+            written: 0,
+        };
         assert_eq!(
             chain.process(b"b", as_uninit_mut(&mut output)),
             Err(after_finish)
@@ -1198,23 +1237,23 @@ mod tests {
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
         assert_eq!(
             error,
-            Error::new(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                0,
-                0
-            )
+            Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0
+            }
         );
     }
 
     #[test]
     fn an_overclaim_in_an_error_of_first_is_rejected() {
-        let violation = Error::new(
-            ErrorKind::ContractViolation,
-            Error::SUBCODE_BYTE_COUNT_CLAIM,
-            0,
-            0,
-        );
+        let violation = Error {
+            kind: ErrorKind::ContractViolation,
+            codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+            consumed: 0,
+            written: 0,
+        };
         let mut output = [0u8; 8];
 
         let mut chain = Chain::new(FailsWithOverclaim, identity(), vec![0u8; 4]).unwrap();
@@ -1240,24 +1279,24 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error,
-            Error::new(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                3,
-                0
-            )
+            Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 3,
+                written: 0
+            }
         );
 
         let mut chain = Chain::new(identity(), FailsWithOverclaim, vec![0u8; 4]).unwrap();
         let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
         assert_eq!(
             error,
-            Error::new(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                0,
-                0
-            )
+            Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0
+            }
         );
     }
 
@@ -1290,7 +1329,12 @@ mod tests {
             if !self.failed {
                 self.failed = true;
                 copy_to_uninit(&mut output[..1], &input[..1]);
-                return Err(Error::new(crate::ErrorKind::CorruptStream, 0, 1, 1));
+                return Err(Error {
+                    kind: crate::ErrorKind::CorruptStream,
+                    codec_subcode: 0,
+                    consumed: 1,
+                    written: 1,
+                });
             }
             self.inner.process(input, output)
         }
@@ -1347,7 +1391,12 @@ mod tests {
             let n = good.min(output.len());
             copy_to_uninit(&mut output[..n], &input[..n]);
             if n == good && n < input.len() {
-                return Err(Error::new(self.kind, self.codec_subcode, n, n));
+                return Err(Error {
+                    kind: self.kind,
+                    codec_subcode: self.codec_subcode,
+                    consumed: n,
+                    written: n,
+                });
             }
             if n == input.len() {
                 Ok(Progress::InputConsumed { written: n })
@@ -1372,7 +1421,12 @@ mod tests {
             copy_to_uninit(&mut output[..n], &left[..n]);
             self.emitted += n;
             if self.emitted == self.text.len() {
-                return Err(Error::new(ErrorKind::CorruptStream, 0, 0, n));
+                return Err(Error {
+                    kind: ErrorKind::CorruptStream,
+                    codec_subcode: 0,
+                    consumed: 0,
+                    written: n,
+                });
             }
             Ok(DrainProgress::OutputFilled)
         }
@@ -1608,14 +1662,27 @@ mod tests {
         let error = chain
             .process(b"abc", as_uninit_mut(&mut output))
             .unwrap_err();
-        assert_eq!(error, Error::new(crate::ErrorKind::CorruptStream, 0, 3, 1));
+        assert_eq!(
+            error,
+            Error {
+                kind: crate::ErrorKind::CorruptStream,
+                codec_subcode: 0,
+                consumed: 3,
+                written: 1
+            }
+        );
         assert_eq!(&output[..1], b"a");
 
         // The chain latched the error. It does not offer `bc` to
         // `second` again.
         assert_eq!(
             chain.process(b"", as_uninit_mut(&mut output)),
-            Err(Error::new(crate::ErrorKind::CorruptStream, 0, 0, 0))
+            Err(Error {
+                kind: crate::ErrorKind::CorruptStream,
+                codec_subcode: 0,
+                consumed: 0,
+                written: 0
+            })
         );
     }
 
@@ -1625,8 +1692,18 @@ mod tests {
     #[test]
     fn failures_tell_which_codec_failed() {
         let mut output = [0; 16];
-        let from_first = Error::new(ErrorKind::CorruptStream, 0, 0, 0);
-        let from_second = Error::new(ErrorKind::CorruptStream, DISTINCT_SUBCODE, 0, 0);
+        let from_first = Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: 0,
+            consumed: 0,
+            written: 0,
+        };
+        let from_second = Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: DISTINCT_SUBCODE,
+            consumed: 0,
+            written: 0,
+        };
 
         let chain = Chain::new(identity(), identity(), vec![0; 8]).unwrap();
         assert_eq!(chain.failures(), (None, None));
@@ -1795,7 +1872,12 @@ mod tests {
         fn enter(&mut self) -> Result<(), Error> {
             self.calls += 1;
             if self.calls == 1 {
-                Err(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
+                Err(Error {
+                    kind: ErrorKind::CorruptStream,
+                    codec_subcode: 0,
+                    consumed: 0,
+                    written: 0,
+                })
             } else {
                 Ok(())
             }
@@ -1828,7 +1910,12 @@ mod tests {
     /// A repeated call returns this error: the kind of the first error,
     /// and no bytes moved.
     fn repeated_error() -> Error {
-        Error::new(ErrorKind::CorruptStream, 0, 0, 0)
+        Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: 0,
+            consumed: 0,
+            written: 0,
+        }
     }
 
     #[test]

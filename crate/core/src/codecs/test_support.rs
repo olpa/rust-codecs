@@ -12,7 +12,12 @@ use crate::{
 /// Check that `kind` is a latched codec error. A latched error has
 /// the kind from `FailsAfterInner` and zero counts.
 pub(crate) fn assert_latched<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
-    let latched = Error::new(ErrorKind::CorruptStream, 0, 0, 0);
+    let latched = Error {
+        kind: ErrorKind::CorruptStream,
+        codec_subcode: 0,
+        consumed: 0,
+        written: 0,
+    };
     assert!(
         matches!(kind, DriveErrorKind::Codec(e) if *e == latched),
         "expected the latched codec error, got {kind:?}",
@@ -22,12 +27,12 @@ pub(crate) fn assert_latched<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>
 /// Check that `kind` is the error that replaces an overclaim:
 /// the kind `ContractViolation` and zero counts.
 pub(crate) fn assert_overclaim_rejected<EI: Debug, EO: Debug>(kind: &DriveErrorKind<EI, EO>) {
-    let violation = Error::new(
-        ErrorKind::ContractViolation,
-        Error::SUBCODE_BYTE_COUNT_CLAIM,
-        0,
-        0,
-    );
+    let violation = Error {
+        kind: ErrorKind::ContractViolation,
+        codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+        consumed: 0,
+        written: 0,
+    };
     assert!(
         matches!(kind, DriveErrorKind::Codec(e) if *e == violation),
         "expected the byte count claim error with zero counts, got {kind:?}",
@@ -186,22 +191,32 @@ pub(crate) struct FailsWithOverclaim;
 
 impl DrainCodec for FailsWithOverclaim {
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        Err(Error::new(ErrorKind::CorruptStream, 0, 0, output.len() + 1))
+        Err(Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: 0,
+            consumed: 0,
+            written: output.len() + 1,
+        })
     }
 
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        Err(Error::new(ErrorKind::CorruptStream, 0, 0, output.len() + 1))
+        Err(Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: 0,
+            consumed: 0,
+            written: output.len() + 1,
+        })
     }
 }
 
 impl Codec for FailsWithOverclaim {
     fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
-        Err(Error::new(
-            ErrorKind::CorruptStream,
-            0,
-            input.len() + 1,
-            output.len() + 1,
-        ))
+        Err(Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: 0,
+            consumed: input.len() + 1,
+            written: output.len() + 1,
+        })
     }
 }
 
@@ -236,12 +251,12 @@ impl<C> FailsAfterInner<C> {
             DrainProgress::Done { written } => written,
             DrainProgress::OutputFilled => output_len,
         };
-        Err(Error::new(
-            ErrorKind::CorruptStream,
-            self.codec_subcode,
-            0,
+        Err(Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: self.codec_subcode,
+            consumed: 0,
             written,
-        ))
+        })
     }
 }
 
@@ -268,12 +283,12 @@ impl<C: Codec> Codec for FailsAfterInner<C> {
             Progress::InputConsumed { written } => (input.len(), written),
             Progress::OutputFilled { consumed } => (consumed, output.len()),
         };
-        Err(Error::new(
-            ErrorKind::CorruptStream,
-            self.codec_subcode,
+        Err(Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: self.codec_subcode,
             consumed,
             written,
-        ))
+        })
     }
 }
 

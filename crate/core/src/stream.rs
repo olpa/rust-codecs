@@ -229,8 +229,12 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// The counts are zero: they describe the call that returns the
     /// error, and that call moves no bytes.
     pub(crate) fn failure(&self) -> Option<Error> {
-        self.failed
-            .map(|(kind, codec_subcode)| Error::new(kind, codec_subcode, 0, 0))
+        self.failed.map(|(kind, codec_subcode)| Error {
+            kind,
+            codec_subcode,
+            consumed: 0,
+            written: 0,
+        })
     }
 
     /// The bytes that the pump moved since its creation. See [`Self::total`].
@@ -763,8 +767,12 @@ mod tests {
             codec_subcode: DISTINCT_SUBCODE,
             ..Default::default()
         });
-        let expected =
-            DriveErrorKind::Codec(Error::new(ErrorKind::CorruptStream, DISTINCT_SUBCODE, 0, 0));
+        let expected = DriveErrorKind::Codec(Error {
+            kind: ErrorKind::CorruptStream,
+            codec_subcode: DISTINCT_SUBCODE,
+            consumed: 0,
+            written: 0,
+        });
 
         // The first error has the counts of the failing call. Set them
         // to zero, as in a latched error.
@@ -868,7 +876,12 @@ mod tests {
         );
         assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
+            Some(Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
+                consumed: 0,
+                written: 0
+            })
         );
     }
 
@@ -1076,7 +1089,12 @@ mod tests {
         );
         assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
+            Some(Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
+                consumed: 0,
+                written: 0
+            })
         );
     }
 
@@ -1210,7 +1228,12 @@ mod tests {
         );
         assert_eq!(
             pump.failure(),
-            Some(Error::new(ErrorKind::CorruptStream, 0, 0, 0))
+            Some(Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
+                consumed: 0,
+                written: 0
+            })
         );
     }
 
