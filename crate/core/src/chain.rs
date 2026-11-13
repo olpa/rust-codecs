@@ -345,18 +345,21 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
                     ..rebased
                 }
             }
-            None
-            | Some(
-                Failure::LatchedFromFirst { .. }
-                | Failure::LatchedFromSecond { .. }
-                | Failure::LatchedFromBoth { .. },
-            ) => {
+            None => {
                 self.failure = Some(Failure::LatchedFromSecond {
                     kind: error.kind,
                     codec_subcode: error.codec_subcode,
                 });
                 rebased
             }
+            // This case does not happen. `process` and `drain_through`
+            // return a latched error before they call `second`. If it
+            // happens, keep the latched error. Do not overwrite it.
+            Some(
+                Failure::LatchedFromFirst { .. }
+                | Failure::LatchedFromSecond { .. }
+                | Failure::LatchedFromBoth { .. },
+            ) => rebased,
         }
     }
 
