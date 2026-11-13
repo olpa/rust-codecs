@@ -188,9 +188,8 @@ wrapped reader or writer. `StreamError::source` returns the codec
 from `source()`. `EncodeError::Stream` prints the `StreamError` and
 returns it from `source()`. A printer that walks `Error::source()`
 (`anyhow`, `eyre`, the CLI's `error_chain`) shows the text two or three
-times, for example "CorruptStream:0x0, consumed 0, written 0 (after 0
-input bytes, 0 output bytes): CorruptStream:0x0, consumed 0, written
-0".
+times, for example "CorruptStream:0x0 (after 0 input bytes, 0 output
+bytes): CorruptStream:0x0".
 
 We accept this. Users who print with plain `{}` (embedded, `no_std`,
 `unwrap` panics, test output) must get the whole message from
@@ -201,10 +200,9 @@ would hide those counts from code that holds only a `dyn Error`.
 
 ### The CLI engines print the same error in different words (decided 2026-10-23)
 
-For the same failure, the `copy` engine prints "CorruptStream:0x0,
-consumed 0, written 0 (after 0 input bytes, 0 output bytes)", and the
-`stream` engine prints "codec error (after 0 input bytes, 0 output
-bytes): CorruptStream:0x0, consumed 0, written 0".
+For the same failure, the `copy` engine prints "CorruptStream:0x0
+(after 0 input bytes, 0 output bytes)", and the `stream` engine prints
+"codec error (after 0 input bytes, 0 output bytes): CorruptStream:0x0".
 
 The `copy` engine gets an `io::Error` with a `StreamError` inside, and
 its `Display` has the codec reason. The `stream` engine gets a

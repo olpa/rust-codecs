@@ -519,11 +519,11 @@ impl core::fmt::Display for ErrorKind {
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "{}:{:#x}, consumed {}, written {}",
-            self.kind, self.codec_subcode, self.consumed, self.written
-        )
+        write!(f, "{}:{:#x}", self.kind, self.codec_subcode)?;
+        if self.consumed != 0 || self.written != 0 {
+            write!(f, ", consumed {}, written {}", self.consumed, self.written)?;
+        }
+        Ok(())
     }
 }
 
