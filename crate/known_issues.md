@@ -72,9 +72,9 @@ the old compiler.
 ### A short base64 group with a byte outside the alphabet
 
 A short final group with a byte outside the alphabet, for example
-`QQ!` at the end of the stream, reports `UnexpectedEnd`. It should
-report `CorruptStream`. The case is rare, because the decoder now
-ignores ASCII whitespace.
+`QQ!` at the end of the stream, reports the subcode `UNEXPECTED_END`. It
+should report the subcode zero. The case is rare, because the decoder
+now ignores ASCII whitespace.
 
 
 ## Decisions
@@ -173,7 +173,8 @@ A third-party codec cannot add a variant to `ErrorKind`. The enum grows
 only when this crate adds a category. That is rare, and a new variant
 before 1.0 needs only a 0.x version bump. `#[non_exhaustive]` would
 also stop users from matching all variants, so the compiler would not
-tell them about a new kind.
+tell them about a new kind. A third-party codec reports its own detail
+with `codec_subcode`.
 
 `StreamError` and `WriteError` have no `source()` for the error of the
 wrapped reader or writer. Their `Display` prints the inner error. A
@@ -187,8 +188,8 @@ wrapped reader or writer. `StreamError::source` returns the codec
 from `source()`. `EncodeError::Stream` prints the `StreamError` and
 returns it from `source()`. A printer that walks `Error::source()`
 (`anyhow`, `eyre`, the CLI's `error_chain`) shows the text two or three
-times, for example "corrupt stream (after 0 input bytes, 0 output
-bytes): corrupt stream".
+times, for example "CorruptStream:0x0 (after 0 input bytes, 0 output
+bytes): CorruptStream:0x0".
 
 We accept this. Users who print with plain `{}` (embedded, `no_std`,
 `unwrap` panics, test output) must get the whole message from
@@ -199,9 +200,9 @@ would hide those counts from code that holds only a `dyn Error`.
 
 ### The CLI engines print the same error in different words (decided 2026-10-23)
 
-For the same failure, the `copy` engine prints "corrupt stream (after 0
-input bytes, 0 output bytes)", and the `stream` engine prints "codec
-error (after 0 input bytes, 0 output bytes): corrupt stream".
+For the same failure, the `copy` engine prints "CorruptStream:0x0
+(after 0 input bytes, 0 output bytes)", and the `stream` engine prints
+"codec error (after 0 input bytes, 0 output bytes): CorruptStream:0x0".
 
 The `copy` engine gets an `io::Error` with a `StreamError` inside, and
 its `Display` has the codec reason. The `stream` engine gets a
@@ -312,9 +313,6 @@ documentation on the constructors. Do not report it.
 
 ## Known limits that we do not plan to fix
 
-- A third-party codec cannot report its own error detail. It must
-  choose one of the existing kinds of `ErrorKind`. "Checksum mismatch"
-  and "invalid Huffman table" both become `CorruptStream`.
 - `Pump` and `Chain` cannot check that a codec reports its counts
   honestly. They check only that the counts fit the buffers.
 - The `Sink` contract does not say what a failed `commit` did. The

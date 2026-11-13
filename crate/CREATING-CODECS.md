@@ -181,6 +181,17 @@ If you forget the impl, the compiler error can mislead you. It says
 that `Codec` is not implemented for `MyBoundaryAwareCodec`. Do not
 implement `Codec`. Add the forwarding impl instead.
 
+## Reporting errors
+
+Report an error as close as possible to the place where it happened.
+For this, use the `Error` fields `consumed` and `written` to tell a
+driver the position of the failure. A good driver passes the written
+bytes on and only then reports the error.
+
+To help with troubleshooting, you can set `codec_subcode` to identify
+the cause of the failure. A generic driver does not interpret the
+subcode and only prints it.
+
 ## Helpers for the output buffer
 
 The output buffer is `&mut [MaybeUninit<u8>]`, not `&mut [u8]`. The

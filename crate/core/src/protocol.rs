@@ -164,9 +164,9 @@ pub trait BoundaryAwareCodec: DrainCodec {
     ///
     /// If EOF arrives before `process_bounded` reports
     /// [`Boundary`](BoundaryAwareProgress::Boundary), `finish` decides what that
-    /// means. If the format requires an in-band terminator, `finish` may
-    /// report [`ErrorKind::UnexpectedEnd`]. If the format treats EOF
-    /// itself as a valid end, `finish` may instead return
+    /// means. If the format requires an in-band terminator, `finish` can
+    /// return an error of the kind [`ErrorKind::CorruptStream`]. If the format treats EOF
+    /// itself as a valid end, `finish` can instead return
     /// [`Done`](DrainProgress::Done).
     fn process_bounded(
         &mut self,
@@ -242,8 +242,8 @@ pub enum DrainProgress {
 
 impl Progress {
     /// Check the reported byte counts against the buffer sizes the
-    /// call was given. This turns a lying codec into
-    /// [`ErrorKind::ByteCountClaim`].
+    /// call was given. This turns a lying codec into an error of the
+    /// kind [`ErrorKind::ContractViolation`].
     pub fn validated(self, input_len: usize, output_len: usize) -> Result<Progress, Error> {
         let honest = match self {
             Progress::InputConsumed { written } => written <= output_len,
@@ -252,7 +252,12 @@ impl Progress {
         if honest {
             Ok(self)
         } else {
-            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
+            Err(Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            })
         }
     }
 }
@@ -275,7 +280,12 @@ impl BoundaryAwareProgress {
         if honest {
             Ok(self)
         } else {
-            Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
+            Err(Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            })
         }
     }
 }
@@ -284,9 +294,12 @@ impl DrainProgress {
     /// The [`Progress::validated`] counterpart for `flush` and `finish`.
     pub fn validated(self, output_len: usize) -> Result<DrainProgress, Error> {
         match self {
-            DrainProgress::Done { written } if written > output_len => {
-                Err(Error::new(ErrorKind::ByteCountClaim, 0, 0))
-            }
+            DrainProgress::Done { written } if written > output_len => Err(Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            }),
             honest => Ok(honest),
         }
     }
@@ -401,24 +414,26 @@ pub struct EmptyBufferError;
 /// What kind of failure a codec reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// The encoded stream is malformed.
+    /// The input is damaged or in the wrong format.
     CorruptStream,
-    /// The stream ended where it should not have.
-    UnexpectedEnd,
-    /// The codec's internal carry buffer couldn't hold an atomic data unit.
-    CodecBufferTooSmall,
-    /// The codec reported byte counts exceeding the buffers it was
-    /// given. The error's `consumed`/`written` can't be trusted, so
-    /// validation (such as [`Progress::validated`]) zeroes them.
-    ByteCountClaim,
-    /// The codec was called after `finish`, but it does not allow this.
-    AfterFinish,
+    /// The input is fine, but this codec cannot handle it.
+    Unsupported,
+    /// The input is fine, but a limit stopped the codec.
+    BehindLimits,
+    /// A bug in the program.
+    ContractViolation,
 }
 
 /// A codec failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
+    /// A number that the codec defines for the details of the failure.
+    /// Zero means no details.
+    ///
+    /// Generic code cannot interpret the number. The crate reserves the
+    /// values `0xFFF0` to `0xFFFF` for its own subcodes.
+    pub codec_subcode: usize,
     /// Bytes of `input` consumed by this call before the failure.
     pub consumed: usize,
     /// Bytes written to `output` by this call before the failure.
@@ -426,20 +441,24 @@ pub struct Error {
 }
 
 impl Error {
-    pub fn new(kind: ErrorKind, consumed: usize, written: usize) -> Self {
-        Self {
-            kind,
-            consumed,
-            written,
-        }
-    }
+    /// The codec reported byte counts exceeding the buffers it was
+    /// given. The error's `consumed`/`written` can't be trusted, so
+    /// validation (such as [`Progress::validated`]) zeroes them.
+    pub(crate) const SUBCODE_BYTE_COUNT_CLAIM: usize = 0xFFF2;
+    /// The codec was called after `finish`, but it does not allow this.
+    pub(crate) const SUBCODE_AFTER_FINISH: usize = 0xFFF3;
 
     /// The [`Progress::validated`] counterpart for a failing call.
     pub fn validated(self, input_len: usize, output_len: usize) -> Result<Self, Self> {
         if self.consumed <= input_len && self.written <= output_len {
             Ok(self)
         } else {
-            Err(Self::new(ErrorKind::ByteCountClaim, 0, 0))
+            Err(Self {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+                consumed: 0,
+                written: 0,
+            })
         }
     }
 }
@@ -490,18 +509,21 @@ impl core::error::Error for EmptyBufferError {}
 impl core::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
-            Self::CorruptStream => "corrupt stream",
-            Self::UnexpectedEnd => "unexpected end of stream",
-            Self::CodecBufferTooSmall => "codec buffer too small",
-            Self::ByteCountClaim => "codec reported byte counts outside its buffers",
-            Self::AfterFinish => "call after finish",
+            Self::CorruptStream => "CorruptStream",
+            Self::Unsupported => "Unsupported",
+            Self::BehindLimits => "BehindLimits",
+            Self::ContractViolation => "ContractViolation",
         })
     }
 }
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.kind.fmt(f)
+        write!(f, "{}:{:#x}", self.kind, self.codec_subcode)?;
+        if self.consumed != 0 || self.written != 0 {
+            write!(f, ", consumed {}, written {}", self.consumed, self.written)?;
+        }
+        Ok(())
     }
 }
 

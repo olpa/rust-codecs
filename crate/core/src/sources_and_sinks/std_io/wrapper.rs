@@ -18,11 +18,12 @@ fn to_io_error(err: StreamError<io::Error>) -> io::Error {
         StreamErrorKind::Io(error) => error.kind(),
         StreamErrorKind::Codec(error) => match error.kind {
             ErrorKind::CorruptStream => io::ErrorKind::InvalidData,
-            ErrorKind::UnexpectedEnd => io::ErrorKind::UnexpectedEof,
+            ErrorKind::Unsupported => io::ErrorKind::Unsupported,
+            // `std::io` has no stable kind for a limit. The data is not
+            // at fault.
+            ErrorKind::BehindLimits => io::ErrorKind::Other,
             // Bugs in the codec or in the caller. The data is not at fault.
-            ErrorKind::CodecBufferTooSmall | ErrorKind::ByteCountClaim | ErrorKind::AfterFinish => {
-                io::ErrorKind::Other
-            }
+            ErrorKind::ContractViolation => io::ErrorKind::Other,
         },
         StreamErrorKind::SinkExhausted | StreamErrorKind::ZeroWrite => io::ErrorKind::WriteZero,
         StreamErrorKind::NoProgress => io::ErrorKind::Other,
@@ -346,6 +347,7 @@ mod tests {
                 inner: identity(),
                 ok_calls: 0,
                 calls: 0,
+                codec_subcode: 0,
             };
             let writer = CodecWriter::new(Vec::new(), codec, [0u8; 8]).unwrap();
 

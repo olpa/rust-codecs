@@ -17,6 +17,9 @@ use json_escape::explicit::escape_bytes;
 use crate::uninit::copy_to_uninit;
 use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
+/// The stream ended where it should not have.
+const SUBCODE_UNEXPECTED_END: usize = 1;
+
 /// An escape sequence known for the byte right after `pending_literal_len`'s
 /// bytes, tracked through its two possible states so the invalid
 /// combination (known-but-not-started *and* mid-write at once) isn't
@@ -118,7 +121,12 @@ impl DrainCodec for JsonEnc {
         // full input consumed, which keeps the driver calling `process`
         // again instead of `finish`.
         if self.pending_literal_len > 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEnd, 0, 0));
+            return Err(Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: SUBCODE_UNEXPECTED_END,
+                consumed: 0,
+                written: 0,
+            });
         }
         let (_, written) = self.flush_pending(&[], output)?;
         if matches!(self.pending_escape, PendingEscape::Started(_)) {
@@ -188,7 +196,7 @@ pub fn json_enc() -> JsonEnc {
 mod tests {
     use std::io::{Cursor, Read, Write};
 
-    use super::{escape_bytes, json_enc, JsonEnc, PendingEscape};
+    use super::{escape_bytes, json_enc, JsonEnc, PendingEscape, SUBCODE_UNEXPECTED_END};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{encode_string, VecSink, VecSource};
     use crate::uninit::as_uninit_mut;
@@ -336,7 +344,9 @@ mod tests {
 
         let mut finish_output = [0u8; 16];
         let result = codec.finish(crate::uninit::as_uninit_mut(&mut finish_output));
-        assert_eq!(result.unwrap_err().kind, ErrorKind::UnexpectedEnd);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::CorruptStream);
+        assert_eq!(error.codec_subcode, SUBCODE_UNEXPECTED_END);
     }
 
     #[test]

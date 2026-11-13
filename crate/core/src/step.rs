@@ -85,7 +85,12 @@ impl FinishPhase {
     pub(crate) fn check_open(self) -> Result<(), Error> {
         match self {
             Self::Open => Ok(()),
-            Self::Finishing | Self::Finished => Err(Error::new(ErrorKind::AfterFinish, 0, 0)),
+            Self::Finishing | Self::Finished => Err(Error {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode: Error::SUBCODE_AFTER_FINISH,
+                consumed: 0,
+                written: 0,
+            }),
         }
     }
 
@@ -136,7 +141,12 @@ mod tests {
 
     #[test]
     fn overclaims_are_rejected_at_the_shared_boundary() {
-        let violation = Error::new(ErrorKind::ByteCountClaim, 0, 0);
+        let violation = Error {
+            kind: ErrorKind::ContractViolation,
+            codec_subcode: Error::SUBCODE_BYTE_COUNT_CLAIM,
+            consumed: 0,
+            written: 0,
+        };
         let overclaims = [
             BoundaryAwareProgress::InputConsumed { written: 6 },
             BoundaryAwareProgress::OutputFilled { consumed: 4 },
@@ -172,13 +182,23 @@ mod tests {
                 b"abc",
                 &mut [MaybeUninit::uninit(); 5]
             ),
-            Err(Error::new(ErrorKind::CorruptStream, 3, 2))
+            Err(Error {
+                kind: ErrorKind::CorruptStream,
+                codec_subcode: 0,
+                consumed: 3,
+                written: 2
+            })
         );
     }
 
     #[test]
     fn check_open_fails_after_the_first_finish_call() {
-        let after_finish = Err(Error::new(ErrorKind::AfterFinish, 0, 0));
+        let after_finish = Err(Error {
+            kind: ErrorKind::ContractViolation,
+            codec_subcode: Error::SUBCODE_AFTER_FINISH,
+            consumed: 0,
+            written: 0,
+        });
         let mut phase = FinishPhase::default();
 
         phase.start_finish();
