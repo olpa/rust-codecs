@@ -15,13 +15,16 @@ compcol = { version = "0.7.8", default-features = false, optional = true }
 
 [features]
 default = ["std"]
-alloc = []
+alloc = ["compcol?/alloc"]
 std = ["alloc"]
 rot13 = []
 base64 = ["dep:base64"]
 json = ["dep:json-escape"]
 embedded-io = ["dep:embedded-io"]
 compcol = ["dep:compcol"]
+
+[dev-dependencies]
+compcol = { version = "0.7.8", default-features = false, features = ["deflate", "zlib", "gzip"] }
 
 [package.metadata.docs.rs]
 all-features = true

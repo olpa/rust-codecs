@@ -19,5 +19,9 @@ mod base64_shared;
 #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
 pub mod json_enc;
 
+#[cfg(feature = "compcol")]
+#[cfg_attr(docsrs, doc(cfg(feature = "compcol")))]
+pub mod compcol;
+
 #[cfg(test)]
 pub(crate) mod test_support;

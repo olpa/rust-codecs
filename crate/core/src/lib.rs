@@ -12,6 +12,8 @@
 //! - Bundles [`identity`] and [`rot13`] codecs, and, until they get
 //!   their own crates, [`base64_enc`]/[`base64_dec`] and [`json_enc`]
 //!   escaping.
+//! - Adapters for `compcol` encoders and decoders, see [`compcol`](mod@crate::compcol)
+//!   (feature `compcol`).
 //! - Bundled I/O backends for `std::io` and `embedded_io` provide
 //!   [`CodecReader`](sources_and_sinks::std_io::CodecReader),
 //!   [`BufReadCodecReader`](sources_and_sinks::std_io::BufReadCodecReader),
@@ -254,7 +256,8 @@ mod feature_coverage {
             feature = "base64",
             feature = "json",
             feature = "embedded-io",
-            feature = "rot13"
+            feature = "rot13",
+            feature = "compcol"
         )),
         ignore = "some optional features are disabled — run `cargo test --all-features`"
     )]
@@ -264,6 +267,7 @@ mod feature_coverage {
         assert!(cfg!(feature = "base64"), "feature \"base64\" is off");
         assert!(cfg!(feature = "json"), "feature \"json\" is off");
         assert!(cfg!(feature = "rot13"), "feature \"rot13\" is off");
+        assert!(cfg!(feature = "compcol"), "feature \"compcol\" is off");
         assert!(
             cfg!(feature = "embedded-io"),
             "feature \"embedded-io\" is off"
