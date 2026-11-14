@@ -11,7 +11,7 @@
 //! listed runs first, closest to the incoming bytes, before reaching
 //! stdout).
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
@@ -56,7 +56,7 @@ Test harness for chaining codecs: folds --readers into one Chain and
 the writers, to stdout.
 
 Usage:
-  cargo run -p cli -- [--engine copy|stream] [--readers CODEC...] [--writers CODEC...]
+  cargo run -p cli -- [--engine copy|stream] [--no-buffering] [--readers CODEC...] [--writers CODEC...]
 
 Codecs: {names}
 
@@ -70,6 +70,13 @@ it does not wait for enough input to fill std::io::copy's buffer on
 an interactive pipe (e.g. a terminal). A codec that holds bytes back,
 for example base64 with an incomplete group, can still delay its
 output until more input arrives.
+
+--no-buffering makes the tool interactive per character: on a terminal it
+turns off line buffering (echo stays on), so each key press goes through the
+codecs and appears on stdout at once, and it flushes stdout after every
+write. The terminal is restored on exit and on Ctrl-C. Ctrl-D still ends
+the input (it is translated to EOF), so codecs that hold bytes back
+(base64) emit their tail then.
 
 Reader codecs apply in the order listed (first listed runs on the raw
 bytes first). Writer codecs also apply in the order listed (first
@@ -114,11 +121,20 @@ enum Engine {
     Stream,
 }
 
-fn parse_args(
-    args: impl Iterator<Item = String>,
-) -> Result<(Engine, Vec<String>, Vec<String>), String> {
+/// Parsed command line.
+#[derive(Debug)]
+struct Args {
+    engine: Engine,
+    readers: Vec<String>,
+    writers: Vec<String>,
+    /// `--no-buffering`: eager, per-character passthrough.
+    no_buffering: bool,
+}
+
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut mode = Mode::None;
     let mut engine = Engine::Copy;
+    let mut no_buffering = false;
     let mut readers = Vec::new();
     let mut writers = Vec::new();
     let mut args = args.peekable();
@@ -138,6 +154,7 @@ fn parse_args(
                     }
                 };
             }
+            "--no-buffering" => no_buffering = true,
             "--readers" => mode = Mode::Readers,
             "--writers" => mode = Mode::Writers,
             _ => match mode {
@@ -151,7 +168,12 @@ fn parse_args(
             },
         }
     }
-    Ok((engine, readers, writers))
+    Ok(Args {
+        engine,
+        readers,
+        writers,
+        no_buffering,
+    })
 }
 
 /// Fold `names` into a single `Codec`, first name applied first, closest
@@ -226,27 +248,196 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     text
 }
 
+/// Flushes after every write. `io::stdout()` is a `LineWriter`, which
+/// holds bytes back until a newline, defeating per-character output.
+struct FlushEachWrite<W: Write>(W);
+
+impl<W: Write> Write for FlushEachWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.0.write(buf)?;
+        self.0.flush()?;
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
 fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let (engine, reader_names, writer_names) = parse_args(args)?;
-    match engine {
-        Engine::Copy => {
-            run_io(
-                &reader_names,
-                &writer_names,
-                io::stdin().lock(),
-                io::stdout(),
-            )?;
+    let Args {
+        engine,
+        readers,
+        writers,
+        no_buffering,
+    } = parse_args(args)?;
+    let input = io::stdin().lock();
+    if no_buffering {
+        // Keep the guard alive until the end of `run`: it restores the tty.
+        let tty = eager_tty::EagerTty::enable();
+        let output = FlushEachWrite(io::stdout());
+        if tty.is_some() {
+            // In non-canonical mode Ctrl-D is a plain 0x04 byte, so
+            // translate it to EOF here.
+            drive(engine, &readers, &writers, EofOnCtrlD::new(input), output)
+        } else {
+            drive(engine, &readers, &writers, input, output)
         }
-        Engine::Stream => {
-            run_io_stream(
-                &reader_names,
-                &writer_names,
-                io::stdin().lock(),
-                io::stdout(),
-            )?;
+    } else {
+        drive(engine, &readers, &writers, input, io::stdout())
+    }
+}
+
+fn drive<R: BufRead, W: Write>(
+    engine: Engine,
+    readers: &[String],
+    writers: &[String],
+    input: R,
+    output: W,
+) -> Result<(), String> {
+    match engine {
+        Engine::Copy => run_io(readers, writers, input, output).map(drop),
+        Engine::Stream => run_io_stream(readers, writers, input, output).map(drop),
+    }
+}
+
+/// Ends the input at the first Ctrl-D (0x04) byte. A tty in
+/// non-canonical mode delivers Ctrl-D as an ordinary byte instead of
+/// signalling EOF, so this restores the usual way to end input.
+struct EofOnCtrlD<R> {
+    inner: R,
+    done: bool,
+}
+
+impl<R> EofOnCtrlD<R> {
+    const CTRL_D: u8 = 0x04;
+
+    fn new(inner: R) -> Self {
+        Self { inner, done: false }
+    }
+}
+
+impl<R: BufRead> Read for EofOnCtrlD<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let n = {
+            let buf = self.fill_buf()?;
+            let n = buf.len().min(out.len());
+            out[..n].copy_from_slice(&buf[..n]);
+            n
+        };
+        self.consume(n);
+        Ok(n)
+    }
+}
+
+impl<R: BufRead> BufRead for EofOnCtrlD<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.done {
+            return Ok(&[]);
+        }
+        // Two short borrows: returning the first one on one path and
+        // mutating `inner` on another is rejected by the borrow checker.
+        let pos = self
+            .inner
+            .fill_buf()?
+            .iter()
+            .position(|&b| b == Self::CTRL_D);
+        match pos {
+            Some(0) => {
+                self.done = true;
+                self.inner.consume(1);
+                Ok(&[])
+            }
+            Some(i) => Ok(&self.inner.fill_buf()?[..i]),
+            None => self.inner.fill_buf(),
         }
     }
-    Ok(())
+
+    fn consume(&mut self, amount: usize) {
+        self.inner.consume(amount);
+    }
+}
+
+/// Puts the terminal on stdin into non-canonical mode (echo stays on) for the
+/// lifetime of the guard, so each key press reaches the program at once. A no-op when stdin is not a tty
+/// (or off unix). The old settings come back on drop and on
+/// SIGINT/SIGTERM.
+#[cfg(unix)]
+mod eager_tty {
+    use std::cell::UnsafeCell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Saved(UnsafeCell<libc::termios>);
+    // SAFETY: written once before `SAVED_SET` is published, then only read.
+    unsafe impl Sync for Saved {}
+    static SAVED: Saved = Saved(UnsafeCell::new(unsafe { std::mem::zeroed() }));
+    static SAVED_SET: AtomicBool = AtomicBool::new(false);
+
+    pub struct EagerTty;
+
+    extern "C" fn restore_and_die(signum: libc::c_int) {
+        // Async-signal-safe calls only.
+        unsafe {
+            restore();
+            libc::signal(signum, libc::SIG_DFL);
+            libc::raise(signum);
+        }
+    }
+
+    unsafe fn restore() {
+        if SAVED_SET.load(Ordering::Acquire) {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, SAVED.0.get());
+        }
+    }
+
+    impl EagerTty {
+        pub fn enable() -> Option<Self> {
+            // SAFETY: plain termios calls on fd 0; `SAVED` is written
+            // before the handlers that read it are installed.
+            unsafe {
+                if libc::isatty(libc::STDIN_FILENO) != 1 {
+                    return None;
+                }
+                let mut t: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
+                    return None;
+                }
+                *SAVED.0.get() = t;
+                SAVED_SET.store(true, Ordering::Release);
+                libc::signal(
+                    libc::SIGINT,
+                    restore_and_die as *const () as libc::sighandler_t,
+                );
+                libc::signal(
+                    libc::SIGTERM,
+                    restore_and_die as *const () as libc::sighandler_t,
+                );
+                t.c_lflag &= !libc::ICANON;
+                t.c_cc[libc::VMIN] = 1;
+                t.c_cc[libc::VTIME] = 0;
+                if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t) != 0 {
+                    return None;
+                }
+            }
+            Some(Self)
+        }
+    }
+
+    impl Drop for EagerTty {
+        fn drop(&mut self) {
+            // SAFETY: see `enable`.
+            unsafe { restore() }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod eager_tty {
+    pub struct EagerTty;
+    impl EagerTty {
+        pub fn enable() -> Option<Self> {
+            None
+        }
+    }
 }
 
 /// Installs a no-op `SIGUSR1` handler so the retry-on-`EINTR` path in
@@ -376,20 +567,42 @@ mod tests {
 
     #[test]
     fn parse_args_reads_engine_flag() {
-        let (engine, readers, writers) =
+        let a =
             parse_args(names(&["--engine", "stream", "--readers", "rot13"]).into_iter()).unwrap();
-        assert_eq!(engine, Engine::Stream);
-        assert_eq!(readers, names(&["rot13"]));
-        assert!(writers.is_empty());
+        assert_eq!(a.engine, Engine::Stream);
+        assert_eq!(a.readers, names(&["rot13"]));
+        assert!(a.writers.is_empty());
+        assert!(!a.no_buffering);
 
-        let (engine, _, _) = parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
-        assert_eq!(engine, Engine::Copy);
+        let a = parse_args(names(&["--readers", "rot13"]).into_iter()).unwrap();
+        assert_eq!(a.engine, Engine::Copy);
+    }
+
+    #[test]
+    fn parse_args_reads_no_buffering_flag() {
+        let a = parse_args(names(&["--no-buffering", "--writers", "rot13"]).into_iter()).unwrap();
+        assert!(a.no_buffering);
+        assert_eq!(a.writers, names(&["rot13"]));
     }
 
     #[test]
     fn parse_args_rejects_unknown_engine() {
         let err = parse_args(names(&["--engine", "bogus"]).into_iter()).unwrap_err();
         assert!(err.contains("bogus"));
+    }
+
+    #[test]
+    fn ctrl_d_ends_input() {
+        let mut r = super::EofOnCtrlD::new(Cursor::new(b"ab\x04cd".to_vec()));
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut r, &mut out).unwrap();
+        assert_eq!(out, b"ab");
+
+        // Ctrl-D as the very first byte: immediate EOF.
+        let mut r = super::EofOnCtrlD::new(Cursor::new(b"\x04ab".to_vec()));
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut r, &mut out).unwrap();
+        assert!(out.is_empty());
     }
 
     #[test]
