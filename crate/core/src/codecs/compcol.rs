@@ -336,6 +336,14 @@ fn run_drain(
     unexpected: Status,
     mut call: impl FnMut(&mut [u8]) -> CompcolResult,
 ) -> Result<DrainProgress, Failure> {
+    // An empty output is legal for our codecs, and `Chain` passes one
+    // when `output` is full and it asks `second` if it is done. Some
+    // compcol codecs fail on an empty output (`lzx` gives
+    // `UnexpectedEnd` while it holds decoded bytes), so do not call
+    // them. `OutputFilled` makes the caller call again with room.
+    if output.is_empty() {
+        return Ok(DrainProgress::OutputFilled);
+    }
     let mut w = 0;
     loop {
         let rest_out = &mut output[w..];
@@ -1103,11 +1111,24 @@ mod tests {
 
     #[test]
     fn empty_output_reports_output_filled_without_calling() {
+        // `Scripted::default()` panics on any call to the inner codec.
         let mut enc = CompcolEncoderAsCodec::new(Scripted::default(), FlushMode::Skip);
         assert_eq!(
             enc.process(b"abc", &mut []),
             Ok(Progress::OutputFilled { consumed: 0 })
         );
+        assert_eq!(enc.finish(&mut []), Ok(DrainProgress::OutputFilled));
+
+        let mut enc =
+            CompcolEncoderAsCodec::new(Scripted::default(), FlushMode::Compcol(Flush::Sync));
+        assert_eq!(enc.flush(&mut []), Ok(DrainProgress::OutputFilled));
+
+        let mut dec = CompcolDecoderAsCodec::new(Scripted::default());
+        assert_eq!(dec.flush(&mut []), Ok(DrainProgress::OutputFilled));
+        assert_eq!(dec.finish(&mut []), Ok(DrainProgress::OutputFilled));
+
+        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::default());
+        assert_eq!(dec.finish(&mut []), Ok(DrainProgress::OutputFilled));
     }
 
     #[test]
