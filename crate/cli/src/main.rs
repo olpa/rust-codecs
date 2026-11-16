@@ -13,7 +13,10 @@
 
 use std::io::{self, BufRead, Write};
 
-use rust_codecs_core::compcol::{CompcolDecoderAsCodec, CompcolEncoderAsCodec, FlushMode};
+use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
+use rust_codecs_core::compcol::{
+    CompcolDecoderAsBoundaryAwareCodec, CompcolEncoderAsBoundaryAwareCodec, FlushMode,
+};
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
 };
@@ -56,21 +59,22 @@ const COMPCOL_DEC: &str = "-dec";
 /// name does not have this form or compcol has no such encoder or
 /// decoder (some algorithms only decode).
 ///
-/// The encoder's `flush` does nothing (`FlushMode::Skip`), so the
-/// output has the best ratio and is complete only after `finish`. The
-/// decoder expects one stream; data after its end is an error.
+/// The encoder writes the whole stream at the end of input (`finish`).
+/// The decoder expects one stream; a boundary (data after the stream end)
+/// is a [`ErrorKind::ContractViolation`](rust_codecs_core::ErrorKind).
 fn make_compcol_codec(name: &str) -> Option<Box<dyn Codec>> {
     let name = name.strip_prefix(COMPCOL_PREFIX)?;
     if let Some(algorithm) = name.strip_suffix(COMPCOL_ENC) {
         let encoder = compcol_encoder(algorithm)?;
-        return Some(Box::new(CompcolEncoderAsCodec::new(
-            encoder,
-            FlushMode::Skip,
+        return Some(Box::new(BoundaryAwareCodecAsCodec::new(
+            CompcolEncoderAsBoundaryAwareCodec::new(encoder, FlushMode::Skip),
         )));
     }
     if let Some(algorithm) = name.strip_suffix(COMPCOL_DEC) {
         let decoder = compcol::factory::decoder_by_name(algorithm)?;
-        return Some(Box::new(CompcolDecoderAsCodec::new(decoder)));
+        return Some(Box::new(BoundaryAwareCodecAsCodec::new(
+            CompcolDecoderAsBoundaryAwareCodec::new(decoder),
+        )));
     }
     None
 }

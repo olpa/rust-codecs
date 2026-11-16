@@ -1,6 +1,7 @@
 //! Concrete [`Codec`](crate::Codec) implementations, one per feature.
 
 pub mod identity;
+pub mod boundary_as_codec;
 
 #[cfg(any(feature = "rot13", test))]
 #[cfg_attr(docsrs, doc(cfg(feature = "rot13")))]
