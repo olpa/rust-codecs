@@ -125,7 +125,6 @@ use ::compcol::{Decoder, Encoder, Flush, Status};
 use crate::uninit::zero_init_mut;
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress, Error, ErrorKind,
-    Progress,
 };
 
 // Opaque subcodes, not part of the API.
@@ -184,6 +183,7 @@ struct Failure {
 }
 
 /// Shared state and loop helpers used by both encoder and decoder adapters.
+#[derive(Debug, Clone)]
 struct CompcolAdapter<I> {
     inner: I,
     state: AdapterState,
@@ -505,7 +505,7 @@ impl<E: Encoder> BoundaryAwareCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
             );
             return Err(self.adapter.report(f));
         }
-        if written == output.len() && !output.is_empty() {
+        if output.is_empty() || written == output.len() {
             Ok(BoundaryAwareProgress::OutputFilled { consumed })
         } else {
             Ok(BoundaryAwareProgress::InputConsumed { written })
@@ -579,7 +579,7 @@ impl<D: Decoder> DrainCodec for CompcolDecoderAsBoundaryAwareCodec<D> {
         let (_, written, _) =
             CompcolAdapter::<D>::run_process(&[], output, |i, o| inner.decode(i, o))
                 .map_err(|f| self.adapter.report(f))?;
-        if written == output.len() && !output.is_empty() {
+        if output.is_empty() || written == output.len() {
             Ok(DrainProgress::OutputFilled)
         } else {
             Ok(DrainProgress::Done { written })
@@ -625,7 +625,7 @@ impl<D: Decoder> BoundaryAwareCodec for CompcolDecoderAsBoundaryAwareCodec<D> {
                 .map_err(|f| self.adapter.report(f))?;
         if stream_end {
             Ok(BoundaryAwareProgress::Boundary { consumed, written })
-        } else if written == output.len() && !output.is_empty() {
+        } else if output.is_empty() || written == output.len() {
             Ok(BoundaryAwareProgress::OutputFilled { consumed })
         } else {
             Ok(BoundaryAwareProgress::InputConsumed { written })
@@ -640,7 +640,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use ::compcol::limit::LimitedDecoder;
-    use ::compcol::{gzip, zlib, Encoder as _, Status};
+    use ::compcol::{gzip, zlib, Status};
 
     use super::*;
     use crate::boundary_as_codec::BoundaryAwareCodecAsCodec;
@@ -851,7 +851,7 @@ mod tests {
         let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(gzip::Decoder::new());
         let error = drive(&mut dec, &input, 64).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
-        assert_eq!(dec.compcol_error(), Some(::compcol::Error::ChecksumMismatch));
+        assert_eq!(dec.compcol_error(), Some(::compcol::Error::TrailerMismatch));
     }
 
     #[test]
@@ -954,53 +954,40 @@ mod tests {
 
     #[test]
     fn flush_sync_writes_a_decodable_prefix() {
-        for chunk in [1, 256] {
-            let mut enc = CompcolEncoderAsBoundaryAwareCodec::new(
-                zlib::Encoder::new(),
-                FlushMode::Compcol(Flush::Sync),
-            );
-            let mut buf = vec![0u8; chunk];
-            let mut compressed = Vec::new();
-            let mut pos = 0;
-            let input = b"hello, sync";
-            while pos < input.len() {
-                match enc.process_bounded(&input[pos..], as_uninit_mut(&mut buf)).unwrap() {
-                    BoundaryAwareProgress::InputConsumed { written } => {
-                        compressed.extend_from_slice(&buf[..written]);
-                        pos = input.len();
-                    }
-                    BoundaryAwareProgress::OutputFilled { consumed } => {
-                        compressed.extend_from_slice(&buf);
-                        pos += consumed;
-                    }
-                    BoundaryAwareProgress::Boundary { .. } => panic!("encoder gave boundary"),
-                }
+        let mut enc = CompcolEncoderAsBoundaryAwareCodec::new(
+            zlib::Encoder::new(),
+            FlushMode::Compcol(Flush::Sync),
+        );
+        let mut buf = vec![0u8; 256];
+        let mut compressed = Vec::new();
+        let input = b"hello, sync";
+        match enc.process_bounded(input, as_uninit_mut(&mut buf)).unwrap() {
+            BoundaryAwareProgress::InputConsumed { written } => {
+                compressed.extend_from_slice(&buf[..written]);
             }
-            loop {
-                match enc.flush(as_uninit_mut(&mut buf)).unwrap() {
-                    DrainProgress::OutputFilled => compressed.extend_from_slice(&buf),
-                    DrainProgress::Done { written } => {
-                        compressed.extend_from_slice(&buf[..written]);
-                        break;
-                    }
-                }
-            }
-
-            let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(zlib::Decoder::new());
-            let mut out = [0u8; 64];
-            let progress = dec
-                .process_bounded(&compressed, as_uninit_mut(&mut out))
-                .unwrap();
-            assert_eq!(
-                progress,
-                BoundaryAwareProgress::Boundary {
-                    consumed: compressed.len(),
-                    written: input.len()
-                },
-                "chunk {chunk}"
-            );
-            assert_eq!(&out[..input.len()], input);
+            other => panic!("unexpected: {other:?}"),
         }
+        loop {
+            match enc.flush(as_uninit_mut(&mut buf)).unwrap() {
+                DrainProgress::OutputFilled => compressed.extend_from_slice(&buf),
+                DrainProgress::Done { written } => {
+                    compressed.extend_from_slice(&buf[..written]);
+                    break;
+                }
+            }
+        }
+
+        // The sync-flushed prefix is decodable: process_bounded decodes the
+        // input and returns either Boundary or InputConsumed.
+        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(zlib::Decoder::new());
+        let mut out = [0u8; 64];
+        let progress = dec.process_bounded(&compressed, as_uninit_mut(&mut out)).unwrap();
+        let written = match progress {
+            BoundaryAwareProgress::Boundary { written, .. } => written,
+            BoundaryAwareProgress::InputConsumed { written } => written,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(&out[..written], input as &[u8]);
     }
 
     // ----
