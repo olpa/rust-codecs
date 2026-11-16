@@ -92,10 +92,9 @@
 //! | `BehindLimits`      | `OutputTooSmall`, `OutputLimitExceeded` |
 //! | `ContractViolation` | a variant that this version does not know |
 //!
-//! The adapter's own checks give `ContractViolation` (data after the
-//! end, a status that the compcol contract excludes, a call after
-//! `finish`) or `BehindLimits` (an output too small for one step of the
-//! codec).
+//! The adapter's own checks give `ContractViolation`: data after the
+//! end, a status that the compcol contract excludes, a call that moves
+//! no bytes and does not end the work, a call after `finish`.
 //!
 //! The subcode is opaque and not part of the API.
 //!
@@ -116,13 +115,6 @@
 //! `&mut [MaybeUninit<u8>]`. Each adapter call zero-fills its output
 //! once before it calls compcol. See
 //! <https://github.com/olpa/rust-codecs/issues/19>.
-//!
-//! # Limitation
-//!
-//! If the output is too small for one atomic step of the compcol codec,
-//! the adapter fails with [`ErrorKind::BehindLimits`].
-//! Real compcol codecs write byte by byte, so this happens only with
-//! unusual `Encoder` or `Decoder` implementations. A carry buffer in the adapter is planned.
 
 use core::mem::MaybeUninit;
 
@@ -149,6 +141,9 @@ const SUBCODE_DATA_AFTER_END: usize = 0x101;
 /// The compcol codec returned a status that its contract excludes, for
 /// example `StreamEnd` from `encode`.
 const SUBCODE_UNEXPECTED_STATUS: usize = 0x102;
+/// The compcol codec moved no bytes and did not end the work. See
+/// "Atomic units".
+const SUBCODE_NO_PROGRESS: usize = 0x103;
 
 /// Map a compcol error to the kind and subcode of our [`Error`].
 fn kind_and_subcode(error: ::compcol::Error) -> (ErrorKind, usize) {
@@ -190,6 +185,22 @@ pub enum FlushMode {
 // ----
 // The loops shared by the adapters
 // ----
+
+// Atomic units
+//
+// An atomic unit is the smallest piece that a codec reads or writes in
+// one step, for example a 4-byte header or a 5-byte sync marker. A codec
+// that gets only part of a unit must keep that part in its own state,
+// or it makes no progress.
+//
+// The adapter has no carry buffer. If the inner codec makes no progress,
+// the adapter fails with `ErrorKind::ContractViolation`.
+//
+// The codecs of compcol 0.7.8 do not cause this error. Each of them takes
+// partial input units into its own state, and keeps output that does not
+// fit for the next call. So each call with a non-empty output moves at
+// least one byte or ends the work. The error can come from other
+// `Encoder` or `Decoder` implementations, or from later compcol versions.
 
 /// The state that all three adapters share.
 #[derive(Debug, Clone, Copy, Default)]
@@ -322,6 +333,8 @@ fn run_process(
         if c == input.len() && status == Status::InputEmpty {
             return Ok(Outcome::InputConsumed { written: w });
         }
+        // No bytes moved, and the work is not done. compcol 0.7.8 codecs
+        // never get here. See "Atomic units" above.
         if progress.consumed == 0 && progress.written == 0 {
             return Err(no_progress(status, c, w));
         }
@@ -366,6 +379,8 @@ fn run_drain(
                 w,
             ));
         }
+        // No bytes moved, and the work is not done. compcol 0.7.8 codecs
+        // never get here. See "Atomic units" above.
         if progress.written == 0 {
             return Err(no_progress(status, 0, w));
         }
@@ -373,13 +388,20 @@ fn run_drain(
 }
 
 /// The call moved no bytes and did not finish the work.
+///
+/// The compcol bridge reports `OutputFull` for such a call. That status
+/// has two meanings: the output is too small for one step of the codec,
+/// or the codec stopped with input left. The adapter cannot tell which.
+/// It expects each call with a non-empty output to move a byte or end
+/// the work, so both are [`ErrorKind::ContractViolation`]. See "Atomic
+/// units".
+///
+/// Any other status breaks the compcol contract.
 fn no_progress(status: Status, consumed: usize, written: usize) -> Failure {
     if status == Status::OutputFull {
-        // TODO: a carry buffer in the adapter would make every output
-        // size legal. See "Limitation" in the module docs.
         Failure::own(
-            ErrorKind::BehindLimits,
-            SUBCODE_OUTPUT_TOO_SMALL,
+            ErrorKind::ContractViolation,
+            SUBCODE_NO_PROGRESS,
             consumed,
             written,
         )
@@ -1146,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn no_progress_with_output_full_is_behind_limits() {
+    fn no_progress_with_output_full_is_contract_violation() {
         let script = [
             step(3, 4, Status::OutputFull),
             step(0, 0, Status::OutputFull),
@@ -1156,8 +1178,8 @@ mod tests {
         assert_eq!(
             enc.process(b"abcdef", as_uninit_mut(&mut out)),
             Err(own_error(
-                ErrorKind::BehindLimits,
-                SUBCODE_OUTPUT_TOO_SMALL,
+                ErrorKind::ContractViolation,
+                SUBCODE_NO_PROGRESS,
                 3,
                 4
             ))
