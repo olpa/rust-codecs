@@ -9,7 +9,19 @@ repository = "https://github.com/olpa/rust-codecs"
 publish = false
 
 [dependencies]
-rust-codecs-core = { path = "../core", features = ["rot13", "base64", "json", "embedded-io"] }
+rust-codecs-core = { path = "../core", features = ["rot13", "base64", "json", "embedded-io", "compcol"] }
+# `factory` gives by-name lookup; the rest are all algorithms compcol
+# offers (its `all` feature minus `tokio`).
+compcol = { version = "0.7.8", default-features = false, features = [
+    "std", "factory",
+    "rle", "rle90", "deflate", "deflate64", "zlib", "gzip", "lzma", "xz", "lzma2",
+    "zstd", "brotli", "lz4", "lz5", "snappy", "lzw", "lzss", "bzip2", "lzo", "lzf",
+    "lzx", "amiga_lzx", "quantum", "lzfse", "adc", "ppmd", "xpress_huffman", "lznt1",
+    "xpress", "packbits", "zip_implode", "lzs", "lzham", "sit13", "lzah", "arsenic",
+    "rar1", "rar2", "rar3", "rar5", "zip_shrink", "zip_reduce", "lha", "bcj", "bcj2",
+    "delta", "arc_crunch", "arc_squeeze", "arc_squash", "hpack", "qpack", "huffman",
+    "rangecoder", "mtf", "bwt",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

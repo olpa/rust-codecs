@@ -13,6 +13,7 @@
 
 use std::io::{self, BufRead, Write};
 
+use rust_codecs_core::compcol::{CompcolDecoderAsCodec, CompcolEncoderAsCodec, FlushMode};
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
 };
@@ -43,12 +44,84 @@ const CODECS: &[CodecEntry] = &[
     }),
 ];
 
+/// Prefix of all compcol codec names: `compcol-gzip-enc`.
+const COMPCOL_PREFIX: &str = "compcol-";
+/// Suffix that selects a compcol encoder: `compcol-gzip-enc`.
+const COMPCOL_ENC: &str = "-enc";
+/// Suffix that selects a compcol decoder: `compcol-gzip-dec`.
+const COMPCOL_DEC: &str = "-dec";
+
+/// Build a codec from a compcol algorithm, named
+/// `compcol-<algorithm>-enc` or `compcol-<algorithm>-dec`. `None` if the
+/// name does not have this form or compcol has no such encoder or
+/// decoder (some algorithms only decode).
+///
+/// The encoder's `flush` does nothing (`FlushMode::Skip`), so the
+/// output has the best ratio and is complete only after `finish`. The
+/// decoder expects one stream; data after its end is an error.
+fn make_compcol_codec(name: &str) -> Option<Box<dyn Codec>> {
+    let name = name.strip_prefix(COMPCOL_PREFIX)?;
+    if let Some(algorithm) = name.strip_suffix(COMPCOL_ENC) {
+        let encoder = compcol_encoder(algorithm)?;
+        return Some(Box::new(CompcolEncoderAsCodec::new(
+            encoder,
+            FlushMode::Skip,
+        )));
+    }
+    if let Some(algorithm) = name.strip_suffix(COMPCOL_DEC) {
+        let decoder = compcol::factory::decoder_by_name(algorithm)?;
+        return Some(Box::new(CompcolDecoderAsCodec::new(decoder)));
+    }
+    None
+}
+
+/// The compcol encoder for `algorithm`, or `None` if there is none.
+///
+/// The factory also returns an encoder for decode-only algorithms
+/// (`quantum`, `rar5`, ...), but that encoder fails every call with
+/// `Unsupported`. Finishing a fresh encoder tells the two apart: a real
+/// one writes an empty stream.
+fn compcol_encoder(algorithm: &str) -> Option<Box<dyn compcol::Encoder>> {
+    use compcol::Encoder as _;
+    let mut probe = compcol::factory::encoder_by_name(algorithm)?;
+    if let Err(compcol::Error::Unsupported) = probe.finish(&mut [0u8; STAGING]) {
+        return None;
+    }
+    compcol::factory::encoder_by_name(algorithm)
+}
+
+/// Names of all compcol codecs, `compcol-<algorithm>-enc` and
+/// `compcol-<algorithm>-dec`,
+/// for each algorithm that has an encoder or a decoder.
+fn compcol_codec_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for algorithm in compcol::factory::names() {
+        if compcol_encoder(algorithm).is_some() {
+            names.push(format!("{COMPCOL_PREFIX}{algorithm}{COMPCOL_ENC}"));
+        }
+        if compcol::factory::decoder_by_name(algorithm).is_some() {
+            names.push(format!("{COMPCOL_PREFIX}{algorithm}{COMPCOL_DEC}"));
+        }
+    }
+    names
+}
+
+/// The own codec names, then the compcol codec names.
+fn all_codec_names() -> Vec<String> {
+    CODECS
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .chain(compcol_codec_names())
+        .collect()
+}
+
 fn usage() -> String {
     let names = CODECS
         .iter()
         .map(|(name, _)| *name)
         .collect::<Vec<_>>()
         .join(", ");
+    let compcol_names = compcol::factory::names().join(", ");
     format!(
         "\
 Test harness for chaining codecs: folds --readers into one Chain and
@@ -57,8 +130,18 @@ the writers, to stdout.
 
 Usage:
   cargo run -p cli -- [--engine copy|stream] [--readers CODEC...] [--writers CODEC...]
+  cargo run -p cli -- --list
 
 Codecs: {names}
+
+Compcol codecs: compcol-ALGORITHM-enc compresses, compcol-ALGORITHM-dec
+decompresses (not every algorithm has both; --list prints the exact
+names).
+The encoder writes the whole stream at the end of input. The decoder
+expects exactly one stream. Algorithms: {compcol_names}
+
+Options:
+  --list   print every codec name, one per line, and exit
 
 --engine selects which copy path drives the chain: `copy` (default)
 wraps the chain in BufReadCodecReader/CodecWriter and drives it with
@@ -76,8 +159,9 @@ bytes first). Writer codecs also apply in the order listed (first
 listed runs first, closest to the incoming bytes, before reaching
 stdout).
 
-Example:
+Examples:
   echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
+  echo hello | cargo run -p cli -- --readers compcol-gzip-enc --writers compcol-gzip-dec
 "
     )
 }
@@ -87,12 +171,9 @@ fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, ctor)| ctor())
+        .or_else(|| make_compcol_codec(name))
         .ok_or_else(|| {
-            let names = CODECS
-                .iter()
-                .map(|(n, _)| *n)
-                .collect::<Vec<_>>()
-                .join(", ");
+            let names = all_codec_names().join(", ");
             format!("unknown codec {name:?} (expected one of: {names})")
         })
 }
@@ -294,6 +375,12 @@ fn main() {
         print!("{}", usage());
         return;
     }
+    if args.iter().any(|a| a == "--list") {
+        for name in all_codec_names() {
+            println!("{name}");
+        }
+        return;
+    }
 
     if let Err(err) = run(args.into_iter()) {
         eprintln!("error: {err}");
@@ -311,7 +398,7 @@ mod tests {
     use rust_codecs_core::sources_and_sinks::vec::{VecSink, VecSource};
     use rust_codecs_core::stream_to_stream;
 
-    use super::{compose, parse_args, run_io, run_io_stream, Engine};
+    use super::{all_codec_names, compose, make_codec, parse_args, run_io, run_io_stream, Engine};
 
     fn collect(codec: impl rust_codecs_core::Codec, bytes: &[u8]) -> Vec<u8> {
         let mut input = VecSource::new(bytes.to_vec());
@@ -443,5 +530,84 @@ mod tests {
 
         let expected = collect(rot13(), b"hi\n");
         assert_eq!(sink.0.borrow().as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn compcol_round_trip_through_both_engines() {
+        let input = b"hello, hello, hello, compcol";
+        for (enc, dec) in [
+            ("compcol-gzip-enc", "compcol-gzip-dec"),
+            ("compcol-zstd-enc", "compcol-zstd-dec"),
+        ] {
+            let readers = names(&[enc]);
+            let writers = names(&[dec]);
+            let copy_output =
+                run_io(&readers, &writers, Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            assert_eq!(copy_output, input, "{enc} then {dec}, copy engine");
+            let stream_output =
+                run_io_stream(&readers, &writers, Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            assert_eq!(stream_output, input, "{enc} then {dec}, stream engine");
+        }
+    }
+
+    #[test]
+    fn compcol_decoder_holding_bytes_at_finish_in_one_chain() {
+        // In one `Chain`, the decoder fills the output while it still
+        // holds decoded bytes, and then `finish` gets an empty output.
+        // compcol's `lzx` failed on that until the adapter stopped
+        // passing an empty output to compcol.
+        let input: Vec<u8> = (0..5000u32)
+            .map(|i| {
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                    [(i.wrapping_mul(2_654_435_761) >> 26) as usize]
+            })
+            .collect();
+        let output = run_io_stream(
+            &names(&["compcol-lzx-enc", "compcol-lzx-dec"]),
+            &[],
+            Cursor::new(input.clone()),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn compcol_encoder_output_is_compressed() {
+        let output = run_io(
+            &names(&["compcol-gzip-enc"]),
+            &[],
+            Cursor::new(b"hello".to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(&output[..2], &[0x1f, 0x8b], "gzip magic");
+    }
+
+    #[test]
+    fn every_listed_codec_name_builds() {
+        let all = all_codec_names();
+        assert!(all.iter().any(|n| n == "compcol-gzip-enc"));
+        assert!(all.iter().any(|n| n == "compcol-gzip-dec"));
+        for name in &all {
+            assert!(make_codec(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn unknown_compcol_names_are_rejected() {
+        // `quantum` is decode-only in compcol.
+        assert!(make_codec("compcol-quantum-dec").is_ok());
+        for name in [
+            "gzip-enc",
+            "compcol-gzip",
+            "compcol-nosuch-enc",
+            "compcol-nosuch-dec",
+            "compcol--enc",
+            "compcol-quantum-enc",
+        ] {
+            let err = make_codec(name).err().unwrap();
+            assert!(err.contains(name), "{err}");
+        }
     }
 }
