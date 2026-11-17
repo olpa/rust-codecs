@@ -18,9 +18,14 @@
 \begin{frame}{Contents}\tableofcontents\end{frame}
 
 \section{What's going on?}
-\begin{frame}{What's going on? Few examples}
+\begin{frame}{What's going on? Example 1: rot13}
+\centering
+\mbox{\special{pdf:ann width \the\dimexpr0.8\textwidth\relax\space height \the\dimexpr0.39\textwidth\relax\space << /Type /Annot /Subtype /Movie /Border [0 0 0] /T (rot13) /Movie << /F (rot13.mp4) /Aspect [597 291] /Poster true >> /A << /Start 0 /Mode /Repeat >> >>}%
+  \includegraphics[width=0.8\textwidth]{f-00.png}}
+\end{frame}
+
+\begin{frame}{What's going on? More examples}
 \begin{itemize}
-\item Slide 1: Wrap a stream, show rot13
 \item Slide 2: stream to stream: from \texttt{std::io}, base64 encode, \texttt{embedded\_io} output
 \item Slide 3: json-escape/unescape to a string
 \end{itemize}
