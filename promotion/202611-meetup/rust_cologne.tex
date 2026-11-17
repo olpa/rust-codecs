@@ -7,6 +7,7 @@
 \usepackage{fontspec}
 \usepackage{fancyvrb}
 \setmonofont{DejaVu Sans Mono}[Scale=0.85]
+\newcommand{\hl}[1]{\colorbox{yellow}{#1}}
 \newcommand{\todo}[1]{{\color{red}\emph{#1}}}
 
 \title{Rust codecs: streaming byte transformations}
@@ -18,12 +19,25 @@
 \begin{frame}{Contents}\tableofcontents\end{frame}
 
 \section{What's going on?}
-\begin{frame}{What's going on? Example 1: rot13}
-\centering
-\mbox{\special{pdf:ann width \the\dimexpr0.8\textwidth\relax\space height \the\dimexpr0.39\textwidth\relax\space << /Type /Annot /Subtype /Movie /Border [0 0 0] /T (rot13) /Movie << /F (rot13.mp4) /Aspect [597 291] /Poster true >> /A << /Start 0 /Mode /Repeat >> >>}%
-  \includegraphics[width=0.8\textwidth]{rot13_poster.png}%
-  \hspace{-0.8\textwidth}\makebox[0.8\textwidth][c]{\raisebox{0.17\textwidth}{%
-    \fcolorbox{white}{black!70}{\color{white}\large\,{\fontspec{DejaVu Sans}\char"25B6}\ click to play\,}}}}
+\begin{frame}[fragile]{What's going on? Example 1: rot13}
+\newlength{\vw}\setlength{\vw}{0.52\textwidth}
+\begin{minipage}[c]{\vw}
+\mbox{\special{pdf:ann width \the\vw\space height \the\dimexpr0.4874\vw\relax\space << /Type /Annot /Subtype /Movie /Border [0 0 0] /T (rot13) /Movie << /F (rot13.mp4) /Aspect [597 291] /Poster true >> /A << /Start 0 /Mode /Repeat >> >>}%
+  \includegraphics[width=\vw]{rot13_poster.png}%
+  \hspace{-\vw}\makebox[\vw][c]{\raisebox{0.17\vw}{%
+    \fcolorbox{white}{black!70}{\color{white}\small\,{\fontspec{DejaVu Sans}\char"25B6}\ click to play\,}}}}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.44\textwidth}
+\begin{Verbatim}[fontsize=\scriptsize,commandchars=\\\{\}]
+let mut out = \hl{CodecWriter}::new(
+    io::stdout(),
+    \hl{rot13()},
+    vec![0u8; 4096],
+)?;
+io::copy(&mut io::stdin(), &mut out)?;
+out.finish()?;
+\end{Verbatim}
+\end{minipage}
 \end{frame}
 
 \begin{frame}{What's going on? More examples}
