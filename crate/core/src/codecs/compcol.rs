@@ -273,7 +273,6 @@ impl DrainMode {
     }
 }
 
-/// The inner codec and the state that both adapters share.
 /// The latched error of the adapter.
 ///
 /// After `Err`, compcol calls the inner codec poisoned. So the adapter
@@ -289,6 +288,7 @@ enum Failure {
     },
 }
 
+/// The inner codec and the state that both adapters share.
 #[derive(Debug, Clone)]
 struct CompcolAdapter<I> {
     inner: I,
