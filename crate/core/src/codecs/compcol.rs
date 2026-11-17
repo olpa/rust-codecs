@@ -314,6 +314,10 @@ impl<I> CompcolAdapter<I> {
         output: &mut [MaybeUninit<u8>],
         mut step: impl FnMut(&mut I, &[u8], &mut [u8]) -> CompcolResult,
     ) -> Result<BoundaryAwareProgress, Error> {
+        // An empty output is legal for our codecs: `Chain` and `Pump` pass
+        // one when their output is full. Some compcol codecs fail on an
+        // empty output (see `drain_loop`), so do not call them.
+        // `OutputFilled` makes the caller call again with room.
         if output.is_empty() {
             return Ok(BoundaryAwareProgress::OutputFilled { consumed: 0 });
         }
