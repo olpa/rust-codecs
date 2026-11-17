@@ -1,0 +1,272 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usetheme{default}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\setbeamertemplate{itemize items}[circle]
+\usepackage{fontspec}
+\usepackage{fancyvrb}
+\setmonofont{DejaVu Sans Mono}[Scale=0.85]
+\newcommand{\todo}[1]{{\color{red}\emph{#1}}}
+
+\title{Rust codecs: streaming byte transformations}
+\author{Oleg Parashchenko}
+\date{November 2026}
+
+\begin{document}
+\begin{frame}\titlepage\end{frame}
+\begin{frame}{Contents}\tableofcontents\end{frame}
+
+\section{What's going on?}
+\begin{frame}{What's going on? Few examples}
+\begin{itemize}
+\item Slide 1: Wrap a stream, show rot13
+\item Slide 2: stream to stream: from \texttt{std::io}, base64 encode, \texttt{embedded\_io} output
+\item Slide 3: json-escape/unescape to a string
+\end{itemize}
+\end{frame}
+
+\section{Who am I?}
+\begin{frame}{Who am I? Why rust-codecs?}
+\begin{itemize}
+\item \todo{Full-stack in the sense full-end, from time to time coming with ?? products. For example, CALS tables is after 10 years still the best way to create tables in LaTeX. However, C is a sort of mother language.}
+\item Over 20 years of experience. Maybe you used bbAntiSpam, CALS tables for LaTeX, \dots
+\item One of the last experiments is a streaming JSON parser
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Streaming JSON parser}
+\todo{animated gif}
+\begin{itemize}
+\item Parse and process JSON through a sliding window
+\item For practical applications a number of useful transformations is needed: escape or unescape a string, to and from base64, quoted-printable, and so on
+\item Each crate wants its own interface. Not convenient.
+\end{itemize}
+\end{frame}
+
+\section{About the talk}
+\begin{frame}{About the talk}
+\begin{itemize}
+\item Not about API rehearsal, but the evolution of the API and the reason why it is so
+\item A few non-obvious decisions
+\item If I haven't done a great job and you try better, you'll know the main pitfalls
+\end{itemize}
+\end{frame}
+
+\section{Requirements and the idea}
+\begin{frame}[fragile]{First requirements and the idea}
+Requirements:
+\begin{enumerate}
+\item streaming processing: bytes in, bytes out
+\item zero cost for in-memory: no unneeded copies/movements for slice in, slice out
+\item \dots{} to be continued
+\end{enumerate}
+First idea: two iterators
+\begin{itemize}
+\item Inner iterator, cheap, essentially scanning a memory
+\end{itemize}
+\begin{Verbatim}
+while(*tgt++=*src++);
+\end{Verbatim}
+\begin{itemize}
+\item Outer iterator: load/save a block of memory to an external storage
+\end{itemize}
+\end{frame}
+
+\section{Preliminary work}
+\begin{frame}{Preliminary work}
+Surprisingly, not much. ChatGPT research mode:
+\begin{quote}\small
+My overall judgment is therefore: Rust has had many serious pieces of groundwork, but almost all of them optimized either framing, compression, or format-specific ergonomics. A general standard for stateful, composable, allocation-light streaming byte rewriters remains a visible gap.
+\end{quote}
+Full report: \small\url{https://github.com/olpa/rust-codecs/blob/master/deep-research-report.md}
+\end{frame}
+
+\begin{frame}{Preliminary work: shortlist}
+\begin{itemize}
+\item tokio codecs
+\item compcol --- very close to what I want. Collection of compression algorithms.
+\item Honorary mention: base64 algorithm as an ``adversarial'' use case
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Updated requirements}
+\begin{enumerate}
+\item streaming processing: bytes in, bytes out
+\item zero cost for in-memory: no extra copies/movements for slice in, slice out
+\item \todo{placeholder: find what's interesting in compcol}
+\item \todo{placeholder: find what's interesting in tokio}
+\item \todo{placeholder: find what's needed for base64}
+\end{enumerate}
+\end{frame}
+
+\section{Compcol}
+\begin{frame}{Compcol interface}
+\begin{itemize}
+\item Process step $\to$ \texttt{Progress}, \texttt{Status}
+\item Code/decode
+\item Slice to slice instead of an iterator: OK
+\item flush, finish. Hello from base64, we'll come to it
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Compcol interface --- 2}
+Result of a codec step.
+\begin{itemize}
+\item Codec-initiated end of the stream
+\item There is also ``skip N bytes'', but for me it doesn't need a definition through the interface
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Requirements rewrite}
+\begin{enumerate}
+\item streaming processing
+\item zero cost for in-memory
+\item finish, maybe flush and in-band end
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{AI slop}
+\begin{itemize}
+\item I've never seen such unclear code.
+\item Manual investigation: indeed, not so easy.
+\item A corner case sits on a corner case and harnesses a corner case
+\end{itemize}
+\end{frame}
+
+\section{Base64}
+\begin{frame}{Base64}
+\begin{itemize}
+\item Blocks of 3 bytes $\to$ blocks of 4 bytes
+\item Last block: with filling bytes (must do)
+\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Base64 challenge}
+Input: \texttt{[x][x][x][o][o]}\\
+Output: \texttt{...}
+
+\medskip
+Convert:
+\begin{itemize}
+\item Can't proceed with input $\to$ 0 bytes
+\item Can't proceed with output $\to$ 0 bytes
+\end{itemize}
+Step output:
+\begin{Verbatim}
+{
+  consumed: 0;
+  written: 0;
+}
+\end{Verbatim}
+0/0: is the codec stalled? How to fix?
+\end{frame}
+
+\section{Solution}
+\begin{frame}{Solution}
+Consume full, or write full.
+
+\medskip
+The returning type: \todo{\dots}
+
+\bigskip
+\alert{A big insight.} If you take whatever with you, take this insight: a codec should do full.
+\end{frame}
+
+\begin{frame}{Final interface}
+\todo{(to be filled)}
+\end{frame}
+
+\section{I/O backend}
+\begin{frame}{I/O backend: Sources and Sinks}
+\begin{itemize}
+\item For zero overhead for in-memory: slices/Vecs
+\item \todo{\dots interface \dots}
+\item Differentiator from other codec stuff, which is tied to Reader, Writer and their async versions
+\end{itemize}
+\end{frame}
+
+\section{Early stop}
+\begin{frame}{Early stop}
+\begin{itemize}
+\item Codec: \texttt{ParseString}
+\item Taken from the compression codecs (compcol)
+\item New use case: parsing
+\item Example: parse until a quote
+\item \texttt{stream\_to\_stream}: getting tokens
+\item But: \texttt{NullSink}, getting position $\to$ in-place parsing, no byte moving
+\item In investigation, a topic for the next year
+\end{itemize}
+\end{frame}
+
+\section{Inside}
+\begin{frame}{Inside}
+\begin{itemize}
+\item \texttt{stream\_to\_stream}
+\item Sink/Source and CodecReader/CodecWriter for \texttt{std::io} and \texttt{embedded\_io}
+\item Async version later
+\item Source for \texttt{u8} slice, Source/Sink for \texttt{u8} Vec
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Inside: codecs}
+All codecs from ``compcol'' (lz, \dots), encoding-rs, slip, async-compression, bytes\_rw
+
+\medskip
+Provisional (mostly AI generated with review):
+\begin{itemize}
+\item base64
+\item json encode and decode
+\item TODO quoted-printable
+\item TODO urlencode
+\end{itemize}
+\end{frame}
+
+\section{Call for participation}
+\begin{frame}{Call for participation: Codecs}
+Create codecs:
+\begin{itemize}
+\item ``convert'' function
+\item Inner staging to hold bytes when it can't produce reasonable output, but must consume full input
+\end{itemize}
+No need to care for I/O and UX, just convert.
+
+\medskip
+This is a mega-bonus: before, each transformation crate had to invent its own interface for bytes. No need for it anymore.
+
+\medskip
+Second insight from the talk: the byte pull-push got a new potential standard.
+
+\medskip
+\texttt{CREATING-CODECS.md}
+\end{frame}
+
+\begin{frame}{Call for participation: Parser combinators}
+Nothing done by me yet, but the way is clear.
+\end{frame}
+
+\begin{frame}{Call for participation: I/O backends}
+More complicated, but doable. Bundled \texttt{std::io} and \texttt{embedded\_io} are thin wrappers.
+\end{frame}
+
+\section{Conclusions}
+\begin{frame}{Conclusions, take-off}
+Technical implementation:
+\begin{itemize}
+\item Codec step should consume all or fill output
+\item Source/Sink as an alternative to Reader and Writer
+\end{itemize}
+Effect:
+\begin{itemize}
+\item Streaming \emph{or} zero overhead in memory
+\item Early stop enables parser combinators
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Call to action}
+Contribute a codec, a parser or an I/O backend.
+
+\medskip
+All together I think I've discovered a potentially foundational interface. Please help with publicity. I don't have a wide audience.
+\end{frame}
+\end{document}
