@@ -73,9 +73,9 @@
 //!
 //! # After `finish` and after an error
 //!
-//! - When `finish` reports [`Done`](DrainProgress::Done), the adapter is
-//!   finished. Then `process_bounded` and `flush` fail with
-//!   [`ErrorKind::ContractViolation`]. A second `finish` returns
+//! - After the first `finish` call, `process_bounded` and `flush` fail
+//!   with [`ErrorKind::ContractViolation`]. When `finish` reports
+//!   [`Done`](DrainProgress::Done), a new `finish` returns
 //!   `Done { written: 0 }`.
 //! - `reset()` resets the inner codec and the adapter. The instance is
 //!   then ready for the next logical stream.
@@ -122,6 +122,7 @@ use core::mem::MaybeUninit;
 
 use ::compcol::{Decoder, Encoder, Flush, Status};
 
+use crate::step::FinishPhase;
 use crate::uninit::zero_init_mut;
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress, Error, ErrorKind,
@@ -171,173 +172,188 @@ pub enum FlushMode {
 // least one byte or ends the work. The error can come from other
 // `Encoder` or `Decoder` implementations, or from later compcol versions.
 
-#[derive(Debug, Clone, Copy, Default)]
-struct AdapterState {
-    finished: bool,
-    compcol_error: Option<::compcol::Error>,
+/// The kind and the subcode of an [`Error`] for a compcol error.
+fn map_compcol_error(error: ::compcol::Error) -> (ErrorKind, usize) {
+    use ::compcol::Error as E;
+    use ErrorKind::*;
+    match error {
+        E::Corrupt => (CorruptStream, 1),
+        E::UnexpectedEnd => (CorruptStream, 2),
+        E::OutputTooSmall => (BehindLimits, 3),
+        E::BadHeader => (CorruptStream, 4),
+        E::InvalidBlockType => (CorruptStream, 5),
+        E::InvalidHuffmanTree => (CorruptStream, 6),
+        E::InvalidDistance => (CorruptStream, 7),
+        E::ChecksumMismatch => (CorruptStream, 8),
+        E::TrailerMismatch => (CorruptStream, 9),
+        E::Unsupported => (Unsupported, 10),
+        E::OutputLimitExceeded => (BehindLimits, 11),
+        E::NeedDictionary => (Unsupported, 12),
+        _ => (ContractViolation, 0),
+    }
 }
 
-struct Failure {
-    error: Error,
-    compcol: Option<::compcol::Error>,
+/// Selects the compcol call that `CompcolAdapter::drain_loop` repeats.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DrainMode {
+    /// `compcol::Encoder::flush`.
+    Flush,
+    /// `compcol::Encoder::finish` or `compcol::Decoder::finish`.
+    Finish,
 }
 
-/// Shared state and loop helpers used by both encoder and decoder adapters.
+impl DrainMode {
+    /// The status that tells that the call has no more output.
+    fn done_status(self) -> Status {
+        match self {
+            DrainMode::Flush => Status::InputEmpty,
+            DrainMode::Finish => Status::StreamEnd,
+        }
+    }
+}
+
+/// The inner codec and the state that both adapters share.
 #[derive(Debug, Clone)]
 struct CompcolAdapter<I> {
     inner: I,
-    state: AdapterState,
+    /// How far the adapter is in `finish`.
+    finish_phase: FinishPhase,
+    /// The compcol error behind the last `Err` of the adapter. `None`
+    /// if the adapter made that error itself.
+    compcol_error: Option<::compcol::Error>,
 }
 
 impl<I> CompcolAdapter<I> {
     fn new(inner: I) -> Self {
         Self {
             inner,
-            state: AdapterState::default(),
+            finish_phase: FinishPhase::Open,
+            compcol_error: None,
         }
     }
 
-    fn compcol_error(&self) -> Option<::compcol::Error> {
-        self.state.compcol_error
+    /// Prepare the adapter for a new stream. The caller resets `inner`.
+    fn reset_state(&mut self) {
+        self.finish_phase = FinishPhase::Open;
+        self.compcol_error = None;
     }
 
-    fn map_compcol_error(error: ::compcol::Error) -> (ErrorKind, usize) {
-        use ::compcol::Error as E;
-        use ErrorKind::*;
-        match error {
-            E::Corrupt => (CorruptStream, 1),
-            E::UnexpectedEnd => (CorruptStream, 2),
-            E::OutputTooSmall => (BehindLimits, 3),
-            E::BadHeader => (CorruptStream, 4),
-            E::InvalidBlockType => (CorruptStream, 5),
-            E::InvalidHuffmanTree => (CorruptStream, 6),
-            E::InvalidDistance => (CorruptStream, 7),
-            E::ChecksumMismatch => (CorruptStream, 8),
-            E::TrailerMismatch => (CorruptStream, 9),
-            E::Unsupported => (Unsupported, 10),
-            E::OutputLimitExceeded => (BehindLimits, 11),
-            E::NeedDictionary => (Unsupported, 12),
-            _ => (ContractViolation, 0),
+    /// Fail if `finish` was called. Call it before `process_bounded`
+    /// and `flush`.
+    fn check_open(&mut self) -> Result<(), Error> {
+        let open = self.finish_phase.check_open();
+        if open.is_err() {
+            self.compcol_error = None;
+        }
+        open
+    }
+
+    /// Make an error of the kind `ContractViolation`. The adapter made
+    /// it itself, so there is no compcol error behind it.
+    fn violation(&mut self, codec_subcode: usize, consumed: usize, written: usize) -> Error {
+        self.compcol_error = None;
+        Error {
+            kind: ErrorKind::ContractViolation,
+            codec_subcode,
+            consumed,
+            written,
         }
     }
 
-    fn failure_own(
-        kind: ErrorKind,
-        codec_subcode: usize,
+    /// Keep the compcol error for `compcol_error()`, and convert it.
+    fn compcol_failure(
+        &mut self,
+        error: ::compcol::Error,
         consumed: usize,
         written: usize,
-    ) -> Failure {
-        Failure {
-            error: Error { kind, codec_subcode, consumed, written },
-            compcol: None,
+    ) -> Error {
+        self.compcol_error = Some(error);
+        let (kind, codec_subcode) = map_compcol_error(error);
+        Error {
+            kind,
+            codec_subcode,
+            consumed,
+            written,
         }
     }
 
-    fn failure_compcol(error: ::compcol::Error, consumed: usize, written: usize) -> Failure {
-        let (kind, codec_subcode) = Self::map_compcol_error(error);
-        Failure {
-            error: Error { kind, codec_subcode, consumed, written },
-            compcol: Some(error),
-        }
-    }
-
-    fn failure_after_finish() -> Failure {
-        Self::failure_own(ErrorKind::ContractViolation, Error::SUBCODE_AFTER_FINISH, 0, 0)
-    }
-
-    fn report(&mut self, failure: Failure) -> Error {
-        self.state.compcol_error = failure.compcol;
-        failure.error
-    }
-
-    fn check_not_finished(&self) -> Result<(), Failure> {
-        if self.state.finished {
-            return Err(Self::failure_after_finish());
-        }
-        Ok(())
-    }
-
+    /// Fail if the compcol call claims more bytes than it received.
+    /// `consumed` and `written` are the counts before the call.
     fn check_counts(
+        &mut self,
         progress: ::compcol::Progress,
         input_len: usize,
         output_len: usize,
         consumed: usize,
         written: usize,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), Error> {
         if progress.consumed > input_len || progress.written > output_len {
-            return Err(Self::failure_own(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                consumed,
-                written,
-            ));
+            return Err(self.violation(Error::SUBCODE_BYTE_COUNT_CLAIM, consumed, written));
         }
         Ok(())
     }
 
-    fn no_progress(status: Status, consumed: usize, written: usize) -> Failure {
-        if status == Status::OutputFull {
-            Self::failure_own(ErrorKind::ContractViolation, SUBCODE_NO_PROGRESS, consumed, written)
+    /// The error for a compcol call that moved no bytes and did not end
+    /// the work. compcol 0.7.8 codecs never cause it. See "Atomic
+    /// units" above.
+    fn no_progress(&mut self, status: Status, consumed: usize, written: usize) -> Error {
+        let codec_subcode = if status == Status::OutputFull {
+            SUBCODE_NO_PROGRESS
         } else {
-            Self::failure_own(
-                ErrorKind::ContractViolation,
-                SUBCODE_UNEXPECTED_STATUS,
-                consumed,
-                written,
-            )
-        }
+            SUBCODE_UNEXPECTED_STATUS
+        };
+        self.violation(codec_subcode, consumed, written)
     }
 
-    /// Call `encode` or `decode` until the input is consumed, the output is
-    /// full, or the stream ends. Returns `(consumed, written, stream_end)`.
-    fn run_process(
+    /// Repeat `step` (`encode` or `decode`) until `input` is consumed,
+    /// `output` is full, or the stream ends. The stream end gives
+    /// `Boundary`.
+    fn transfer_loop(
+        &mut self,
         input: &[u8],
-        output: &mut [u8],
-        mut call: impl FnMut(&[u8], &mut [u8]) -> CompcolResult,
-    ) -> Result<(usize, usize, bool), Failure> {
+        output: &mut [MaybeUninit<u8>],
+        mut step: impl FnMut(&mut I, &[u8], &mut [u8]) -> CompcolResult,
+    ) -> Result<BoundaryAwareProgress, Error> {
         if output.is_empty() {
-            return Ok((0, 0, false));
+            return Ok(BoundaryAwareProgress::OutputFilled { consumed: 0 });
         }
-        let (mut c, mut w) = (0, 0);
+        let output = zero_init_mut(output);
+        let (mut consumed, mut written) = (0, 0);
         loop {
-            let rest_in = &input[c..];
-            let rest_out = &mut output[w..];
+            let rest_in = &input[consumed..];
+            let rest_out = &mut output[written..];
             let (in_len, out_len) = (rest_in.len(), rest_out.len());
-            let (progress, status) =
-                call(rest_in, rest_out).map_err(|e| Self::failure_compcol(e, c, w))?;
-            Self::check_counts(progress, in_len, out_len, c, w)?;
-            c += progress.consumed;
-            w += progress.written;
+            let (progress, status) = step(&mut self.inner, rest_in, rest_out)
+                .map_err(|error| self.compcol_failure(error, consumed, written))?;
+            self.check_counts(progress, in_len, out_len, consumed, written)?;
+            consumed += progress.consumed;
+            written += progress.written;
 
             if status == Status::StreamEnd {
-                return Ok((c, w, true));
+                return Ok(BoundaryAwareProgress::Boundary { consumed, written });
             }
             // Full output first: a decoder can consume all input and still
             // hold decoded bytes.
-            if w == output.len() {
-                return Ok((c, w, false));
+            if written == output.len() {
+                return Ok(BoundaryAwareProgress::OutputFilled { consumed });
             }
-            if c == input.len() && status == Status::InputEmpty {
-                return Ok((c, w, false));
+            if consumed == input.len() && status == Status::InputEmpty {
+                return Ok(BoundaryAwareProgress::InputConsumed { written });
             }
-            // No bytes moved, and the work is not done. compcol 0.7.8 codecs
-            // never get here. See "Atomic units" above.
             if progress.consumed == 0 && progress.written == 0 {
-                return Err(Self::no_progress(status, c, w));
+                return Err(self.no_progress(status, consumed, written));
             }
         }
     }
 
-    /// Call `finish` until it reports done, or the output is full.
-    /// `done_status` is the status that signals completion (`StreamEnd` for
-    /// decoders, `InputEmpty` for encoders — they differ on what `finish`
-    /// returns when it has no more output).
-    fn run_finish(
-        output: &mut [u8],
-        done_status: Status,
-        unexpected_status: Status,
-        mut call: impl FnMut(&mut [u8]) -> CompcolResult,
-    ) -> Result<DrainProgress, Failure> {
+    /// Repeat `step` (`flush` or `finish`, as `mode` says) until it has
+    /// no more output, or `output` is full.
+    fn drain_loop(
+        &mut self,
+        output: &mut [MaybeUninit<u8>],
+        mode: DrainMode,
+        mut step: impl FnMut(&mut I, &mut [u8]) -> CompcolResult,
+    ) -> Result<DrainProgress, Error> {
         // An empty output is legal for our codecs, and `Chain` passes one
         // when `output` is full and it asks `second` if it is done. Some
         // compcol codecs fail on an empty output (`lzx` gives
@@ -346,34 +362,52 @@ impl<I> CompcolAdapter<I> {
         if output.is_empty() {
             return Ok(DrainProgress::OutputFilled);
         }
-        let mut w = 0;
+        let output = zero_init_mut(output);
+        let mut written = 0;
         loop {
-            let rest_out = &mut output[w..];
+            let rest_out = &mut output[written..];
             let out_len = rest_out.len();
-            let (progress, status) = call(rest_out).map_err(|e| Self::failure_compcol(e, 0, w))?;
-            Self::check_counts(progress, 0, out_len, 0, w)?;
-            w += progress.written;
+            let (progress, status) = step(&mut self.inner, rest_out)
+                .map_err(|error| self.compcol_failure(error, 0, written))?;
+            self.check_counts(progress, 0, out_len, 0, written)?;
+            written += progress.written;
 
-            if status == done_status {
-                return Ok(DrainProgress::Done { written: w });
+            if status == mode.done_status() {
+                return Ok(DrainProgress::Done { written });
             }
-            if w == output.len() {
+            if written == output.len() {
                 return Ok(DrainProgress::OutputFilled);
             }
-            if status == unexpected_status {
-                return Err(Self::failure_own(
-                    ErrorKind::ContractViolation,
-                    SUBCODE_UNEXPECTED_STATUS,
-                    0,
-                    w,
-                ));
+            // `flush` must not end the stream, and `finish` must not stop
+            // before the stream ends.
+            if status != Status::OutputFull {
+                return Err(self.violation(SUBCODE_UNEXPECTED_STATUS, 0, written));
             }
-            // No bytes moved, and the work is not done. compcol 0.7.8 codecs
-            // never get here. See "Atomic units" above.
             if progress.written == 0 {
-                return Err(Self::no_progress(status, 0, w));
+                return Err(self.no_progress(status, 0, written));
             }
         }
+    }
+
+    /// The `finish` of both adapters. `step` is the `finish` of the
+    /// inner codec.
+    ///
+    /// If `finish` reported `Done`, a new call writes no bytes and
+    /// reports `Done` again. It does not call `step`.
+    fn finish(
+        &mut self,
+        output: &mut [MaybeUninit<u8>],
+        step: impl FnMut(&mut I, &mut [u8]) -> CompcolResult,
+    ) -> Result<DrainProgress, Error> {
+        if self.finish_phase.is_finished() {
+            return Ok(DrainProgress::Done { written: 0 });
+        }
+        self.finish_phase.start_finish();
+        let progress = self.drain_loop(output, DrainMode::Finish, step)?;
+        if let DrainProgress::Done { .. } = progress {
+            self.finish_phase.finish_done();
+        }
+        Ok(progress)
     }
 }
 
@@ -395,12 +429,15 @@ pub struct CompcolEncoderAsBoundaryAwareCodec<E> {
 impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
     /// Wrap `inner`. `flush_mode` decides what [`DrainCodec::flush`] does.
     pub fn new(inner: E, flush_mode: FlushMode) -> Self {
-        Self { adapter: CompcolAdapter::new(inner), flush_mode }
+        Self {
+            adapter: CompcolAdapter::new(inner),
+            flush_mode,
+        }
     }
 
     /// The compcol error behind the last `Err` of this adapter.
     pub fn compcol_error(&self) -> Option<::compcol::Error> {
-        self.adapter.compcol_error()
+        self.adapter.compcol_error
     }
 
     /// The inner compcol codec.
@@ -408,7 +445,8 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
         &self.adapter.inner
     }
 
-    /// The inner compcol codec, for configuration only.
+    /// The inner compcol codec, for configuration only. See
+    /// "Access to the inner codec" in the module docs.
     pub fn inner_mut(&mut self) -> &mut E {
         &mut self.adapter.inner
     }
@@ -433,51 +471,24 @@ impl<E: Encoder> CompcolEncoderAsBoundaryAwareCodec<E> {
     /// Reset the inner encoder and the adapter for a new stream.
     pub fn reset(&mut self) {
         self.adapter.inner.reset();
-        self.adapter.state = AdapterState::default();
+        self.adapter.reset_state();
     }
 }
 
 impl<E: Encoder> DrainCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        if let Err(f) = self.adapter.check_not_finished() {
-            return Err(self.adapter.report(f));
-        }
+        self.adapter.check_open()?;
         match self.flush_mode {
             FlushMode::Skip => Ok(DrainProgress::Done { written: 0 }),
             FlushMode::Compcol(mode) => {
-                let output = zero_init_mut(output);
-                let inner = &mut self.adapter.inner;
-                CompcolAdapter::<E>::run_finish(
-                    output,
-                    Status::InputEmpty,
-                    Status::StreamEnd,
-                    |o| inner.flush(o, mode),
-                )
-                .map_err(|f| self.adapter.report(f))
+                self.adapter
+                    .drain_loop(output, DrainMode::Flush, |inner, o| inner.flush(o, mode))
             }
         }
     }
 
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        if self.adapter.state.finished {
-            return Ok(DrainProgress::Done { written: 0 });
-        }
-        let output = zero_init_mut(output);
-        let inner = &mut self.adapter.inner;
-        match CompcolAdapter::<E>::run_finish(
-            output,
-            Status::StreamEnd,
-            Status::InputEmpty,
-            |o| inner.finish(o),
-        ) {
-            Ok(progress) => {
-                if let DrainProgress::Done { .. } = progress {
-                    self.adapter.state.finished = true;
-                }
-                Ok(progress)
-            }
-            Err(f) => Err(self.adapter.report(f)),
-        }
+        self.adapter.finish(output, E::finish)
     }
 }
 
@@ -487,28 +498,14 @@ impl<E: Encoder> BoundaryAwareCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
     ) -> Result<BoundaryAwareProgress, Error> {
-        if let Err(f) = self.adapter.check_not_finished() {
-            return Err(self.adapter.report(f));
-        }
-        let output = zero_init_mut(output);
-        let inner = &mut self.adapter.inner;
-        let (consumed, written, stream_end) =
-            CompcolAdapter::<E>::run_process(input, output, |i, o| inner.encode(i, o))
-                .map_err(|f| self.adapter.report(f))?;
-        if stream_end {
-            // `encode` must not signal StreamEnd.
-            let f = CompcolAdapter::<E>::failure_own(
-                ErrorKind::ContractViolation,
-                SUBCODE_UNEXPECTED_STATUS,
-                consumed,
-                written,
-            );
-            return Err(self.adapter.report(f));
-        }
-        if output.is_empty() || written == output.len() {
-            Ok(BoundaryAwareProgress::OutputFilled { consumed })
-        } else {
-            Ok(BoundaryAwareProgress::InputConsumed { written })
+        self.adapter.check_open()?;
+        match self.adapter.transfer_loop(input, output, E::encode)? {
+            // `encode` must not signal `StreamEnd`.
+            BoundaryAwareProgress::Boundary { consumed, written } => {
+                let subcode = SUBCODE_UNEXPECTED_STATUS;
+                Err(self.adapter.violation(subcode, consumed, written))
+            }
+            progress => Ok(progress),
         }
     }
 }
@@ -534,12 +531,14 @@ pub struct CompcolDecoderAsBoundaryAwareCodec<D> {
 impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
     /// Wrap `inner`.
     pub fn new(inner: D) -> Self {
-        Self { adapter: CompcolAdapter::new(inner) }
+        Self {
+            adapter: CompcolAdapter::new(inner),
+        }
     }
 
     /// The compcol error behind the last `Err` of this adapter.
     pub fn compcol_error(&self) -> Option<::compcol::Error> {
-        self.adapter.compcol_error()
+        self.adapter.compcol_error
     }
 
     /// The inner compcol codec.
@@ -563,49 +562,24 @@ impl<D: Decoder> CompcolDecoderAsBoundaryAwareCodec<D> {
     /// Reset the inner decoder and the adapter for a new stream.
     pub fn reset(&mut self) {
         self.adapter.inner.reset();
-        self.adapter.state = AdapterState::default();
+        self.adapter.reset_state();
     }
 }
 
 impl<D: Decoder> DrainCodec for CompcolDecoderAsBoundaryAwareCodec<D> {
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        if let Err(f) = self.adapter.check_not_finished() {
-            return Err(self.adapter.report(f));
-        }
-        // Drain decoded bytes the decoder holds by calling decode with
-        // empty input. compcol decoders have no flush method.
-        let output = zero_init_mut(output);
-        let inner = &mut self.adapter.inner;
-        let (_, written, _) =
-            CompcolAdapter::<D>::run_process(&[], output, |i, o| inner.decode(i, o))
-                .map_err(|f| self.adapter.report(f))?;
-        if output.is_empty() || written == output.len() {
-            Ok(DrainProgress::OutputFilled)
-        } else {
-            Ok(DrainProgress::Done { written })
-        }
+        self.adapter.check_open()?;
+        // compcol decoders have no flush method. `decode` with empty
+        // input writes the decoded bytes that the decoder holds.
+        Ok(match self.adapter.transfer_loop(&[], output, D::decode)? {
+            BoundaryAwareProgress::OutputFilled { .. } => DrainProgress::OutputFilled,
+            BoundaryAwareProgress::InputConsumed { written }
+            | BoundaryAwareProgress::Boundary { written, .. } => DrainProgress::Done { written },
+        })
     }
 
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        if self.adapter.state.finished {
-            return Ok(DrainProgress::Done { written: 0 });
-        }
-        let output = zero_init_mut(output);
-        let inner = &mut self.adapter.inner;
-        match CompcolAdapter::<D>::run_finish(
-            output,
-            Status::StreamEnd,
-            Status::InputEmpty,
-            |o| inner.finish(o),
-        ) {
-            Ok(progress) => {
-                if let DrainProgress::Done { .. } = progress {
-                    self.adapter.state.finished = true;
-                }
-                Ok(progress)
-            }
-            Err(f) => Err(self.adapter.report(f)),
-        }
+        self.adapter.finish(output, D::finish)
     }
 }
 
@@ -615,21 +589,8 @@ impl<D: Decoder> BoundaryAwareCodec for CompcolDecoderAsBoundaryAwareCodec<D> {
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
     ) -> Result<BoundaryAwareProgress, Error> {
-        if let Err(f) = self.adapter.check_not_finished() {
-            return Err(self.adapter.report(f));
-        }
-        let output = zero_init_mut(output);
-        let inner = &mut self.adapter.inner;
-        let (consumed, written, stream_end) =
-            CompcolAdapter::<D>::run_process(input, output, |i, o| inner.decode(i, o))
-                .map_err(|f| self.adapter.report(f))?;
-        if stream_end {
-            Ok(BoundaryAwareProgress::Boundary { consumed, written })
-        } else if output.is_empty() || written == output.len() {
-            Ok(BoundaryAwareProgress::OutputFilled { consumed })
-        } else {
-            Ok(BoundaryAwareProgress::InputConsumed { written })
-        }
+        self.adapter.check_open()?;
+        self.adapter.transfer_loop(input, output, D::decode)
     }
 }
 
@@ -934,6 +895,19 @@ mod tests {
         let r1 = drive(&mut dec, &compressed, 64).unwrap().output;
         let r2 = drive(&mut dec2, &compressed, 64).unwrap().output;
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn calls_after_an_unfinished_finish_fail() {
+        let after_finish =
+            own_error(ErrorKind::ContractViolation, Error::SUBCODE_AFTER_FINISH, 0, 0);
+        let mut enc =
+            CompcolEncoderAsBoundaryAwareCodec::new(gzip::Encoder::new(), FlushMode::Skip);
+        let mut out = [0u8; 1];
+        assert_eq!(enc.finish(as_uninit_mut(&mut out)), Ok(DrainProgress::OutputFilled));
+
+        assert_eq!(enc.process_bounded(b"x", as_uninit_mut(&mut out)), Err(after_finish));
+        assert_eq!(enc.flush(as_uninit_mut(&mut out)), Err(after_finish));
     }
 
     // ----
