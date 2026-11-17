@@ -19,23 +19,27 @@
 \begin{frame}{Contents}\tableofcontents\end{frame}
 
 \section{What's going on?}
-\begin{frame}[fragile]{What's going on? Example 1: rot13}
+\begin{frame}[fragile]{What's going on? Bytes in, transform, bytes out}
 \newlength{\vw}\setlength{\vw}{0.52\textwidth}
 \begin{minipage}[c]{\vw}
 \mbox{\special{pdf:ann width \the\vw\space height \the\dimexpr0.4874\vw\relax\space << /Type /Annot /Subtype /Movie /Border [0 0 0] /T (rot13) /Movie << /F (rot13.mp4) /Aspect [597 291] /Poster true >> /A << /Start 0 /Mode /Repeat >> >>}%
   \includegraphics[width=\vw]{rot13_poster.png}%
-  \hspace{-\vw}\makebox[\vw][c]{\raisebox{0.17\vw}{%
-    \fcolorbox{white}{black!70}{\color{white}\small\,{\fontspec{DejaVu Sans}\char"25B6}\ click to play\,}}}}
+  \sbox0{\fcolorbox{white}{black!70}{\color{white}\small\,{\fontspec{DejaVu Sans}\char"25B6}\ click to play\,}}%
+  \hspace{-\vw}\makebox[\vw][c]{\raisebox{\dimexpr0.2437\vw-0.5\ht0-0.5\dp0\relax}{\usebox0}}}
 \end{minipage}\hfill
 \begin{minipage}[c]{0.44\textwidth}
 \begin{Verbatim}[fontsize=\scriptsize,commandchars=\\\{\}]
-let mut out = \hl{CodecWriter}::new(
-    io::stdout(),
-    \hl{rot13()},
-    vec![0u8; 4096],
+let mut source = BufReadSource::new(
+    io::stdin().lock(),
+);
+let mut sink = StdSink::new(
+    io::stdout(), vec![0u8; 4096],
 )?;
-io::copy(&mut io::stdin(), &mut out)?;
-out.finish()?;
+\hl{stream_to_stream}(
+    &mut source, // Any Source
+    \hl{rot13()},
+    &mut sink, // Any Sink
+)?;
 \end{Verbatim}
 \end{minipage}
 \end{frame}
