@@ -405,12 +405,12 @@ impl<I> CompcolAdapter<I> {
             if status == CompcolStatus::StreamEnd {
                 return Ok(BoundaryAwareProgress::Boundary { consumed, written });
             }
-            // Full output first: a decoder can consume all input and still
-            // hold decoded bytes.
+            // The order of `OutputFilled` and `InputConsumed` is not
+            // important.
             if written == output.len() {
                 return Ok(BoundaryAwareProgress::OutputFilled { consumed });
             }
-            if consumed == input.len() && status == CompcolStatus::InputEmpty {
+            if consumed == input.len() {
                 return Ok(BoundaryAwareProgress::InputConsumed { written });
             }
             if progress.consumed == 0 && progress.written == 0 {
