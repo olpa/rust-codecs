@@ -44,11 +44,21 @@ let mut sink = StdSink::new(
 \end{minipage}
 \end{frame}
 
-\begin{frame}{What's going on? More examples}
-\begin{itemize}
-\item Slide 2: stream to stream: from \texttt{std::io}, base64 encode, \texttt{embedded\_io} output
-\item Slide 3: json-escape/unescape to a string
-\end{itemize}
+\section{Why codecs?}
+\begin{frame}[fragile]{Why codecs? My use case}
+Streaming JSON (crate \texttt{scan\_json}): process through a sliding window.
+
+\medskip
+\begin{Verbatim}[fontsize=\scriptsize]
+{
+  "image": "iVBORw0KGgoAAAANS...",
+  "url":   "https%3A%2F%2Fexample.com%2Fpath",
+  "text":  "Line 1\nLine 2\t\"quoted\""
+}
+\end{Verbatim}
+
+\medskip
+Streaming transformations are needed. A standard interface?
 \end{frame}
 
 \section{Who am I?}
@@ -294,4 +304,13 @@ Contribute a codec, a parser or an I/O backend.
 \medskip
 All together I think I've discovered a potentially foundational interface. Please help with publicity. I don't have a wide audience.
 \end{frame}
+
+\section{Attic}
+\begin{frame}{What's going on? More examples}
+\begin{itemize}
+\item Slide 2: stream to stream: from \texttt{std::io}, base64 encode, \texttt{embedded\_io} output
+\item Slide 3: json-escape/unescape to a string
+\end{itemize}
+\end{frame}
+
 \end{document}
