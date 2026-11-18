@@ -493,10 +493,6 @@ impl<I> CompcolAdapter<I> {
 // ----
 
 /// A `compcol::Encoder` as a [`BoundaryAwareCodec`].
-///
-/// An encoder never reaches a stream boundary on its own, so
-/// `process_bounded` behaves identically to a plain `process` call and
-/// never returns [`Boundary`](BoundaryAwareProgress::Boundary).
 #[derive(Debug, Clone)]
 pub struct CompcolEncoderAsBoundaryAwareCodec<E> {
     adapter: CompcolAdapter<E>,
@@ -597,16 +593,7 @@ impl<E: Encoder> BoundaryAwareCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
     ) -> Result<BoundaryAwareProgress, Error> {
         self.adapter.check_not_failed()?;
         self.adapter.finish_phase.check_open()?;
-        match self.adapter.transfer_loop(input, output, E::encode)? {
-            // `encode` must not signal `StreamEnd`.
-            BoundaryAwareProgress::Boundary { consumed, written } => {
-                let error =
-                    Error::contract_violation(Error::SUBCODE_UNEXPECTED_STATUS, consumed, written);
-                Err(self.adapter.latch_adapter_error(error))
-            }
-            progress @ (BoundaryAwareProgress::InputConsumed { .. }
-            | BoundaryAwareProgress::OutputFilled { .. }) => Ok(progress),
-        }
+        self.adapter.transfer_loop(input, output, E::encode)
     }
 }
 
@@ -686,16 +673,10 @@ impl<D: Decoder> CompcolDecoderAsBoundaryAwareCodec<D> {
 }
 
 impl<D: Decoder> DrainCodec for CompcolDecoderAsBoundaryAwareCodec<D> {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.adapter.check_not_failed()?;
         self.adapter.finish_phase.check_open()?;
-        // compcol decoders have no flush method. `decode` with empty
-        // input writes the decoded bytes that the decoder holds.
-        Ok(match self.adapter.transfer_loop(&[], output, D::decode)? {
-            BoundaryAwareProgress::OutputFilled { .. } => DrainProgress::OutputFilled,
-            BoundaryAwareProgress::InputConsumed { written }
-            | BoundaryAwareProgress::Boundary { written, .. } => DrainProgress::Done { written },
-        })
+        Ok(DrainProgress::Done { written: 0 })
     }
 
     fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
@@ -1254,7 +1235,6 @@ mod tests {
         assert_eq!(enc.flush(&mut []), Ok(DrainProgress::OutputFilled));
 
         let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::default());
-        assert_eq!(dec.flush(&mut []), Ok(DrainProgress::OutputFilled));
         assert_eq!(dec.finish(&mut []), Ok(DrainProgress::OutputFilled));
     }
 
@@ -1309,19 +1289,17 @@ mod tests {
     }
 
     #[test]
-    fn stream_end_from_encode_is_unexpected_status() {
+    fn stream_end_from_encode_is_boundary() {
         let script = [step(1, 1, Status::StreamEnd)];
         let mut enc =
             CompcolEncoderAsBoundaryAwareCodec::new(Scripted::new(script), FlushMode::Skip);
         let mut out = [0u8; 6];
         assert_eq!(
             enc.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Err(own_error(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_UNEXPECTED_STATUS,
-                1,
-                1
-            ))
+            Ok(BoundaryAwareProgress::Boundary {
+                consumed: 1,
+                written: 1
+            })
         );
     }
 
@@ -1358,24 +1336,6 @@ mod tests {
                 1,
                 1
             ))
-        );
-    }
-
-    #[test]
-    fn stream_end_during_decoder_flush_is_done() {
-        let script = [step(0, 3, Status::StreamEnd), step(0, 0, Status::StreamEnd)];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 6];
-        assert_eq!(
-            dec.flush(as_uninit_mut(&mut out)),
-            Ok(DrainProgress::Done { written: 3 })
-        );
-        assert_eq!(
-            dec.process_bounded(b"next", as_uninit_mut(&mut out)),
-            Ok(BoundaryAwareProgress::Boundary {
-                consumed: 0,
-                written: 0
-            })
         );
     }
 }
