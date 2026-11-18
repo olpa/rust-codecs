@@ -269,48 +269,215 @@ enum Failure {
     },
 }
 
-/// The inner codec and the state that both adapters share.
+// ----
+// Encoder and decoder behind one trait
+// ----
+
+mod sealed {
+    use super::CompcolResult;
+
+    /// A compcol encoder or decoder behind one interface. The adapter
+    /// calls only this trait, so one adapter serves both.
+    ///
+    /// `Encoding` and `Decoding` implement it. The trait is sealed:
+    /// other crates cannot name or implement it.
+    pub trait CompcolCodec {
+        /// The wrapped compcol codec.
+        type Inner;
+
+        /// `encode` or `decode`.
+        fn step(&mut self, input: &[u8], output: &mut [u8]) -> CompcolResult;
+
+        /// Write the output that the codec holds. If there is nothing to
+        /// flush, write nothing and return `InputEmpty`.
+        fn flush(&mut self, output: &mut [u8]) -> CompcolResult;
+
+        fn finish(&mut self, output: &mut [u8]) -> CompcolResult;
+
+        fn reset(&mut self);
+
+        fn get_ref(&self) -> &Self::Inner;
+
+        fn get_mut(&mut self) -> &mut Self::Inner;
+
+        fn into_inner(self) -> Self::Inner;
+    }
+}
+
+use sealed::CompcolCodec;
+
+/// The result of a flush that writes nothing. `drain_loop` turns it
+/// into `Done { written: 0 }`.
+const NOTHING_TO_FLUSH: CompcolResult = Ok((
+    CompcolProgress {
+        consumed: 0,
+        written: 0,
+    },
+    CompcolStatus::InputEmpty,
+));
+
+/// A `compcol::Encoder` and its [`FlushMode`]. The inner part of
+/// [`CompcolEncoderAsBoundaryAwareCodec`].
 #[derive(Debug, Clone)]
-struct CompcolAdapter<I> {
-    inner: I,
+pub struct Encoding<E> {
+    inner: E,
+    flush_mode: FlushMode,
+}
+
+impl<E: Encoder> CompcolCodec for Encoding<E> {
+    type Inner = E;
+
+    fn step(&mut self, input: &[u8], output: &mut [u8]) -> CompcolResult {
+        self.inner.encode(input, output)
+    }
+
+    fn flush(&mut self, output: &mut [u8]) -> CompcolResult {
+        match self.flush_mode {
+            FlushMode::Skip => NOTHING_TO_FLUSH,
+            FlushMode::Compcol(mode) => self.inner.flush(output, mode),
+        }
+    }
+
+    fn finish(&mut self, output: &mut [u8]) -> CompcolResult {
+        self.inner.finish(output)
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn get_ref(&self) -> &E {
+        &self.inner
+    }
+
+    fn get_mut(&mut self) -> &mut E {
+        &mut self.inner
+    }
+
+    fn into_inner(self) -> E {
+        self.inner
+    }
+}
+
+/// A `compcol::Decoder`. The inner part of
+/// [`CompcolDecoderAsBoundaryAwareCodec`].
+#[derive(Debug, Clone)]
+pub struct Decoding<D> {
+    inner: D,
+}
+
+impl<D: Decoder> CompcolCodec for Decoding<D> {
+    type Inner = D;
+
+    fn step(&mut self, input: &[u8], output: &mut [u8]) -> CompcolResult {
+        self.inner.decode(input, output)
+    }
+
+    /// compcol decoders have no flush method.
+    fn flush(&mut self, _output: &mut [u8]) -> CompcolResult {
+        NOTHING_TO_FLUSH
+    }
+
+    fn finish(&mut self, output: &mut [u8]) -> CompcolResult {
+        self.inner.finish(output)
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn get_ref(&self) -> &D {
+        &self.inner
+    }
+
+    fn get_mut(&mut self) -> &mut D {
+        &mut self.inner
+    }
+
+    fn into_inner(self) -> D {
+        self.inner
+    }
+}
+
+// ----
+// Adapter
+// ----
+
+/// A compcol encoder or decoder as a [`BoundaryAwareCodec`].
+///
+/// Use it as [`CompcolEncoderAsBoundaryAwareCodec`] or
+/// [`CompcolDecoderAsBoundaryAwareCodec`].
+#[derive(Debug, Clone)]
+pub struct CompcolAsBoundaryAwareCodec<C> {
+    codec: C,
     /// How far the adapter is in `finish`.
     finish_phase: FinishPhase,
     /// The latched error, if any.
     failure: Option<Failure>,
 }
 
-impl<I> CompcolAdapter<I> {
-    fn new(inner: I) -> Self {
+impl<C: CompcolCodec> CompcolAsBoundaryAwareCodec<C> {
+    fn from_codec(codec: C) -> Self {
         Self {
-            inner,
+            codec,
             finish_phase: FinishPhase::Open,
             failure: None,
         }
     }
 
-    /// Reset `inner` with `reset_inner`, then the adapter, for a new
-    /// stream.
-    fn reset(&mut self, reset_inner: impl FnOnce(&mut I)) {
-        reset_inner(&mut self.inner);
-        self.clear_error();
-        self.finish_phase = FinishPhase::Open;
-    }
-
-    /// Remove the latched error.
-    fn clear_error(&mut self) {
-        self.failure = None;
-    }
-
-    /// The compcol error behind the latched error. `None` if there is no
-    /// latched error, or if the adapter made the error itself.
-    fn compcol_error(&self) -> Option<CompcolError> {
+    /// The compcol error behind the latched error. `None` if there is
+    /// no latched error, or if the adapter made the error itself.
+    pub fn compcol_error(&self) -> Option<CompcolError> {
         match self.failure {
             Some(Failure::Compcol(error)) => Some(error),
             Some(Failure::Adapter { .. }) | None => None,
         }
     }
 
-    /// Return the latched error, if any, before a call to `inner`.
+    /// The inner compcol codec.
+    pub fn get_ref(&self) -> &C::Inner {
+        self.codec.get_ref()
+    }
+
+    /// The inner compcol codec, for configuration only. See
+    /// "Access to the inner codec" in the module docs.
+    pub fn get_mut(&mut self) -> &mut C::Inner {
+        self.codec.get_mut()
+    }
+
+    /// Unwrap the inner compcol codec.
+    pub fn into_inner(self) -> C::Inner {
+        self.codec.into_inner()
+    }
+
+    /// Reset the inner codec and the adapter for a new stream.
+    ///
+    /// It calls `reset` of the inner compcol codec. compcol keeps the
+    /// configuration, such as a dictionary or a limit. Then it resets
+    /// the adapter: it removes the latched error, and makes
+    /// `process_bounded` and `flush` work again after `finish`.
+    pub fn reset(&mut self) {
+        self.codec.reset();
+        self.clear_error();
+        self.finish_phase = FinishPhase::Open;
+    }
+
+    /// Remove the latched error. Keep the state of the inner codec.
+    ///
+    /// This is a backdoor for an error that the inner codec can
+    /// recover from in place, such as `compcol::Error::NeedDictionary`.
+    /// See "After `finish` and after an error" in the module docs.
+    ///
+    /// `reset()` cannot do this work, because it also resets the inner
+    /// codec. For example, a zlib decoder that waits for a dictionary
+    /// accepts `set_dictionary` only in that state. After `reset()`, the
+    /// state is gone.
+    pub fn clear_error(&mut self) {
+        self.failure = None;
+    }
+
+    /// Return the latched error, if any, before a call to the inner
+    /// codec.
     ///
     /// The counts are zero: the call that returns the error moves no
     /// bytes.
@@ -331,8 +498,8 @@ impl<I> CompcolAdapter<I> {
     }
 
     /// Convert a compcol error, latch it, and return it. Later calls
-    /// return it and do not call `inner`. `compcol_error()` gives the
-    /// original compcol error.
+    /// return it and do not call the inner codec. `compcol_error()`
+    /// gives the original compcol error.
     fn latch_compcol_error(
         &mut self,
         error: CompcolError,
@@ -344,8 +511,8 @@ impl<I> CompcolAdapter<I> {
     }
 
     /// Latch an error that the adapter makes itself, and return it.
-    /// Later calls return it and do not call `inner`. No compcol error
-    /// is behind it.
+    /// Later calls return it and do not call the inner codec. No compcol
+    /// error is behind it.
     fn latch_adapter_error(&mut self, error: Error) -> Error {
         self.failure = Some(Failure::Adapter {
             kind: error.kind,
@@ -361,7 +528,6 @@ impl<I> CompcolAdapter<I> {
         &mut self,
         input: &[u8],
         output: &mut [MaybeUninit<u8>],
-        mut step: impl FnMut(&mut I, &[u8], &mut [u8]) -> CompcolResult,
     ) -> Result<BoundaryAwareProgress, Error> {
         // An empty output is legal for our codecs: `Chain` and `Pump` pass
         // one when their output is full. Some compcol codecs fail on an
@@ -377,7 +543,9 @@ impl<I> CompcolAdapter<I> {
             let rest_in = &input[consumed..];
             let rest_out = &mut output[written..];
             let (in_len, out_len) = (rest_in.len(), rest_out.len());
-            let (progress, status) = step(&mut self.inner, rest_in, rest_out)
+            let (progress, status) = self
+                .codec
+                .step(rest_in, rest_out)
                 .map_err(|error| self.latch_compcol_error(error, consumed, written))?;
             check_counts(progress, in_len, out_len, consumed, written)
                 .map_err(|error| self.latch_adapter_error(error))?;
@@ -406,7 +574,7 @@ impl<I> CompcolAdapter<I> {
     fn drain_loop(
         &mut self,
         output: &mut [MaybeUninit<u8>],
-        mut step: impl FnMut(&mut I, &mut [u8]) -> CompcolResult,
+        mut step: impl FnMut(&mut C, &mut [u8]) -> CompcolResult,
     ) -> Result<DrainProgress, Error> {
         if output.is_empty() {
             return Ok(DrainProgress::OutputFilled);
@@ -416,7 +584,7 @@ impl<I> CompcolAdapter<I> {
         loop {
             let rest_out = &mut output[written..];
             let out_len = rest_out.len();
-            let (progress, status) = step(&mut self.inner, rest_out)
+            let (progress, status) = step(&mut self.codec, rest_out)
                 .map_err(|error| self.latch_compcol_error(error, 0, written))?;
             check_counts(progress, 0, out_len, 0, written)
                 .map_err(|error| self.latch_adapter_error(error))?;
@@ -433,27 +601,40 @@ impl<I> CompcolAdapter<I> {
             }
         }
     }
+}
 
-    /// The `finish` of both adapters. `step` is the `finish` of the
-    /// inner codec.
-    ///
+impl<C: CompcolCodec> DrainCodec for CompcolAsBoundaryAwareCodec<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.check_not_failed()?;
+        self.finish_phase.check_open()?;
+        self.drain_loop(output, C::flush)
+    }
+
     /// If `finish` reported `Done`, a new call writes no bytes and
-    /// reports `Done` again. It does not call `step`.
-    fn finish(
-        &mut self,
-        output: &mut [MaybeUninit<u8>],
-        step: impl FnMut(&mut I, &mut [u8]) -> CompcolResult,
-    ) -> Result<DrainProgress, Error> {
+    /// reports `Done` again. It does not call the inner codec.
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.check_not_failed()?;
         if self.finish_phase.is_finished() {
             return Ok(DrainProgress::Done { written: 0 });
         }
         self.finish_phase.start_finish();
-        let progress = self.drain_loop(output, step)?;
+        let progress = self.drain_loop(output, C::finish)?;
         if matches!(progress, DrainProgress::Done { .. }) {
             self.finish_phase.finish_done();
         }
         Ok(progress)
+    }
+}
+
+impl<C: CompcolCodec> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<C> {
+    fn process_bounded(
+        &mut self,
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> Result<BoundaryAwareProgress, Error> {
+        self.check_not_failed()?;
+        self.finish_phase.check_open()?;
+        self.transfer_loop(input, output)
     }
 }
 
@@ -462,106 +643,22 @@ impl<I> CompcolAdapter<I> {
 // ----
 
 /// A `compcol::Encoder` as a [`BoundaryAwareCodec`].
-#[derive(Debug, Clone)]
-pub struct CompcolEncoderAsBoundaryAwareCodec<E> {
-    adapter: CompcolAdapter<E>,
-    flush_mode: FlushMode,
-}
+pub type CompcolEncoderAsBoundaryAwareCodec<E> = CompcolAsBoundaryAwareCodec<Encoding<E>>;
 
-impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
+impl<E: Encoder> CompcolEncoderAsBoundaryAwareCodec<E> {
     /// Wrap `inner`. `flush_mode` decides what [`DrainCodec::flush`] does.
     pub fn new(inner: E, flush_mode: FlushMode) -> Self {
-        Self {
-            adapter: CompcolAdapter::new(inner),
-            flush_mode,
-        }
-    }
-
-    /// The compcol error behind the latched error. `None` if there is
-    /// no latched error, or if the adapter made the error itself.
-    pub fn compcol_error(&self) -> Option<CompcolError> {
-        self.adapter.compcol_error()
-    }
-
-    /// The inner compcol codec.
-    pub fn get_ref(&self) -> &E {
-        &self.adapter.inner
-    }
-
-    /// The inner compcol codec, for configuration only. See
-    /// "Access to the inner codec" in the module docs.
-    pub fn get_mut(&mut self) -> &mut E {
-        &mut self.adapter.inner
-    }
-
-    /// Unwrap the inner compcol codec.
-    pub fn into_inner(self) -> E {
-        self.adapter.inner
+        Self::from_codec(Encoding { inner, flush_mode })
     }
 
     /// The current flush mode.
     pub fn flush_mode(&self) -> FlushMode {
-        self.flush_mode
+        self.codec.flush_mode
     }
 
     /// Change the flush mode between calls.
     pub fn set_flush_mode(&mut self, flush_mode: FlushMode) {
-        self.flush_mode = flush_mode;
-    }
-}
-
-impl<E: Encoder> CompcolEncoderAsBoundaryAwareCodec<E> {
-    /// Reset the inner encoder and the adapter for a new stream.
-    ///
-    /// It calls `compcol::Encoder::reset` on the inner encoder. compcol keeps
-    /// the configuration, such as a dictionary or a limit. Then it resets
-    /// the adapter: it removes the latched error, and makes `process_bounded`
-    /// and `flush` work again after `finish`.
-    pub fn reset(&mut self) {
-        self.adapter.reset(E::reset);
-    }
-
-    /// Remove the latched error. Keep the state of the inner encoder.
-    ///
-    /// This is a backdoor for an error that the inner codec can
-    /// recover from in place, such as `compcol::Error::NeedDictionary`.
-    /// See "After `finish` and after an error" in the module docs.
-    ///
-    /// `reset()` cannot do this work, because it also resets the inner
-    /// codec. For example, a zlib decoder that waits for a dictionary
-    /// accepts `set_dictionary` only in that state. After `reset()`, the
-    /// state is gone.
-    pub fn clear_error(&mut self) {
-        self.adapter.clear_error();
-    }
-}
-
-impl<E: Encoder> DrainCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.adapter.check_not_failed()?;
-        self.adapter.finish_phase.check_open()?;
-        match self.flush_mode {
-            FlushMode::Skip => Ok(DrainProgress::Done { written: 0 }),
-            FlushMode::Compcol(mode) => self
-                .adapter
-                .drain_loop(output, |inner, o| inner.flush(o, mode)),
-        }
-    }
-
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.adapter.finish(output, E::finish)
-    }
-}
-
-impl<E: Encoder> BoundaryAwareCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
-    fn process_bounded(
-        &mut self,
-        input: &[u8],
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<BoundaryAwareProgress, Error> {
-        self.adapter.check_not_failed()?;
-        self.adapter.finish_phase.check_open()?;
-        self.adapter.transfer_loop(input, output, E::encode)
+        self.codec.flush_mode = flush_mode;
     }
 }
 
@@ -578,89 +675,12 @@ impl<E: Encoder> BoundaryAwareCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
 ///
 /// For gzip, build the decoder with `with_multi_member(false)`.
 /// Otherwise compcol decodes concatenated members as one stream.
-#[derive(Debug, Clone)]
-pub struct CompcolDecoderAsBoundaryAwareCodec<D> {
-    adapter: CompcolAdapter<D>,
-}
-
-impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
-    /// Wrap `inner`.
-    pub fn new(inner: D) -> Self {
-        Self {
-            adapter: CompcolAdapter::new(inner),
-        }
-    }
-
-    /// The compcol error behind the latched error. `None` if there is
-    /// no latched error, or if the adapter made the error itself.
-    pub fn compcol_error(&self) -> Option<CompcolError> {
-        self.adapter.compcol_error()
-    }
-
-    /// The inner compcol codec.
-    pub fn get_ref(&self) -> &D {
-        &self.adapter.inner
-    }
-
-    /// The inner compcol codec, for configuration only. See
-    /// "Access to the inner codec" in the module docs.
-    pub fn get_mut(&mut self) -> &mut D {
-        &mut self.adapter.inner
-    }
-
-    /// Unwrap the inner compcol codec.
-    pub fn into_inner(self) -> D {
-        self.adapter.inner
-    }
-}
+pub type CompcolDecoderAsBoundaryAwareCodec<D> = CompcolAsBoundaryAwareCodec<Decoding<D>>;
 
 impl<D: Decoder> CompcolDecoderAsBoundaryAwareCodec<D> {
-    /// Reset the inner decoder and the adapter for a new stream.
-    ///
-    /// It calls `compcol::Decoder::reset` on the inner decoder. compcol keeps
-    /// the configuration, such as a dictionary or a limit. Then it resets
-    /// the adapter: it removes the latched error, and makes `process_bounded`
-    /// and `flush` work again after `finish`.
-    pub fn reset(&mut self) {
-        self.adapter.reset(D::reset);
-    }
-
-    /// Remove the latched error. Keep the state of the inner decoder.
-    ///
-    /// This is a backdoor for an error that the inner codec can
-    /// recover from in place, such as `compcol::Error::NeedDictionary`.
-    /// See "After `finish` and after an error" in the module docs.
-    ///
-    /// `reset()` cannot do this work, because it also resets the inner
-    /// codec. For example, a zlib decoder that waits for a dictionary
-    /// accepts `set_dictionary` only in that state. After `reset()`, the
-    /// state is gone.
-    pub fn clear_error(&mut self) {
-        self.adapter.clear_error();
-    }
-}
-
-impl<D: Decoder> DrainCodec for CompcolDecoderAsBoundaryAwareCodec<D> {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.adapter.check_not_failed()?;
-        self.adapter.finish_phase.check_open()?;
-        Ok(DrainProgress::Done { written: 0 })
-    }
-
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
-        self.adapter.finish(output, D::finish)
-    }
-}
-
-impl<D: Decoder> BoundaryAwareCodec for CompcolDecoderAsBoundaryAwareCodec<D> {
-    fn process_bounded(
-        &mut self,
-        input: &[u8],
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<BoundaryAwareProgress, Error> {
-        self.adapter.check_not_failed()?;
-        self.adapter.finish_phase.check_open()?;
-        self.adapter.transfer_loop(input, output, D::decode)
+    /// Wrap `inner`.
+    pub fn new(inner: D) -> Self {
+        Self::from_codec(Decoding { inner })
     }
 }
 
