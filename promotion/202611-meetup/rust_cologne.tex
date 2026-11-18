@@ -18,7 +18,8 @@
 \begin{frame}\titlepage\end{frame}
 \begin{frame}{Contents}\tableofcontents\end{frame}
 
-\section{What's going on?}
+\section{Introduction}
+\frame{\sectionpage}
 \begin{frame}[fragile]{What's going on? Bytes in, transform, bytes out}
 \newlength{\vw}\setlength{\vw}{0.52\textwidth}
 \begin{minipage}[c]{\vw}
@@ -44,7 +45,6 @@ let mut sink = StdSink::new(
 \end{minipage}
 \end{frame}
 
-\section{Why codecs?}
 \begin{frame}[fragile]{Why codecs? My use case}
 Streaming JSON (crate \texttt{scan\_json}): process through a sliding window.
 
@@ -75,7 +75,6 @@ byte rewriters \hl{remains a visible gap}.
 Full report: \small\url{https://github.com/olpa/rust-codecs/blob/master/deep-research-report.md}
 \end{frame}
 
-\section{About the author}
 \begin{frame}{About the author}
 \textbf{Oleg Parashchenko}
 
@@ -98,7 +97,6 @@ Quietly useful:
 And now working on: Streaming JSON, codecs
 \end{frame}
 
-\section{About the talk}
 \begin{frame}{About the talk}
 \begin{itemize}
 \item A design story, not an API reference
@@ -112,7 +110,8 @@ And now working on: Streaming JSON, codecs
 \end{itemize}
 \end{frame}
 
-\section{Requirements and the idea}
+\section{Derivation}
+\frame{\sectionpage}
 \begin{frame}[fragile]{First requirements and the idea}
 Requirements:
 \begin{enumerate}
@@ -132,7 +131,6 @@ while(*tgt++=*src++);
 \end{itemize}
 \end{frame}
 
-\section{Prior art}
 \begin{frame}{Prior art: shortlist}
 \begin{itemize}
 \item tokio codecs
@@ -151,7 +149,6 @@ while(*tgt++=*src++);
 \end{enumerate}
 \end{frame}
 
-\section{Compcol}
 \begin{frame}{Compcol interface}
 \begin{itemize}
 \item Process step $\to$ \texttt{Progress}, \texttt{Status}
@@ -185,7 +182,6 @@ Result of a codec step.
 \end{itemize}
 \end{frame}
 
-\section{Base64}
 \begin{frame}{Base64}
 \begin{itemize}
 \item Blocks of 3 bytes $\to$ blocks of 4 bytes
@@ -213,7 +209,6 @@ Step output:
 0/0: is the codec stalled? How to fix?
 \end{frame}
 
-\section{Solution}
 \begin{frame}{Solution}
 Consume full, or write full.
 
@@ -228,7 +223,8 @@ The returning type: \todo{\dots}
 \todo{(to be filled)}
 \end{frame}
 
-\section{I/O backend}
+\section{More of API}
+\frame{\sectionpage}
 \begin{frame}{I/O backend: Sources and Sinks}
 \begin{itemize}
 \item For zero overhead for in-memory: slices/Vecs
@@ -237,20 +233,6 @@ The returning type: \todo{\dots}
 \end{itemize}
 \end{frame}
 
-\section{Early stop}
-\begin{frame}{Early stop}
-\begin{itemize}
-\item Codec: \texttt{ParseString}
-\item Taken from the compression codecs (compcol)
-\item New use case: parsing
-\item Example: parse until a quote
-\item \texttt{stream\_to\_stream}: getting tokens
-\item But: \texttt{NullSink}, getting position $\to$ in-place parsing, no byte moving
-\item In investigation, a topic for the next year
-\end{itemize}
-\end{frame}
-
-\section{Inside}
 \begin{frame}{Inside}
 \begin{itemize}
 \item \texttt{stream\_to\_stream}
@@ -273,7 +255,20 @@ Provisional (mostly AI generated with review):
 \end{itemize}
 \end{frame}
 
-\section{Call for participation}
+\section{Early stop for more goods}
+\frame{\sectionpage}
+\begin{frame}{Early stop}
+\begin{itemize}
+\item Codec: \texttt{ParseString}
+\item Taken from the compression codecs (compcol)
+\item New use case: parsing
+\item Example: parse until a quote
+\item \texttt{stream\_to\_stream}: getting tokens
+\item But: \texttt{NullSink}, getting position $\to$ in-place parsing, no byte moving
+\item In investigation, a topic for the next year
+\end{itemize}
+\end{frame}
+
 \begin{frame}{Call for participation: Codecs}
 Create codecs:
 \begin{itemize}
@@ -300,7 +295,6 @@ Nothing done by me yet, but the way is clear.
 More complicated, but doable. Bundled \texttt{std::io} and \texttt{embedded\_io} are thin wrappers.
 \end{frame}
 
-\section{Conclusions}
 \begin{frame}{Conclusions, take-off}
 Technical implementation:
 \begin{itemize}
@@ -322,6 +316,7 @@ All together I think I've discovered a potentially foundational interface. Pleas
 \end{frame}
 
 \section{Attic}
+\frame{\sectionpage}
 \begin{frame}{What's going on? More examples}
 \begin{itemize}
 \item Slide 2: stream to stream: from \texttt{std::io}, base64 encode, \texttt{embedded\_io} output
