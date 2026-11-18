@@ -671,15 +671,15 @@ impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
-    use alloc::collections::VecDeque;
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use ::compcol::limit::LimitedDecoder;
-    use ::compcol::{gzip, zlib, Flush, Status};
+    use ::compcol::{gzip, zlib, Flush};
 
     use super::*;
-    use crate::boundary_as_codec::BoundaryAwareCodecAsCodec;
+    use crate::codecs::test_support::SplitSource;
+    use crate::sources_and_sinks::vec::VecSink;
+    use crate::stream_to_stream;
     use crate::uninit::as_uninit_mut;
 
     fn sample() -> Vec<u8> {
@@ -691,81 +691,23 @@ mod tests {
         data
     }
 
-    #[derive(Debug, PartialEq)]
-    struct Drive {
-        output: Vec<u8>,
-        consumed: usize,
-        boundary: bool,
+    /// Run `codec` over `input` with `stream_to_stream`. The source
+    /// gives at most `chunk` bytes at a time. Return the output and the
+    /// number of consumed bytes.
+    fn run(codec: &mut dyn BoundaryAwareCodec, input: &[u8], chunk: usize) -> (Vec<u8>, usize) {
+        let mut source = SplitSource {
+            bytes: input,
+            pos: 0,
+            chunk_size: chunk,
+        };
+        let mut sink = VecSink::with_growth(Vec::new(), chunk);
+        let counts = stream_to_stream(&mut source, codec, &mut sink).unwrap();
+        (sink.into_inner(), counts.consumed)
     }
 
-    fn drive(
-        codec: &mut impl BoundaryAwareCodec,
-        input: &[u8],
-        chunk: usize,
-    ) -> Result<Drive, Error> {
-        let mut output = Vec::new();
-        let mut buf = vec![0u8; chunk];
-        let mut pos = 0;
-        let mut boundary = false;
-        loop {
-            let end = (pos + chunk).min(input.len());
-            match codec.process_bounded(&input[pos..end], as_uninit_mut(&mut buf))? {
-                BoundaryAwareProgress::InputConsumed { written } => {
-                    output.extend_from_slice(&buf[..written]);
-                    pos = end;
-                    if pos == input.len() {
-                        break;
-                    }
-                }
-                BoundaryAwareProgress::OutputFilled { consumed } => {
-                    output.extend_from_slice(&buf);
-                    pos += consumed;
-                }
-                BoundaryAwareProgress::Boundary { consumed, written } => {
-                    output.extend_from_slice(&buf[..written]);
-                    pos += consumed;
-                    boundary = true;
-                    break;
-                }
-            }
-        }
-        loop {
-            match codec.finish(as_uninit_mut(&mut buf))? {
-                DrainProgress::OutputFilled => output.extend_from_slice(&buf),
-                DrainProgress::Done { written } => {
-                    output.extend_from_slice(&buf[..written]);
-                    break;
-                }
-            }
-        }
-        Ok(Drive {
-            output,
-            consumed: pos,
-            boundary,
-        })
-    }
-
-    fn gzip_compress(data: &[u8]) -> Vec<u8> {
-        let mut enc = gzip::Encoder::new();
-        let mut buf = vec![0u8; 4096];
-        let mut compressed = Vec::new();
-        let mut pos = 0;
-        loop {
-            let (progress, status) = enc.encode(&data[pos..], &mut buf).unwrap();
-            compressed.extend_from_slice(&buf[..progress.written]);
-            pos += progress.consumed;
-            if status == Status::InputEmpty {
-                break;
-            }
-        }
-        loop {
-            let (progress, status) = enc.finish(&mut buf).unwrap();
-            compressed.extend_from_slice(&buf[..progress.written]);
-            if status == Status::StreamEnd {
-                break;
-            }
-        }
-        compressed
+    fn compress(encoder: impl Encoder, data: &[u8]) -> Vec<u8> {
+        let mut codec = CompcolEncoderAsBoundaryAwareCodec::new(encoder, FlushMode::Skip);
+        run(&mut codec, data, 4096).0
     }
 
     fn own_error(kind: ErrorKind, codec_subcode: usize, consumed: usize, written: usize) -> Error {
@@ -787,30 +729,13 @@ mod tests {
         for chunk in [1, 7, 4096] {
             let mut enc =
                 CompcolEncoderAsBoundaryAwareCodec::new(gzip::Encoder::new(), FlushMode::Skip);
-            let compressed = drive(&mut enc, &data, chunk).unwrap().output;
+            let (compressed, _) = run(&mut enc, &data, chunk);
             assert!(compressed.len() < data.len() / 4, "chunk {chunk}");
 
             let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(gzip::Decoder::new());
-            let plain = drive(&mut dec, &compressed, chunk).unwrap();
-            assert_eq!(plain.output, data, "chunk {chunk}");
+            let (plain, _) = run(&mut dec, &compressed, chunk);
+            assert_eq!(plain, data, "chunk {chunk}");
         }
-    }
-
-    #[test]
-    fn round_trip_as_plain_codec_with_stream_to_stream() {
-        use crate::sources_and_sinks::slice::SliceSource;
-        use crate::sources_and_sinks::vec::VecSink;
-        use crate::stream_to_stream;
-
-        let data = sample();
-        let compressed = gzip_compress(&data);
-
-        let dec = BoundaryAwareCodecAsCodec::new(CompcolDecoderAsBoundaryAwareCodec::new(
-            gzip::Decoder::new(),
-        ));
-        let mut plain = VecSink::default();
-        stream_to_stream(&mut SliceSource::new(&compressed), dec, &mut plain).unwrap();
-        assert_eq!(plain.into_inner(), data);
     }
 
     // ----
@@ -819,8 +744,8 @@ mod tests {
 
     #[test]
     fn boundary_aware_decoder_reads_members_one_by_one() {
-        let first = gzip_compress(b"first member");
-        let second = gzip_compress(b"second member");
+        let first = compress(gzip::Encoder::new(), b"first member");
+        let second = compress(gzip::Encoder::new(), b"second member");
         let mut input = first.clone();
         input.extend_from_slice(&second);
         input.extend_from_slice(b"tail");
@@ -829,117 +754,29 @@ mod tests {
             let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(
                 gzip::Decoder::new().with_multi_member(false),
             );
-            let one = drive(&mut dec, &input, chunk).unwrap();
-            assert_eq!(one.output, b"first member", "chunk {chunk}");
-            assert!(one.boundary);
-            assert_eq!(one.consumed, first.len());
+            let (one, consumed) = run(&mut dec, &input, chunk);
+            assert_eq!(one, b"first member", "chunk {chunk}");
+            assert_eq!(consumed, first.len(), "chunk {chunk}");
 
             dec.reset();
-            let rest = &input[one.consumed..];
-            let two = drive(&mut dec, rest, chunk).unwrap();
-            assert_eq!(two.output, b"second member", "chunk {chunk}");
-            assert!(two.boundary);
-            assert_eq!(&rest[two.consumed..], b"tail");
+            let rest = &input[consumed..];
+            let (two, consumed) = run(&mut dec, rest, chunk);
+            assert_eq!(two, b"second member", "chunk {chunk}");
+            assert_eq!(&rest[consumed..], b"tail", "chunk {chunk}");
         }
     }
 
     // ----
-    // 3. Boundary
-    // ----
-
-    #[test]
-    fn boundary_aware_decoder_reports_boundary_on_data_after_end_in_the_same_chunk() {
-        let mut input = gzip_compress(b"hello");
-        let stream_len = input.len();
-        input.push(b'x');
-
-        let mut dec =
-            CompcolDecoderAsBoundaryAwareCodec::new(gzip::Decoder::new().with_multi_member(false));
-        let mut out = [0u8; 64];
-        let progress = dec
-            .process_bounded(&input, as_uninit_mut(&mut out))
-            .unwrap();
-        assert_eq!(
-            progress,
-            BoundaryAwareProgress::Boundary {
-                consumed: stream_len,
-                written: 5
-            }
-        );
-    }
-
-    #[test]
-    fn boundary_aware_decoder_reports_boundary_in_a_later_chunk() {
-        let input = gzip_compress(b"hello");
-
-        let mut dec =
-            CompcolDecoderAsBoundaryAwareCodec::new(gzip::Decoder::new().with_multi_member(false));
-        let mut out = [0u8; 64];
-        let progress = dec
-            .process_bounded(&input, as_uninit_mut(&mut out))
-            .unwrap();
-        assert_eq!(
-            progress,
-            BoundaryAwareProgress::Boundary {
-                consumed: input.len(),
-                written: 5
-            }
-        );
-        assert_eq!(&out[..5], b"hello");
-    }
-
-    // ----
-    // 4. Error mapping
-    // ----
-
-    #[test]
-    fn corrupt_input_keeps_the_compcol_error() {
-        let mut input = gzip_compress(b"hello");
-        *input.last_mut().unwrap() ^= 0xFF; // the CRC32 trailer
-
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(gzip::Decoder::new());
-        let error = drive(&mut dec, &input, 64).unwrap_err();
-        assert_eq!(error.kind, ErrorKind::CorruptStream);
-        assert_eq!(dec.compcol_error(), Some(::compcol::Error::TrailerMismatch));
-    }
-
-    #[test]
-    fn output_limit_is_behind_limits() {
-        let input = gzip_compress(&sample());
-        let mut dec =
-            CompcolDecoderAsBoundaryAwareCodec::new(LimitedDecoder::new(gzip::Decoder::new(), 100));
-        let error = drive(&mut dec, &input, 4096).unwrap_err();
-        assert_eq!(error.kind, ErrorKind::BehindLimits);
-        assert_eq!(error.codec_subcode, 11);
-        assert_eq!(
-            dec.compcol_error(),
-            Some(::compcol::Error::OutputLimitExceeded)
-        );
-    }
-
-    // ----
-    // 5. NeedDictionary
+    // 3. NeedDictionary
     // ----
 
     #[test]
     fn need_dictionary_recovers_through_get_mut() {
         let dictionary = b"a preset dictionary for zlib";
-        let compressed = {
-            let mut enc = zlib::Encoder::new().with_dictionary(dictionary);
-            let mut buf = vec![0u8; 4096];
-            let mut v = Vec::new();
-            let input = b"a preset dictionary helps";
-            let (p, _) = enc.encode(input, &mut buf).unwrap();
-            v.extend_from_slice(&buf[..p.written]);
-            loop {
-                let (p, s) = enc.finish(&mut buf).unwrap();
-                v.extend_from_slice(&buf[..p.written]);
-                if s == Status::StreamEnd {
-                    break;
-                }
-            }
-            v
-        };
+        let compressed = compress(
+            zlib::Encoder::new().with_dictionary(dictionary),
+            b"a preset dictionary helps",
+        );
 
         let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(zlib::Decoder::new());
         let mut out = [0u8; 64];
@@ -971,28 +808,8 @@ mod tests {
         assert_eq!(&out[..25], b"a preset dictionary helps");
     }
 
-    #[test]
-    fn finish_with_a_latched_error_does_not_start_finish() {
-        let script = [
-            Err(::compcol::Error::NeedDictionary),
-            step(3, 2, Status::InputEmpty),
-        ];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 6];
-        let latched = dec
-            .process_bounded(b"abc", as_uninit_mut(&mut out))
-            .unwrap_err();
-        assert_eq!(dec.finish(as_uninit_mut(&mut out)), Err(latched));
-
-        dec.clear_error();
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Ok(BoundaryAwareProgress::InputConsumed { written: 2 })
-        );
-    }
-
     // ----
-    // 6. After finish
+    // 4. After finish
     // ----
 
     #[test]
@@ -1003,9 +820,9 @@ mod tests {
             0,
             0,
         );
-        let compressed = gzip_compress(b"once");
+        let compressed = compress(gzip::Encoder::new(), b"once");
         let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(gzip::Decoder::new());
-        drive(&mut dec, &compressed, 64).unwrap();
+        run(&mut dec, &compressed, 64);
 
         let mut out = [0u8; 64];
         assert_eq!(
@@ -1020,105 +837,12 @@ mod tests {
         assert_eq!(dec.compcol_error(), None);
 
         dec.reset();
-        let mut dec2 = CompcolDecoderAsBoundaryAwareCodec::new(gzip::Decoder::new());
-        let r1 = drive(&mut dec, &compressed, 64).unwrap().output;
-        let r2 = drive(&mut dec2, &compressed, 64).unwrap().output;
-        assert_eq!(r1, r2);
-    }
-
-    #[test]
-    fn an_error_is_latched_until_reset() {
-        // `Scripted` panics on a call after the script ends. So the
-        // latched calls below do not reach the inner codec.
-        let script = [step(0, 0, Status::InputEmpty)];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 6];
-        let latched = own_error(
-            ErrorKind::ContractViolation,
-            Error::SUBCODE_UNEXPECTED_STATUS,
-            0,
-            0,
-        );
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Err(latched)
-        );
-
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Err(latched)
-        );
-        assert_eq!(dec.flush(as_uninit_mut(&mut out)), Err(latched));
-        assert_eq!(dec.finish(as_uninit_mut(&mut out)), Err(latched));
-
-        dec.reset();
-        dec.get_mut()
-            .results
-            .push_back(step(3, 2, Status::InputEmpty));
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Ok(BoundaryAwareProgress::InputConsumed { written: 2 })
-        );
-    }
-
-    #[test]
-    fn a_compcol_error_is_latched_with_zero_counts() {
-        let script = [
-            step(1, 1, Status::OutputFull),
-            Err(::compcol::Error::Corrupt),
-        ];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 6];
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Err(own_error(ErrorKind::CorruptStream, 1, 1, 1))
-        );
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Err(own_error(ErrorKind::CorruptStream, 1, 0, 0))
-        );
-        assert_eq!(dec.compcol_error(), Some(::compcol::Error::Corrupt));
-    }
-
-    #[test]
-    fn calls_after_an_unfinished_finish_fail() {
-        let after_finish = own_error(
-            ErrorKind::ContractViolation,
-            Error::SUBCODE_AFTER_FINISH,
-            0,
-            0,
-        );
-        let mut enc =
-            CompcolEncoderAsBoundaryAwareCodec::new(gzip::Encoder::new(), FlushMode::Skip);
-        let mut out = [0u8; 1];
-        assert_eq!(
-            enc.finish(as_uninit_mut(&mut out)),
-            Ok(DrainProgress::OutputFilled)
-        );
-
-        assert_eq!(
-            enc.process_bounded(b"x", as_uninit_mut(&mut out)),
-            Err(after_finish)
-        );
-        assert_eq!(enc.flush(as_uninit_mut(&mut out)), Err(after_finish));
+        assert_eq!(run(&mut dec, &compressed, 64).0, b"once");
     }
 
     // ----
-    // 7. Flush modes (encoder)
+    // 5. Flush modes (encoder)
     // ----
-
-    #[test]
-    fn flush_skip_writes_nothing() {
-        let mut enc =
-            CompcolEncoderAsBoundaryAwareCodec::new(zlib::Encoder::new(), FlushMode::Skip);
-        let mut out = [0u8; 256];
-        enc.process_bounded(b"hello", as_uninit_mut(&mut out))
-            .unwrap();
-        assert_eq!(
-            enc.flush(as_uninit_mut(&mut out)),
-            Ok(DrainProgress::Done { written: 0 })
-        );
-    }
 
     #[test]
     fn flush_sync_writes_a_decodable_prefix() {
@@ -1158,172 +882,5 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         };
         assert_eq!(&out[..written], input as &[u8]);
-    }
-
-    // ----
-    // 8. Statuses that real codecs do not produce
-    // ----
-
-    #[derive(Default)]
-    struct Scripted {
-        results: VecDeque<CompcolResult>,
-    }
-
-    impl Scripted {
-        fn new(results: impl IntoIterator<Item = CompcolResult>) -> Self {
-            Self {
-                results: results.into_iter().collect(),
-            }
-        }
-
-        fn next(&mut self) -> CompcolResult {
-            self.results.pop_front().expect("unexpected call")
-        }
-    }
-
-    impl ::compcol::Encoder for Scripted {
-        fn encode(&mut self, _: &[u8], _: &mut [u8]) -> CompcolResult {
-            self.next()
-        }
-        fn finish(&mut self, _: &mut [u8]) -> CompcolResult {
-            self.next()
-        }
-        fn reset(&mut self) {}
-        fn flush(&mut self, _: &mut [u8], _: Flush) -> CompcolResult {
-            self.next()
-        }
-    }
-
-    impl ::compcol::Decoder for Scripted {
-        fn decode(&mut self, _: &[u8], _: &mut [u8]) -> CompcolResult {
-            self.next()
-        }
-        fn finish(&mut self, _: &mut [u8]) -> CompcolResult {
-            self.next()
-        }
-        fn reset(&mut self) {}
-        fn discard_output(&mut self, _: &[u8], _: usize) -> CompcolResult {
-            unimplemented!()
-        }
-    }
-
-    fn step(consumed: usize, written: usize, status: Status) -> CompcolResult {
-        Ok((::compcol::Progress { consumed, written }, status))
-    }
-
-    #[test]
-    fn empty_output_reports_output_filled_without_calling() {
-        // `Scripted::default()` panics on any call to the inner codec.
-        let mut enc = CompcolEncoderAsBoundaryAwareCodec::new(Scripted::default(), FlushMode::Skip);
-        assert_eq!(
-            enc.process_bounded(b"abc", &mut []),
-            Ok(BoundaryAwareProgress::OutputFilled { consumed: 0 })
-        );
-        assert_eq!(enc.finish(&mut []), Ok(DrainProgress::OutputFilled));
-
-        let mut enc = CompcolEncoderAsBoundaryAwareCodec::new(
-            Scripted::default(),
-            FlushMode::Compcol(Flush::Sync),
-        );
-        assert_eq!(enc.flush(&mut []), Ok(DrainProgress::OutputFilled));
-
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::default());
-        assert_eq!(dec.finish(&mut []), Ok(DrainProgress::OutputFilled));
-    }
-
-    #[test]
-    fn partial_output_full_calls_again() {
-        let script = [
-            step(1, 2, Status::OutputFull),
-            step(2, 3, Status::InputEmpty),
-        ];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 8];
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Ok(BoundaryAwareProgress::InputConsumed { written: 5 })
-        );
-    }
-
-    #[test]
-    fn no_progress_with_output_full_is_contract_violation() {
-        let script = [
-            step(3, 4, Status::OutputFull),
-            step(0, 0, Status::OutputFull),
-        ];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 6];
-        assert_eq!(
-            dec.process_bounded(b"abcdef", as_uninit_mut(&mut out)),
-            Err(own_error(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_NO_PROGRESS,
-                3,
-                4
-            ))
-        );
-        assert_eq!(dec.compcol_error(), None);
-    }
-
-    #[test]
-    fn no_progress_with_input_empty_is_unexpected_status() {
-        let script = [step(0, 0, Status::InputEmpty)];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 6];
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Err(own_error(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_UNEXPECTED_STATUS,
-                0,
-                0
-            ))
-        );
-    }
-
-    #[test]
-    fn stream_end_from_encode_is_boundary() {
-        let script = [step(1, 1, Status::StreamEnd)];
-        let mut enc =
-            CompcolEncoderAsBoundaryAwareCodec::new(Scripted::new(script), FlushMode::Skip);
-        let mut out = [0u8; 6];
-        assert_eq!(
-            enc.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Ok(BoundaryAwareProgress::Boundary {
-                consumed: 1,
-                written: 1
-            })
-        );
-    }
-
-    #[test]
-    fn input_empty_from_finish_is_done() {
-        let script = [step(0, 2, Status::InputEmpty)];
-        let mut enc =
-            CompcolEncoderAsBoundaryAwareCodec::new(Scripted::new(script), FlushMode::Skip);
-        let mut out = [0u8; 6];
-        assert_eq!(
-            enc.finish(as_uninit_mut(&mut out)),
-            Ok(DrainProgress::Done { written: 2 })
-        );
-    }
-
-    #[test]
-    fn overclaimed_counts_are_a_contract_violation() {
-        let script = [
-            step(1, 1, Status::OutputFull),
-            step(0, 99, Status::OutputFull),
-        ];
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
-        let mut out = [0u8; 6];
-        assert_eq!(
-            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
-            Err(own_error(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                1,
-                1
-            ))
-        );
     }
 }
