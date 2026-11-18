@@ -254,25 +254,6 @@ fn check_counts(
     Ok(())
 }
 
-/// Selects the compcol call that `CompcolAdapter::drain_loop` repeats.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DrainMode {
-    /// `compcol::Encoder::flush`.
-    Flush,
-    /// `compcol::Encoder::finish` or `compcol::Decoder::finish`.
-    Finish,
-}
-
-impl DrainMode {
-    /// The status that tells that the call has no more output.
-    fn done_status(self) -> CompcolStatus {
-        match self {
-            DrainMode::Flush => CompcolStatus::InputEmpty,
-            DrainMode::Finish => CompcolStatus::StreamEnd,
-        }
-    }
-}
-
 /// The latched error of the adapter.
 ///
 /// After `Err`, compcol calls the inner codec poisoned. So the adapter
@@ -384,8 +365,9 @@ impl<I> CompcolAdapter<I> {
     ) -> Result<BoundaryAwareProgress, Error> {
         // An empty output is legal for our codecs: `Chain` and `Pump` pass
         // one when their output is full. Some compcol codecs fail on an
-        // empty output (see `drain_loop`), so do not call them.
-        // `OutputFilled` makes the caller call again with room.
+        // empty output (`lzx` gives `UnexpectedEnd` while it holds
+        // decoded bytes), so do not call them. `OutputFilled` makes the
+        // caller call again with room.
         if output.is_empty() {
             return Ok(BoundaryAwareProgress::OutputFilled { consumed: 0 });
         }
@@ -419,19 +401,13 @@ impl<I> CompcolAdapter<I> {
         }
     }
 
-    /// Repeat `step` (`flush` or `finish`, as `mode` says) until it has
-    /// no more output, or `output` is full.
+    /// Repeat `step` (`flush` or `finish`) until it has no more output,
+    /// or `output` is full.
     fn drain_loop(
         &mut self,
         output: &mut [MaybeUninit<u8>],
-        mode: DrainMode,
         mut step: impl FnMut(&mut I, &mut [u8]) -> CompcolResult,
     ) -> Result<DrainProgress, Error> {
-        // An empty output is legal for our codecs, and `Chain` passes one
-        // when `output` is full and it asks `second` if it is done. Some
-        // compcol codecs fail on an empty output (`lzx` gives
-        // `UnexpectedEnd` while it holds decoded bytes), so do not call
-        // them. `OutputFilled` makes the caller call again with room.
         if output.is_empty() {
             return Ok(DrainProgress::OutputFilled);
         }
@@ -446,17 +422,11 @@ impl<I> CompcolAdapter<I> {
                 .map_err(|error| self.latch_adapter_error(error))?;
             written += progress.written;
 
-            if status == mode.done_status() {
+            if matches!(status, CompcolStatus::InputEmpty | CompcolStatus::StreamEnd) {
                 return Ok(DrainProgress::Done { written });
             }
             if written == output.len() {
                 return Ok(DrainProgress::OutputFilled);
-            }
-            // `flush` must not end the stream, and `finish` must not stop
-            // before the stream ends.
-            if status != CompcolStatus::OutputFull {
-                let error = Error::contract_violation(Error::SUBCODE_UNEXPECTED_STATUS, 0, written);
-                return Err(self.latch_adapter_error(error));
             }
             if progress.written == 0 {
                 return Err(self.latch_adapter_error(Error::no_progress(status, 0, written)));
@@ -474,15 +444,14 @@ impl<I> CompcolAdapter<I> {
         output: &mut [MaybeUninit<u8>],
         step: impl FnMut(&mut I, &mut [u8]) -> CompcolResult,
     ) -> Result<DrainProgress, Error> {
+        self.check_not_failed()?;
         if self.finish_phase.is_finished() {
             return Ok(DrainProgress::Done { written: 0 });
         }
         self.finish_phase.start_finish();
-        self.check_not_failed()?;
-        let progress = self.drain_loop(output, DrainMode::Finish, step)?;
-        match progress {
-            DrainProgress::Done { .. } => self.finish_phase.finish_done(),
-            DrainProgress::OutputFilled => {}
+        let progress = self.drain_loop(output, step)?;
+        if matches!(progress, DrainProgress::Done { .. }) {
+            self.finish_phase.finish_done();
         }
         Ok(progress)
     }
@@ -573,10 +542,9 @@ impl<E: Encoder> DrainCodec for CompcolEncoderAsBoundaryAwareCodec<E> {
         self.adapter.finish_phase.check_open()?;
         match self.flush_mode {
             FlushMode::Skip => Ok(DrainProgress::Done { written: 0 }),
-            FlushMode::Compcol(mode) => {
-                self.adapter
-                    .drain_loop(output, DrainMode::Flush, |inner, o| inner.flush(o, mode))
-            }
+            FlushMode::Compcol(mode) => self
+                .adapter
+                .drain_loop(output, |inner, o| inner.flush(o, mode)),
         }
     }
 
@@ -998,6 +966,26 @@ mod tests {
         assert_eq!(&out[..25], b"a preset dictionary helps");
     }
 
+    #[test]
+    fn finish_with_a_latched_error_does_not_start_finish() {
+        let script = [
+            Err(::compcol::Error::NeedDictionary),
+            step(3, 2, Status::InputEmpty),
+        ];
+        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(Scripted::new(script));
+        let mut out = [0u8; 6];
+        let latched = dec
+            .process_bounded(b"abc", as_uninit_mut(&mut out))
+            .unwrap_err();
+        assert_eq!(dec.finish(as_uninit_mut(&mut out)), Err(latched));
+
+        dec.clear_error();
+        assert_eq!(
+            dec.process_bounded(b"abc", as_uninit_mut(&mut out)),
+            Ok(BoundaryAwareProgress::InputConsumed { written: 2 })
+        );
+    }
+
     // ----
     // 6. After finish
     // ----
@@ -1304,19 +1292,14 @@ mod tests {
     }
 
     #[test]
-    fn input_empty_from_finish_is_unexpected_status() {
+    fn input_empty_from_finish_is_done() {
         let script = [step(0, 2, Status::InputEmpty)];
         let mut enc =
             CompcolEncoderAsBoundaryAwareCodec::new(Scripted::new(script), FlushMode::Skip);
         let mut out = [0u8; 6];
         assert_eq!(
             enc.finish(as_uninit_mut(&mut out)),
-            Err(own_error(
-                ErrorKind::ContractViolation,
-                Error::SUBCODE_UNEXPECTED_STATUS,
-                0,
-                2
-            ))
+            Ok(DrainProgress::Done { written: 2 })
         );
     }
 
