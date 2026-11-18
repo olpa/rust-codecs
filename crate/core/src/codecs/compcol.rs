@@ -609,6 +609,16 @@ impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I,
 // ----
 
 /// A `compcol::Encoder` as a [`BoundaryAwareCodec`].
+///
+/// # Example
+///
+/// ```
+/// # use rust_codecs_core::compcol::{CompcolEncoderAsBoundaryAwareCodec, FlushMode};
+/// let codec = CompcolEncoderAsBoundaryAwareCodec::new(
+///     compcol::gzip::Encoder::new(),
+///     FlushMode::Skip,
+/// );
+/// ```
 pub type CompcolEncoderAsBoundaryAwareCodec<E> = CompcolAsBoundaryAwareCodec<E, Encoding>;
 
 impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
@@ -641,6 +651,15 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
 ///
 /// For gzip, build the decoder with `with_multi_member(false)`.
 /// Otherwise compcol decodes concatenated members as one stream.
+///
+/// # Example
+///
+/// ```
+/// # use rust_codecs_core::compcol::CompcolDecoderAsBoundaryAwareCodec;
+/// let codec = CompcolDecoderAsBoundaryAwareCodec::new(
+///     compcol::gzip::Decoder::new().with_multi_member(false),
+/// );
+/// ```
 pub type CompcolDecoderAsBoundaryAwareCodec<D> = CompcolAsBoundaryAwareCodec<D, Decoding>;
 
 impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
