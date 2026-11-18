@@ -61,6 +61,20 @@ Streaming JSON (crate \texttt{scan\_json}): process through a sliding window.
 Streaming transformations are needed. A standard interface?
 \end{frame}
 
+\begin{frame}{Prior art}
+ChatGPT research mode:
+\begin{quote}\small
+Rust has had many serious pieces of groundwork, but almost all of them
+optimized either framing, compression, or format-specific ergonomics.
+
+\medskip
+A \hl{general} standard for stateful, composable, allocation-light streaming
+byte rewriters \hl{remains a visible gap}.
+\end{quote}
+\medskip
+Full report: \small\url{https://github.com/olpa/rust-codecs/blob/master/deep-research-report.md}
+\end{frame}
+
 \section{Who am I?}
 \begin{frame}{Who am I? Why rust-codecs?}
 \begin{itemize}
@@ -108,16 +122,8 @@ while(*tgt++=*src++);
 \end{itemize}
 \end{frame}
 
-\section{Preliminary work}
-\begin{frame}{Preliminary work}
-Surprisingly, not much. ChatGPT research mode:
-\begin{quote}\small
-My overall judgment is therefore: Rust has had many serious pieces of groundwork, but almost all of them optimized either framing, compression, or format-specific ergonomics. A general standard for stateful, composable, allocation-light streaming byte rewriters remains a visible gap.
-\end{quote}
-Full report: \small\url{https://github.com/olpa/rust-codecs/blob/master/deep-research-report.md}
-\end{frame}
-
-\begin{frame}{Preliminary work: shortlist}
+\section{Prior art}
+\begin{frame}{Prior art: shortlist}
 \begin{itemize}
 \item tokio codecs
 \item compcol --- very close to what I want. Collection of compression algorithms.
