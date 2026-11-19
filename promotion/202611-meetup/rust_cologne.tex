@@ -112,23 +112,24 @@ And now working on: Streaming JSON, codecs
 
 \section{Derivation}
 \frame{\sectionpage}
-\begin{frame}[fragile]{First requirements and the idea}
-Requirements:
-\begin{enumerate}
-\item streaming processing: bytes in, bytes out
-\item zero cost for in-memory: no unneeded copies/movements for slice in, slice out
-\item \dots{} to be continued
-\end{enumerate}
-First idea: two iterators
-\begin{itemize}
-\item Inner iterator, cheap, essentially scanning a memory
-\end{itemize}
-\begin{Verbatim}
+\begin{frame}{Requirements}
+\textbf{Streaming:} bytes in, bytes out
+
+\medskip
+\textbf{In-memory:} slice in, slice out, no extra copies
+\end{frame}
+
+\begin{frame}[fragile]{First idea: two iterators}
+\textbf{Inner iterator:} move bytes in memory, cheaply
+
+\medskip
+\begin{Verbatim}[frame=single,fontsize=\small]
+/* Inspired by plain C */
 while(*tgt++=*src++);
 \end{Verbatim}
-\begin{itemize}
-\item Outer iterator: load/save a block of memory to an external storage
-\end{itemize}
+
+\medskip
+\textbf{Outer iterator:} load and save blocks from external storage, costly
 \end{frame}
 
 \begin{frame}{Prior art: shortlist}
