@@ -117,6 +117,18 @@
 //! it (`encode`/`decode`, `finish`, `flush`, `reset`): the state of the
 //! adapter would no longer match. Use the adapter methods instead.
 //!
+//! # Requirement on the inner codec
+//!
+//! The adapter has no carry buffer. The inner codec must keep a partial
+//! atomic unit in its own state, such as part of a header on input or
+//! part of a sync marker on output. Then each call with a non-empty
+//! output moves at least one byte or ends the work. If a call moves no
+//! bytes and does not end the work, the adapter fails with
+//! [`ErrorKind::ContractViolation`].
+//!
+//! The codecs of compcol 0.7.8 meet this requirement. For atomic units
+//! and carry buffers, see `CREATING-CODECS.md`.
+//!
 //! # Performance
 //!
 //! compcol writes into `&mut [u8]`, but the output of our codecs is
@@ -158,22 +170,6 @@ pub enum FlushMode {
 // ----
 // Shared adapter core
 // ----
-
-// Atomic units
-//
-// An atomic unit is the smallest piece that a codec reads or writes in
-// one step, for example a 4-byte header or a 5-byte sync marker. A codec
-// that gets only part of a unit must keep that part in its own state,
-// or it makes no progress.
-//
-// The adapter has no carry buffer. If the inner codec makes no progress,
-// the adapter fails with `ErrorKind::ContractViolation`.
-//
-// The codecs of compcol 0.7.8 do not cause this error. Each of them takes
-// partial input units into its own state, and keeps output that does not
-// fit for the next call. So each call with a non-empty output moves at
-// least one byte or ends the work. The error can come from other
-// `Encoder` or `Decoder` implementations, or from later compcol versions.
 
 /// The errors of the adapter. Private to this module.
 impl Error {
@@ -223,8 +219,8 @@ impl Error {
     }
 
     /// The error for a compcol call that moved no bytes and did not end
-    /// the work. compcol 0.7.8 codecs never cause it. See "Atomic units"
-    /// above.
+    /// the work. compcol 0.7.8 codecs never cause it. See "Requirement on
+    /// the inner codec" in the module docs.
     fn no_progress(status: CompcolStatus, consumed: usize, written: usize) -> Self {
         let codec_subcode = if status == CompcolStatus::OutputFull {
             Self::SUBCODE_NO_PROGRESS
