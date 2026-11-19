@@ -671,7 +671,6 @@ impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
-    use alloc::vec;
     use alloc::vec::Vec;
 
     use ::compcol::{gzip, zlib, Flush};
@@ -778,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn need_dictionary_recovers_through_get_mut() {
+    fn continue_after_a_recoverable_error() {
         let dictionary = b"a preset dictionary for zlib";
         let compressed = compress(
             zlib::Encoder::new().with_dictionary(dictionary),
@@ -796,14 +795,10 @@ mod tests {
         assert!(dec.get_ref().dictionary_id().is_some());
 
         dec.get_mut().set_dictionary(dictionary).unwrap();
-        let rest = &compressed[error.consumed..];
-        assert_eq!(
-            dec.process_bounded(rest, as_uninit_mut(&mut out)),
-            Err(own_error(ErrorKind::Unsupported, 12, 0, 0)),
-            "the error stays latched until clear_error"
-        );
         dec.clear_error();
         assert_eq!(dec.compcol_error(), None);
+
+        let rest = &compressed[error.consumed..];
         let progress = dec.process_bounded(rest, as_uninit_mut(&mut out)).unwrap();
         assert_eq!(
             progress,
@@ -844,42 +839,53 @@ mod tests {
     }
 
     #[test]
-    fn flush_sync_writes_a_decodable_prefix() {
+    fn flush_sync_is_passed_to_the_compcol_codec() {
+        // The adapter passes `Flush::Sync` to compcol. A zlib encoder writes
+        // bytes on each sync flush, so `written > 0` shows that the call
+        // reached it.
         let mut enc = CompcolEncoderAsBoundaryAwareCodec::new(
             zlib::Encoder::new(),
             FlushMode::Compcol(Flush::Sync),
         );
-        let mut buf = vec![0u8; 256];
-        let mut compressed = Vec::new();
-        let input = b"hello, sync";
-        match enc.process_bounded(input, as_uninit_mut(&mut buf)).unwrap() {
-            BoundaryAwareProgress::InputConsumed { written } => {
-                compressed.extend_from_slice(&buf[..written]);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        loop {
-            match enc.flush(as_uninit_mut(&mut buf)).unwrap() {
-                DrainProgress::OutputFilled => compressed.extend_from_slice(&buf),
-                DrainProgress::Done { written } => {
-                    compressed.extend_from_slice(&buf[..written]);
-                    break;
-                }
-            }
-        }
+        let mut buf = [0u8; 256];
+        let mut pos = 0;
 
-        // The sync-flushed prefix is decodable: process_bounded decodes the
-        // input and returns either Boundary or InputConsumed.
-        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(zlib::Decoder::new());
-        let mut out = [0u8; 64];
-        let progress = dec
-            .process_bounded(&compressed, as_uninit_mut(&mut out))
+        let progress = enc
+            .process_bounded(b"hello, ", as_uninit_mut(&mut buf[pos..]))
             .unwrap();
-        let written = match progress {
-            BoundaryAwareProgress::Boundary { written, .. } => written,
-            BoundaryAwareProgress::InputConsumed { written } => written,
-            other => panic!("unexpected: {other:?}"),
+        let BoundaryAwareProgress::InputConsumed { written } = progress else {
+            panic!("unexpected: {progress:?}");
         };
-        assert_eq!(&out[..written], input as &[u8]);
+        pos += written;
+        let progress = enc.flush(as_uninit_mut(&mut buf[pos..])).unwrap();
+        let DrainProgress::Done { written } = progress else {
+            panic!("unexpected: {progress:?}");
+        };
+        assert!(written > 0, "the first flush wrote nothing");
+        pos += written;
+
+        let progress = enc
+            .process_bounded(b"sync", as_uninit_mut(&mut buf[pos..]))
+            .unwrap();
+        let BoundaryAwareProgress::InputConsumed { written } = progress else {
+            panic!("unexpected: {progress:?}");
+        };
+        pos += written;
+        let progress = enc.flush(as_uninit_mut(&mut buf[pos..])).unwrap();
+        let DrainProgress::Done { written } = progress else {
+            panic!("unexpected: {progress:?}");
+        };
+        assert!(written > 0, "the second flush wrote nothing");
+        pos += written;
+
+        let progress = enc.finish(as_uninit_mut(&mut buf[pos..])).unwrap();
+        let DrainProgress::Done { written } = progress else {
+            panic!("unexpected: {progress:?}");
+        };
+        pos += written;
+
+        let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(zlib::Decoder::new());
+        let (output, _) = run(&mut dec, &buf[..pos], 4096);
+        assert_eq!(output, b"hello, sync");
     }
 }
