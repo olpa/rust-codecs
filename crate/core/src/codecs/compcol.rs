@@ -686,6 +686,7 @@ mod tests {
         let mut data = Vec::new();
         for i in 0..2000u32 {
             data.extend_from_slice(b"compcol adapter ");
+            // Vary the content, and add binary bytes, including zeros.
             data.extend_from_slice(&i.to_le_bytes());
         }
         data
