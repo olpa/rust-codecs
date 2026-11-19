@@ -8,6 +8,8 @@
 \usepackage{fancyvrb}
 \setmonofont{DejaVu Sans Mono}[Scale=0.85]
 \newcommand{\hl}[1]{\colorbox{yellow}{#1}}
+\newcommand{\surprise}[1]{\colorbox{orange!25}{#1}}
+\newcommand{\notetag}[1]{~\colorbox{orange!25}{\small\textit{#1}}}
 \newcommand{\todo}[1]{{\color{red}\emph{#1}}}
 
 \title{Rust codecs: streaming byte transformations}
@@ -173,12 +175,15 @@ enum Status {
 \end{columns}
 \end{frame}
 
-\begin{frame}{Requirements rewrite}
-\begin{enumerate}
-\item streaming processing
-\item zero cost for in-memory
-\item finish, maybe flush and in-band end
-\end{enumerate}
+\begin{frame}{Idea refinement}
+\begin{itemize}
+\item Inner layer: slice to slice
+\item \texttt{Result} with \texttt{Progress}
+\item In-band end\notetag{not predicted}
+\end{itemize}
+
+\bigskip\bigskip
+\todo{TODO: outer layer}
 \end{frame}
 
 \begin{frame}{AI slop}
