@@ -747,25 +747,33 @@ mod tests {
 
     #[test]
     fn boundary_aware_decoder_reads_members_one_by_one() {
-        let first = compress(gzip::Encoder::new(), b"first member");
-        let second = compress(gzip::Encoder::new(), b"second member");
-        let mut input = first.clone();
-        input.extend_from_slice(&second);
-        input.extend_from_slice(b"tail");
+        let mut input = compress(gzip::Encoder::new(), b"first member");
+        input.extend(compress(gzip::Encoder::new(), b"second member"));
+        input.extend(compress(gzip::Encoder::new(), b"third member"));
 
         for chunk in [1, 4096] {
-            let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(
+            let mut codec = CompcolDecoderAsBoundaryAwareCodec::new(
                 gzip::Decoder::new().with_multi_member(false),
             );
-            let (one, consumed) = run(&mut dec, &input, chunk);
-            assert_eq!(one, b"first member", "chunk {chunk}");
-            assert_eq!(consumed, first.len(), "chunk {chunk}");
+            let mut pos = 0;
 
-            dec.reset();
-            let rest = &input[consumed..];
-            let (two, consumed) = run(&mut dec, rest, chunk);
-            assert_eq!(two, b"second member", "chunk {chunk}");
-            assert_eq!(&rest[consumed..], b"tail", "chunk {chunk}");
+            let (output, consumed) = run(&mut codec, &input[pos..], chunk);
+            assert_eq!(output, b"first member", "chunk {chunk}");
+            pos += consumed;
+
+            codec.reset();
+
+            let (output, consumed) = run(&mut codec, &input[pos..], chunk);
+            assert_eq!(output, b"second member", "chunk {chunk}");
+            pos += consumed;
+
+            codec.reset();
+
+            let (output, consumed) = run(&mut codec, &input[pos..], chunk);
+            assert_eq!(output, b"third member", "chunk {chunk}");
+            pos += consumed;
+
+            assert_eq!(pos, input.len(), "chunk {chunk}");
         }
     }
 
