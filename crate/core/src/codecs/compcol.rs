@@ -677,7 +677,7 @@ mod tests {
     use ::compcol::{gzip, zlib, Flush};
 
     use super::*;
-    use crate::codecs::test_support::SplitSource;
+    use crate::codecs::test_support::{OneByteAtATimeSink, SplitSource};
     use crate::sources_and_sinks::vec::VecSink;
     use crate::stream_to_stream;
     use crate::uninit::as_uninit_mut;
@@ -693,15 +693,25 @@ mod tests {
     }
 
     /// Run `codec` over `input` with `stream_to_stream`. The source
-    /// gives at most `chunk` bytes at a time. Return the output and the
+    /// gives at most `chunk_size` bytes at a time. If `chunk_size` is 1,
+    /// the sink also offers 1 byte at a time. Return the output and the
     /// number of consumed bytes.
-    fn run(codec: &mut dyn BoundaryAwareCodec, input: &[u8], chunk: usize) -> (Vec<u8>, usize) {
+    fn run(
+        codec: &mut dyn BoundaryAwareCodec,
+        input: &[u8],
+        chunk_size: usize,
+    ) -> (Vec<u8>, usize) {
         let mut source = SplitSource {
             bytes: input,
             pos: 0,
-            chunk_size: chunk,
+            chunk_size,
         };
-        let mut sink = VecSink::with_growth(Vec::new(), chunk);
+        if chunk_size == 1 {
+            let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+            let counts = stream_to_stream(&mut source, codec, &mut sink).unwrap();
+            return (sink.bytes, counts.consumed);
+        }
+        let mut sink = VecSink::with_growth(Vec::new(), chunk_size);
         let counts = stream_to_stream(&mut source, codec, &mut sink).unwrap();
         (sink.into_inner(), counts.consumed)
     }
@@ -720,12 +730,8 @@ mod tests {
         }
     }
 
-    // ----
-    // 1. Round trip
-    // ----
-
     #[test]
-    fn round_trip_through_all_adapters_with_small_and_large_buffers() {
+    fn round_trip_with_small_and_large_chunks() {
         let data = sample();
         for chunk in [1, 7, 4096] {
             let mut enc =
@@ -738,10 +744,6 @@ mod tests {
             assert_eq!(plain, data, "chunk {chunk}");
         }
     }
-
-    // ----
-    // 2. Two gzip members
-    // ----
 
     #[test]
     fn boundary_aware_decoder_reads_members_one_by_one() {
@@ -766,10 +768,6 @@ mod tests {
             assert_eq!(&rest[consumed..], b"tail", "chunk {chunk}");
         }
     }
-
-    // ----
-    // 3. NeedDictionary
-    // ----
 
     #[test]
     fn need_dictionary_recovers_through_get_mut() {
@@ -809,10 +807,6 @@ mod tests {
         assert_eq!(&out[..25], b"a preset dictionary helps");
     }
 
-    // ----
-    // 4. After finish
-    // ----
-
     #[test]
     fn calls_after_finish_fail_until_reset() {
         let after_finish = own_error(
@@ -840,10 +834,6 @@ mod tests {
         dec.reset();
         assert_eq!(run(&mut dec, &compressed, 64).0, b"once");
     }
-
-    // ----
-    // 5. Flush modes (encoder)
-    // ----
 
     #[test]
     fn flush_sync_writes_a_decodable_prefix() {

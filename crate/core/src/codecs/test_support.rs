@@ -337,6 +337,30 @@ impl Source for SplitSource<'_> {
     }
 }
 
+/// A `Sink` that never offers more than one byte of spare room per
+/// call, unlike `VecSink`, whose growth is capacity-driven and can
+/// jump to many bytes at once.
+#[cfg(all(feature = "alloc", any(feature = "base64", feature = "compcol")))]
+pub(crate) struct OneByteAtATimeSink {
+    pub(crate) bytes: alloc::vec::Vec<u8>,
+}
+
+#[cfg(all(feature = "alloc", any(feature = "base64", feature = "compcol")))]
+impl crate::Sink for OneByteAtATimeSink {
+    type Error = core::convert::Infallible;
+
+    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+        self.bytes.reserve_exact(1);
+        Ok(Some(&mut self.bytes.spare_capacity_mut()[..1]))
+    }
+
+    fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
+        let amount = amount.min(1);
+        unsafe { self.bytes.set_len(self.bytes.len() + amount) };
+        Ok(())
+    }
+}
+
 /// Collects bytes in a fixed array. It replaces `Vec`, so the tests
 /// do not need `alloc`.
 pub(crate) struct Collected {

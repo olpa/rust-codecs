@@ -742,7 +742,7 @@ mod tests {
     use crate::base64_dec::base64_dec;
     use crate::base64_enc::base64_enc;
     use crate::codecs::test_support::{
-        DropEverything, FailsWithOverclaim, HoldsOutput, SplitSource,
+        DropEverything, FailsWithOverclaim, HoldsOutput, OneByteAtATimeSink, SplitSource,
     };
     use crate::identity::{identity, Identity};
     use crate::rot13::rot13;
@@ -751,7 +751,7 @@ mod tests {
     use crate::uninit::{as_uninit_mut, copy_to_uninit};
     use crate::{
         stream_to_stream, Codec, DrainCodec, DrainProgress, DriveError, DriveErrorKind,
-        EmptyBufferError, Error, ErrorKind, Progress, Pump, Sink, StreamError, StreamErrorKind,
+        EmptyBufferError, Error, ErrorKind, Progress, Pump, StreamError, StreamErrorKind,
     };
 
     /// A subcode that is not zero, so a test can see when a latch drops
@@ -850,28 +850,6 @@ mod tests {
             }
         );
         assert_eq!(&out[..INPUT.len()], INPUT.as_bytes());
-    }
-
-    /// A `Sink` that never offers more than one byte of spare room per
-    /// call, unlike `VecSink`, whose growth is capacity-driven and can
-    /// jump to many bytes at once.
-    struct OneByteAtATimeSink {
-        bytes: Vec<u8>,
-    }
-
-    impl Sink for OneByteAtATimeSink {
-        type Error = Infallible;
-
-        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
-            self.bytes.reserve_exact(1);
-            Ok(Some(&mut self.bytes.spare_capacity_mut()[..1]))
-        }
-
-        fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
-            let amount = amount.min(1);
-            unsafe { self.bytes.set_len(self.bytes.len() + amount) };
-            Ok(())
-        }
     }
 
     #[test]
