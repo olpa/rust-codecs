@@ -25,12 +25,12 @@ impl<C> BoundaryAwareCodecAsCodec<C> {
     }
 
     /// The inner codec.
-    pub fn inner(&self) -> &C {
+    pub fn get_ref(&self) -> &C {
         &self.inner
     }
 
     /// The inner codec, for configuration only.
-    pub fn inner_mut(&mut self) -> &mut C {
+    pub fn get_mut(&mut self) -> &mut C {
         &mut self.inner
     }
 
