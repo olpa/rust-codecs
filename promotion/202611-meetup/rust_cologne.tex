@@ -145,31 +145,32 @@ while(*tgt++=*src++);
 Full report: \small\url{https://github.com/olpa/rust-codecs/blob/master/deep-research-report.md}
 \end{frame}
 
-\begin{frame}{Updated requirements}
-\begin{enumerate}
-\item streaming processing: bytes in, bytes out
-\item zero cost for in-memory: no extra copies/movements for slice in, slice out
-\item \todo{placeholder: find what's interesting in compcol}
-\item \todo{placeholder: find what's interesting in tokio}
-\item \todo{placeholder: find what's needed for base64}
-\end{enumerate}
-\end{frame}
+\begin{frame}[fragile]{Compcol interface}
+\begin{Verbatim}[fontsize=\Large,frame=single]
+fn encode(&mut self, input: &[u8], output: &mut [u8])
+    -> Result<(Progress, Status), Error>;
+\end{Verbatim}
 
-\begin{frame}{Compcol interface}
-\begin{itemize}
-\item Process step $\to$ \texttt{Progress}, \texttt{Status}
-\item Code/decode
-\item Slice to slice instead of an iterator: OK
-\item flush, finish. Hello from base64, we'll come to it
-\end{itemize}
-\end{frame}
-
-\begin{frame}{Compcol interface --- 2}
-Result of a codec step.
-\begin{itemize}
-\item Codec-initiated end of the stream
-\item There is also ``skip N bytes'', but for me it doesn't need a definition through the interface
-\end{itemize}
+\medskip
+\begin{columns}[t]
+\begin{column}{0.45\textwidth}
+\begin{Verbatim}[fontsize=\Large,frame=single]
+struct Progress {
+    consumed: usize,
+    written:  usize,
+}
+\end{Verbatim}
+\end{column}
+\begin{column}{0.45\textwidth}
+\begin{Verbatim}[fontsize=\Large,frame=single]
+enum Status {
+    InputEmpty,
+    OutputFull,
+    StreamEnd,
+}
+\end{Verbatim}
+\end{column}
+\end{columns}
 \end{frame}
 
 \begin{frame}{Requirements rewrite}
