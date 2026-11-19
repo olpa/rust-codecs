@@ -134,10 +134,15 @@ while(*tgt++=*src++);
 
 \begin{frame}{Prior art: shortlist}
 \begin{itemize}
-\item tokio codecs
-\item compcol --- very close to what I want. Collection of compression algorithms.
-\item Honorary mention: base64 algorithm as an ``adversarial'' use case
+\item Module \texttt{tokio\_util::codec}: \url{https://docs.rs/tokio-util/latest/tokio_util/codec/}
+\item Crate \texttt{compcol}: compression algorithms\\
+  \url{https://docs.rs/compcol/latest/compcol/}
+\item Honorary mention: \texttt{base64} algorithm is adversarial\\
+  Crate \texttt{base64}: \url{https://docs.rs/base64/latest/base64/}
 \end{itemize}
+
+\bigskip
+Full report: \small\url{https://github.com/olpa/rust-codecs/blob/master/deep-research-report.md}
 \end{frame}
 
 \begin{frame}{Updated requirements}
