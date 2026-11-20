@@ -51,8 +51,7 @@ impl Error {
     /// The compcol codec moved no bytes and did not end the work.
     const SUBCODE_NO_PROGRESS: usize = 0x103;
 
-    /// Convert a compcol error. See "Errors" in
-    /// [`CompcolAsBoundaryAwareCodec`].
+    /// Convert a compcol error.
     fn from_compcol(error: CompcolError, consumed: usize, written: usize) -> Self {
         let (kind, codec_subcode) = match error {
             CompcolError::Corrupt => (ErrorKind::CorruptStream, 1),
@@ -92,8 +91,7 @@ impl Error {
     }
 
     /// The error for a compcol call that moved no bytes and did not end
-    /// the work. compcol 0.7.8 codecs never cause it. See "Requirement on
-    /// the inner codec" in [`CompcolAsBoundaryAwareCodec`].
+    /// the work. compcol 0.7.8 codecs never cause it.
     fn no_progress(status: CompcolStatus, consumed: usize, written: usize) -> Self {
         let codec_subcode = if status == CompcolStatus::OutputFull {
             Self::SUBCODE_NO_PROGRESS
@@ -238,92 +236,20 @@ use sealed::{CompcolKind, Decoding, Encoding};
 /// The generic type behind [`CompcolEncoderAsBoundaryAwareCodec`] and
 /// [`CompcolDecoderAsBoundaryAwareCodec`].
 ///
-/// The algorithms come from your own dependency on `compcol`, for
-/// example `compcol = { version = "0.7.8", features = ["gzip"] }`.
-///
-/// # Example
-///
-/// ```
-/// # #[cfg(feature = "alloc")]
-/// # {
-/// use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
-/// use rust_codecs_core::compcol::{
-///     CompcolDecoderAsBoundaryAwareCodec, CompcolEncoderAsBoundaryAwareCodec, FlushMode,
-/// };
-/// use rust_codecs_core::sources_and_sinks::slice::SliceSource;
-/// use rust_codecs_core::sources_and_sinks::vec::VecSink;
-/// use rust_codecs_core::stream_to_stream;
-///
-/// // Compress
-/// let encoder = BoundaryAwareCodecAsCodec::new(
-///     CompcolEncoderAsBoundaryAwareCodec::new(compcol::gzip::Encoder::new(), FlushMode::Skip),
-/// );
-/// let mut compressed = VecSink::default();
-/// stream_to_stream(&mut SliceSource::new(b"hello, hello"), encoder, &mut compressed).unwrap();
-/// let compressed = compressed.into_inner();
-///
-/// // Decompress
-/// let decoder = BoundaryAwareCodecAsCodec::new(
-///     CompcolDecoderAsBoundaryAwareCodec::new(compcol::gzip::Decoder::new()),
-/// );
-/// let mut plain = VecSink::default();
-/// stream_to_stream(&mut SliceSource::new(&compressed), decoder, &mut plain).unwrap();
-/// assert_eq!(plain.into_inner(), b"hello, hello");
-/// # }
-/// ```
-///
-/// # After `finish`
-///
-/// After the first `finish` call, `process_bounded` and `flush` fail
-/// with [`ErrorKind::ContractViolation`]. When `finish` reports
-/// [`Done`](DrainProgress::Done), a new `finish` returns
-/// `Done { written: 0 }`. To start a new stream, call
-/// [`reset`](Self::reset).
-///
 /// # Errors
 ///
-/// After an `Err`, compcol calls the inner codec poisoned. So the
-/// adapter latches the error. Later calls of `process_bounded`, `flush`
-/// and `finish` return the same kind and subcode, with `consumed` and
-/// `written` zero. They do not call the inner codec. To remove the
-/// latched error, call [`reset`](Self::reset) or
+/// After an error, compcol considers the inner codec poisoned, so the
+/// adapter does not call it again.
+///
+/// Instead, the adapter latches the error: each later call of
+/// `process_bounded`, `flush` and `finish` returns the same kind and
+/// subcode, with `consumed` and `written` zero.
+///
+/// To remove the latched error, call [`reset`](Self::reset) or
 /// [`clear_error`](Self::clear_error).
-///
-/// The kind of [`Error`] for each compcol error:
-///
-/// | Kind                | `compcol::Error` |
-/// |---------------------|------------------|
-/// | `CorruptStream`     | `Corrupt`, `UnexpectedEnd`, `BadHeader`, `InvalidBlockType`, `InvalidHuffmanTree`, `InvalidDistance`, `ChecksumMismatch`, `TrailerMismatch` |
-/// | `Unsupported`       | `Unsupported`, `NeedDictionary` |
-/// | `BehindLimits`      | `OutputTooSmall`, `OutputLimitExceeded` |
-/// | `ContractViolation` | a variant that this version does not know |
-///
-/// The checks of the adapter give `ContractViolation`:
-/// - the compcol codec returns a status that its contract excludes,
-/// - a call moves no bytes and does not end the work,
-/// - a call comes after `finish`.
 ///
 /// The subcode is opaque and not part of the API. To get the original
 /// compcol error, call [`compcol_error`](Self::compcol_error).
-///
-/// # Requirement on the inner codec
-///
-/// The adapter has no carry buffer. The inner codec must keep a partial
-/// atomic unit in its own state, such as part of a header on input or
-/// part of a sync marker on output. Then each call with a non-empty
-/// output moves at least one byte or ends the work. If a call moves no
-/// bytes and does not end the work, the adapter fails with
-/// [`ErrorKind::ContractViolation`].
-///
-/// The codecs of compcol 0.7.8 meet this requirement. For atomic units
-/// and carry buffers, see `CREATING-CODECS.md`.
-///
-/// # Performance
-///
-/// compcol writes into `&mut [u8]`, but the output of our codecs is
-/// `&mut [MaybeUninit<u8>]`. So each adapter call fills its output with
-/// zeros once before it calls compcol. See
-/// <https://github.com/olpa/rust-codecs/issues/19>.
 #[derive(Debug, Clone)]
 pub struct CompcolAsBoundaryAwareCodec<I, K> {
     inner: I,
@@ -535,6 +461,9 @@ impl<I, K: CompcolKind<I>> CompcolAsBoundaryAwareCodec<I, K> {
 }
 
 impl<I, K: CompcolKind<I>> DrainCodec for CompcolAsBoundaryAwareCodec<I, K> {
+    /// After the first `finish` call, `flush` fails with
+    /// [`ErrorKind::ContractViolation`]. To start a new stream, call
+    /// [`reset`](Self::reset).
     fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
         self.check_not_failed()?;
         self.finish_phase.check_open()?;
@@ -558,6 +487,9 @@ impl<I, K: CompcolKind<I>> DrainCodec for CompcolAsBoundaryAwareCodec<I, K> {
 }
 
 impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I, K> {
+    /// After the first `finish` call, `process_bounded` fails with
+    /// [`ErrorKind::ContractViolation`]. To start a new stream, call
+    /// [`reset`](Self::reset).
     fn process_bounded(
         &mut self,
         input: &[u8],
