@@ -9,7 +9,7 @@
 use core::mem::MaybeUninit;
 
 use ::compcol::{
-    Decoder, Encoder, Error as CompcolError, Flush as CompcolFlush, Progress as CompcolProgress,
+    Error as CompcolError, Flush as CompcolFlush, Progress as CompcolProgress,
     Status as CompcolStatus,
 };
 
@@ -143,7 +143,9 @@ enum Failure {
 // ----
 
 mod sealed {
-    use super::CompcolResult;
+    use ::compcol::{Decoder, Encoder, Progress as CompcolProgress, Status as CompcolStatus};
+
+    use super::{CompcolResult, FlushMode};
 
     /// What an encoder or a decoder adds to the adapter. The adapter
     /// calls the inner compcol codec only through this trait, so one
@@ -163,71 +165,71 @@ mod sealed {
 
         fn reset(&mut self, inner: &mut I);
     }
-}
 
-use sealed::CompcolKind;
+    /// The result of a flush that writes nothing. `drain_loop` turns it
+    /// into `Done { written: 0 }`.
+    const NOTHING_TO_FLUSH: CompcolResult = Ok((
+        CompcolProgress {
+            consumed: 0,
+            written: 0,
+        },
+        CompcolStatus::InputEmpty,
+    ));
 
-/// The result of a flush that writes nothing. `drain_loop` turns it
-/// into `Done { written: 0 }`.
-const NOTHING_TO_FLUSH: CompcolResult = Ok((
-    CompcolProgress {
-        consumed: 0,
-        written: 0,
-    },
-    CompcolStatus::InputEmpty,
-));
-
-/// What an encoder adds to the adapter: its [`FlushMode`]. The kind of
-/// [`CompcolEncoderAsBoundaryAwareCodec`].
-#[derive(Debug, Clone)]
-pub struct Encoding {
-    flush_mode: FlushMode,
-}
-
-impl<E: Encoder> CompcolKind<E> for Encoding {
-    fn step(&mut self, inner: &mut E, input: &[u8], output: &mut [u8]) -> CompcolResult {
-        inner.encode(input, output)
+    /// What an encoder adds to the adapter: its [`FlushMode`]. The kind of
+    /// [`CompcolEncoderAsBoundaryAwareCodec`](super::CompcolEncoderAsBoundaryAwareCodec).
+    #[derive(Debug, Clone)]
+    pub struct Encoding {
+        pub(super) flush_mode: FlushMode,
     }
 
-    fn flush(&mut self, inner: &mut E, output: &mut [u8]) -> CompcolResult {
-        match self.flush_mode {
-            FlushMode::Skip => NOTHING_TO_FLUSH,
-            FlushMode::Compcol(mode) => inner.flush(output, mode),
+    impl<E: Encoder> CompcolKind<E> for Encoding {
+        fn step(&mut self, inner: &mut E, input: &[u8], output: &mut [u8]) -> CompcolResult {
+            inner.encode(input, output)
+        }
+
+        fn flush(&mut self, inner: &mut E, output: &mut [u8]) -> CompcolResult {
+            match self.flush_mode {
+                FlushMode::Skip => NOTHING_TO_FLUSH,
+                FlushMode::Compcol(mode) => inner.flush(output, mode),
+            }
+        }
+
+        fn finish(&mut self, inner: &mut E, output: &mut [u8]) -> CompcolResult {
+            inner.finish(output)
+        }
+
+        fn reset(&mut self, inner: &mut E) {
+            inner.reset();
         }
     }
 
-    fn finish(&mut self, inner: &mut E, output: &mut [u8]) -> CompcolResult {
-        inner.finish(output)
-    }
+    /// What a decoder adds to the adapter: nothing. The kind of
+    /// [`CompcolDecoderAsBoundaryAwareCodec`](super::CompcolDecoderAsBoundaryAwareCodec).
+    #[derive(Debug, Clone)]
+    pub struct Decoding;
 
-    fn reset(&mut self, inner: &mut E) {
-        inner.reset();
-    }
-}
+    impl<D: Decoder> CompcolKind<D> for Decoding {
+        fn step(&mut self, inner: &mut D, input: &[u8], output: &mut [u8]) -> CompcolResult {
+            inner.decode(input, output)
+        }
 
-/// What a decoder adds to the adapter: nothing. The kind of
-/// [`CompcolDecoderAsBoundaryAwareCodec`].
-#[derive(Debug, Clone)]
-pub struct Decoding;
+        /// compcol decoders have no flush method.
+        fn flush(&mut self, _inner: &mut D, _output: &mut [u8]) -> CompcolResult {
+            NOTHING_TO_FLUSH
+        }
 
-impl<D: Decoder> CompcolKind<D> for Decoding {
-    fn step(&mut self, inner: &mut D, input: &[u8], output: &mut [u8]) -> CompcolResult {
-        inner.decode(input, output)
-    }
+        fn finish(&mut self, inner: &mut D, output: &mut [u8]) -> CompcolResult {
+            inner.finish(output)
+        }
 
-    /// compcol decoders have no flush method.
-    fn flush(&mut self, _inner: &mut D, _output: &mut [u8]) -> CompcolResult {
-        NOTHING_TO_FLUSH
-    }
-
-    fn finish(&mut self, inner: &mut D, output: &mut [u8]) -> CompcolResult {
-        inner.finish(output)
-    }
-
-    fn reset(&mut self, inner: &mut D) {
-        inner.reset();
+        fn reset(&mut self, inner: &mut D) {
+            inner.reset();
+        }
     }
 }
+
+use sealed::{CompcolKind, Decoding, Encoding};
 
 // ----
 // Adapter
@@ -632,7 +634,7 @@ impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
 mod tests {
     use alloc::vec::Vec;
 
-    use ::compcol::{gzip, zlib, Flush};
+    use ::compcol::{gzip, zlib, Encoder, Flush};
 
     use super::*;
     use crate::codecs::test_support::{OneByteAtATimeSink, SplitSource};
