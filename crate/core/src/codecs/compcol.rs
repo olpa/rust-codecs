@@ -1,12 +1,10 @@
-//! Adapters that turn `compcol` encoders and decoders into
-//! [`BoundaryAwareCodec`]s.
+//! `compcol` encoders and decoders as [`BoundaryAwareCodec`]s.
 //!
-//! compcol: <https://crates.io/crates/compcol>, documentation:
-//! <https://docs.rs/compcol>, source: <https://github.com/KarpelesLab/compcol>.
+//! - `compcol` crate: <https://crates.io/crates/compcol>
+//! - documentation: <https://docs.rs/compcol>
+//! - source: <https://github.com/KarpelesLab/compcol>
 //!
 //! Behind the `compcol` feature flag.
-//!
-//! For the details and an example, see [`CompcolAsBoundaryAwareCodec`].
 
 use core::mem::MaybeUninit;
 
@@ -584,10 +582,7 @@ impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I,
 
 /// A `compcol::Encoder` as a [`BoundaryAwareCodec`].
 ///
-/// For the behavior after `finish`, errors, and access to the inner
-/// codec, see [`CompcolAsBoundaryAwareCodec`].
-///
-/// # Example
+/// This type is [`CompcolAsBoundaryAwareCodec`] for an encoder.
 ///
 /// ```
 /// # use rust_codecs_core::compcol::{CompcolEncoderAsBoundaryAwareCodec, FlushMode};
@@ -621,18 +616,7 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
 
 /// A `compcol::Decoder` as a [`BoundaryAwareCodec`].
 ///
-/// At the end of the compressed stream it reports
-/// [`Boundary`](BoundaryAwareProgress::Boundary) and leaves the rest of
-/// the input in the source. To decode the next stream: call `finish`
-/// until [`Done`](DrainProgress::Done), then `reset()`.
-///
-/// For gzip, build the decoder with `with_multi_member(false)`.
-/// Otherwise compcol decodes concatenated members as one stream.
-///
-/// For the behavior after `finish`, errors, and access to the inner
-/// codec, see [`CompcolAsBoundaryAwareCodec`].
-///
-/// # Example
+/// This type is [`CompcolAsBoundaryAwareCodec`] for a decoder.
 ///
 /// ```
 /// # use rust_codecs_core::compcol::CompcolDecoderAsBoundaryAwareCodec;
