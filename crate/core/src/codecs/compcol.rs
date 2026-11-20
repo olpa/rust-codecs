@@ -271,11 +271,13 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
         }
     }
 
-    /// The compcol error behind the latched error. `None` if there is
-    /// no latched error, or if the adapter made the error itself.
+    /// The compcol error behind the latched error. The method returns
+    /// `None` when:
+    /// - there is no latched error,
+    /// - the adapter made the error itself.
     ///
-    /// Details such as the wanted dictionary stay in the inner codec,
-    /// for example `get_ref().dictionary_id()` of a zlib decoder.
+    /// The adapter has no method that returns the latched error. The
+    /// client already has it from the call that failed.
     pub fn compcol_error(&self) -> Option<CompcolError> {
         match self.failure {
             Some(Failure::Compcol(error)) => Some(error),
@@ -284,6 +286,10 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
     }
 
     /// The inner compcol codec.
+    ///
+    /// Use it to read the state of the codec. For example, after
+    /// `compcol::Error::NeedDictionary` from a zlib decoder,
+    /// `get_ref().dictionary_id()` gives the ID of the wanted dictionary.
     pub fn get_ref(&self) -> &I {
         &self.inner
     }
