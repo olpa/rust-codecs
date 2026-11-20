@@ -235,12 +235,8 @@ use sealed::{CompcolKind, Decoding, Encoding};
 // Adapter
 // ----
 
-/// A compcol encoder or decoder as a [`BoundaryAwareCodec`].
-///
-/// Use it as [`CompcolEncoderAsBoundaryAwareCodec`] or
-/// [`CompcolDecoderAsBoundaryAwareCodec`]. To get a plain
-/// [`Codec`](crate::Codec), wrap it in
-/// [`BoundaryAwareCodecAsCodec`](crate::boundary_as_codec::BoundaryAwareCodecAsCodec).
+/// The generic type behind [`CompcolEncoderAsBoundaryAwareCodec`] and
+/// [`CompcolDecoderAsBoundaryAwareCodec`].
 ///
 /// The algorithms come from your own dependency on `compcol`, for
 /// example `compcol = { version = "0.7.8", features = ["gzip"] }`.
@@ -588,6 +584,9 @@ impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I,
 ///     FlushMode::Skip,
 /// );
 /// ```
+///
+/// To get a plain [`Codec`](crate::Codec), wrap `codec` in
+/// [`BoundaryAwareCodecAsCodec`](crate::boundary_as_codec::BoundaryAwareCodecAsCodec).
 pub type CompcolEncoderAsBoundaryAwareCodec<E> = CompcolAsBoundaryAwareCodec<E, Encoding>;
 
 impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
@@ -621,6 +620,9 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
 ///     compcol::gzip::Decoder::new().with_multi_member(false),
 /// );
 /// ```
+///
+/// To get a plain [`Codec`](crate::Codec), wrap `codec` in
+/// [`BoundaryAwareCodecAsCodec`](crate::boundary_as_codec::BoundaryAwareCodecAsCodec).
 pub type CompcolDecoderAsBoundaryAwareCodec<D> = CompcolAsBoundaryAwareCodec<D, Decoding>;
 
 impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
