@@ -29,18 +29,13 @@ pub(crate) type CompcolResult = Result<(CompcolProgress, CompcolStatus), Compcol
 /// What [`CompcolEncoderAsBoundaryAwareCodec`] does on [`DrainCodec::flush`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushMode {
-    /// `flush` writes nothing and returns `Done { written: 0 }`. The
-    /// encoder keeps its pending bytes until `finish`.
+    /// `flush` does not call the encoder.
     ///
-    /// This mode gives the best compression ratio. But a reader of the
-    /// output cannot decode the latest data until `finish`.
+    /// Use this mode when the driver calls `flush` too often. Each call
+    /// of `compcol::Encoder::flush` not only writes the pending data, but
+    /// also makes a sync point, which can be costly.
     Skip,
     /// `flush` calls `compcol::Encoder::flush` with this mode.
-    ///
-    /// With `Flush::Sync` and `Flush::Full`, each `flush` writes a sync
-    /// marker, also when there is no new input. For deflate, the marker
-    /// is 5 bytes. `Flush::Full` also resets the history. This decreases
-    /// the compression ratio.
     Compcol(CompcolFlush),
 }
 
