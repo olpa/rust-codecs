@@ -1,140 +1,12 @@
 //! Adapters that turn `compcol` encoders and decoders into
 //! [`BoundaryAwareCodec`]s.
 //!
+//! compcol: <https://crates.io/crates/compcol>, documentation:
+//! <https://docs.rs/compcol>, source: <https://github.com/KarpelesLab/compcol>.
+//!
 //! Behind the `compcol` feature flag.
 //!
-//! | Adapter                                   | Wraps                | Implements             |
-//! |-------------------------------------------|----------------------|------------------------|
-//! | [`CompcolEncoderAsBoundaryAwareCodec`]    | a `compcol::Encoder` | [`BoundaryAwareCodec`] |
-//! | [`CompcolDecoderAsBoundaryAwareCodec`]    | a `compcol::Decoder` | [`BoundaryAwareCodec`] |
-//!
-//! To get a plain [`Codec`](crate::Codec) from either, wrap it in
-//! [`BoundaryAwareCodecAsCodec`](crate::boundary_as_codec::BoundaryAwareCodecAsCodec).
-//!
-//! The algorithms come from your own dependency on `compcol`, for
-//! example `compcol = { version = "0.7.8", features = ["gzip"] }`.
-//!
-//! # Example
-//!
-//! ```
-//! # #[cfg(feature = "alloc")]
-//! # {
-//! use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
-//! use rust_codecs_core::compcol::{
-//!     CompcolDecoderAsBoundaryAwareCodec, CompcolEncoderAsBoundaryAwareCodec, FlushMode,
-//! };
-//! use rust_codecs_core::sources_and_sinks::slice::SliceSource;
-//! use rust_codecs_core::sources_and_sinks::vec::VecSink;
-//! use rust_codecs_core::stream_to_stream;
-//!
-//! // Compress
-//! let encoder = BoundaryAwareCodecAsCodec::new(
-//!     CompcolEncoderAsBoundaryAwareCodec::new(compcol::gzip::Encoder::new(), FlushMode::Skip),
-//! );
-//! let mut compressed = VecSink::default();
-//! stream_to_stream(&mut SliceSource::new(b"hello, hello"), encoder, &mut compressed).unwrap();
-//! let compressed = compressed.into_inner();
-//!
-//! // Decompress
-//! let decoder = BoundaryAwareCodecAsCodec::new(
-//!     CompcolDecoderAsBoundaryAwareCodec::new(compcol::gzip::Decoder::new()),
-//! );
-//! let mut plain = VecSink::default();
-//! stream_to_stream(&mut SliceSource::new(&compressed), decoder, &mut plain).unwrap();
-//! assert_eq!(plain.into_inner(), b"hello, hello");
-//! # }
-//! ```
-//!
-//! # Flush mode of the encoder
-//!
-//! [`CompcolEncoderAsBoundaryAwareCodec::new`] takes a [`FlushMode`]:
-//!
-//! - `Compcol(Flush::Sync)` and `Compcol(Flush::Full)` write a sync
-//!   marker on every `flush`, even with no new input. For deflate it is
-//!   5 bytes.
-//! - `Compcol(Flush::Full)` also resets the history, which costs
-//!   compression ratio.
-//! - `Skip` keeps the best ratio, but a reader of the output cannot
-//!   decode the latest data until `finish`.
-//!
-//! # At and after a boundary (decoder)
-//!
-//! A compressed stream marks its own end. When the decoder reaches it,
-//! `process_bounded` returns
-//! [`Boundary`](BoundaryAwareProgress::Boundary) and leaves the rest
-//! of the input in the source.
-//!
-//! For gzip, build the decoder with `with_multi_member(false)`.
-//! Otherwise compcol decodes concatenated members as one stream.
-//!
-//! After a `Boundary`:
-//! 1. Call `finish` until [`Done`](DrainProgress::Done).
-//! 2. Call `reset()` to prepare for the next logical stream.
-//!
-//! # After `finish` and after an error
-//!
-//! - After the first `finish` call, `process_bounded` and `flush` fail
-//!   with [`ErrorKind::ContractViolation`]. When `finish` reports
-//!   [`Done`](DrainProgress::Done), a new `finish` returns
-//!   `Done { written: 0 }`.
-//! - After an `Err`, compcol calls the inner codec poisoned. So the
-//!   adapter latches the error. Later calls of `process_bounded`,
-//!   `flush` and `finish` return the same kind and subcode, with
-//!   `consumed` and `written` zero. They do not call the inner codec.
-//! - `reset()` resets the inner codec and the adapter, and removes the
-//!   latched error. The instance is then ready for the next logical
-//!   stream.
-//! - `clear_error()` removes only the latched error. It is for an error
-//!   that the inner codec can recover from in place. In compcol 0.7.8,
-//!   this is `compcol::Error::NeedDictionary` only: set the dictionary
-//!   through `get_mut()`, call `clear_error()`, and call again.
-//!
-//! # Errors
-//!
-//! The kind of [`Error`] for each compcol error:
-//!
-//! | Kind                | `compcol::Error` |
-//! |---------------------|------------------|
-//! | `CorruptStream`     | `Corrupt`, `UnexpectedEnd`, `BadHeader`, `InvalidBlockType`, `InvalidHuffmanTree`, `InvalidDistance`, `ChecksumMismatch`, `TrailerMismatch` |
-//! | `Unsupported`       | `Unsupported`, `NeedDictionary` |
-//! | `BehindLimits`      | `OutputTooSmall`, `OutputLimitExceeded` |
-//! | `ContractViolation` | a variant that this version does not know |
-//!
-//! The adapter's own checks give `ContractViolation`: a status that the
-//! compcol contract excludes, a call that moves no bytes and does not
-//! end the work, a call after `finish`.
-//!
-//! The subcode is opaque and not part of the API.
-//!
-//! For the original compcol error behind the latched error, call
-//! `compcol_error()` on the adapter. Details such as the wanted dictionary stay in the inner
-//! codec, for example `get_ref().dictionary_id()` of a zlib decoder.
-//!
-//! # Access to the inner codec
-//!
-//! `get_mut()` is for configuration: dictionaries, limits, and
-//! `compcol::Decoder::discard_output`. Do not drive the codec through
-//! it (`encode`/`decode`, `finish`, `flush`, `reset`): the state of the
-//! adapter would no longer match. Use the adapter methods instead.
-//!
-//! # Requirement on the inner codec
-//!
-//! The adapter has no carry buffer. The inner codec must keep a partial
-//! atomic unit in its own state, such as part of a header on input or
-//! part of a sync marker on output. Then each call with a non-empty
-//! output moves at least one byte or ends the work. If a call moves no
-//! bytes and does not end the work, the adapter fails with
-//! [`ErrorKind::ContractViolation`].
-//!
-//! The codecs of compcol 0.7.8 meet this requirement. For atomic units
-//! and carry buffers, see `CREATING-CODECS.md`.
-//!
-//! # Performance
-//!
-//! compcol writes into `&mut [u8]`, but the output of our codecs is
-//! `&mut [MaybeUninit<u8>]`. Each adapter call zero-fills its output
-//! once before it calls compcol. See
-//! <https://github.com/olpa/rust-codecs/issues/19>.
+//! For the details and an example, see [`CompcolAsBoundaryAwareCodec`].
 
 use core::mem::MaybeUninit;
 
@@ -157,13 +29,20 @@ pub(crate) type CompcolResult = Result<(CompcolProgress, CompcolStatus), Compcol
 // ----
 
 /// What [`CompcolEncoderAsBoundaryAwareCodec`] does on [`DrainCodec::flush`].
-/// See the module docs for the trade-offs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushMode {
     /// `flush` writes nothing and returns `Done { written: 0 }`. The
     /// encoder keeps its pending bytes until `finish`.
+    ///
+    /// This mode gives the best compression ratio. But a reader of the
+    /// output cannot decode the latest data until `finish`.
     Skip,
     /// `flush` calls `compcol::Encoder::flush` with this mode.
+    ///
+    /// With `Flush::Sync` and `Flush::Full`, each `flush` writes a sync
+    /// marker, also when there is no new input. For deflate, the marker
+    /// is 5 bytes. `Flush::Full` also resets the history. This decreases
+    /// the compression ratio.
     Compcol(CompcolFlush),
 }
 
@@ -179,7 +58,8 @@ impl Error {
     /// The compcol codec moved no bytes and did not end the work.
     const SUBCODE_NO_PROGRESS: usize = 0x103;
 
-    /// Convert a compcol error. See "Errors" in the module docs.
+    /// Convert a compcol error. See "Errors" in
+    /// [`CompcolAsBoundaryAwareCodec`].
     fn from_compcol(error: CompcolError, consumed: usize, written: usize) -> Self {
         let (kind, codec_subcode) = match error {
             CompcolError::Corrupt => (ErrorKind::CorruptStream, 1),
@@ -220,7 +100,7 @@ impl Error {
 
     /// The error for a compcol call that moved no bytes and did not end
     /// the work. compcol 0.7.8 codecs never cause it. See "Requirement on
-    /// the inner codec" in the module docs.
+    /// the inner codec" in [`CompcolAsBoundaryAwareCodec`].
     fn no_progress(status: CompcolStatus, consumed: usize, written: usize) -> Self {
         let codec_subcode = if status == CompcolStatus::OutputFull {
             Self::SUBCODE_NO_PROGRESS
@@ -363,7 +243,96 @@ impl<D: Decoder> CompcolKind<D> for Decoding {
 /// A compcol encoder or decoder as a [`BoundaryAwareCodec`].
 ///
 /// Use it as [`CompcolEncoderAsBoundaryAwareCodec`] or
-/// [`CompcolDecoderAsBoundaryAwareCodec`].
+/// [`CompcolDecoderAsBoundaryAwareCodec`]. To get a plain
+/// [`Codec`](crate::Codec), wrap it in
+/// [`BoundaryAwareCodecAsCodec`](crate::boundary_as_codec::BoundaryAwareCodecAsCodec).
+///
+/// The algorithms come from your own dependency on `compcol`, for
+/// example `compcol = { version = "0.7.8", features = ["gzip"] }`.
+///
+/// # Example
+///
+/// ```
+/// # #[cfg(feature = "alloc")]
+/// # {
+/// use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
+/// use rust_codecs_core::compcol::{
+///     CompcolDecoderAsBoundaryAwareCodec, CompcolEncoderAsBoundaryAwareCodec, FlushMode,
+/// };
+/// use rust_codecs_core::sources_and_sinks::slice::SliceSource;
+/// use rust_codecs_core::sources_and_sinks::vec::VecSink;
+/// use rust_codecs_core::stream_to_stream;
+///
+/// // Compress
+/// let encoder = BoundaryAwareCodecAsCodec::new(
+///     CompcolEncoderAsBoundaryAwareCodec::new(compcol::gzip::Encoder::new(), FlushMode::Skip),
+/// );
+/// let mut compressed = VecSink::default();
+/// stream_to_stream(&mut SliceSource::new(b"hello, hello"), encoder, &mut compressed).unwrap();
+/// let compressed = compressed.into_inner();
+///
+/// // Decompress
+/// let decoder = BoundaryAwareCodecAsCodec::new(
+///     CompcolDecoderAsBoundaryAwareCodec::new(compcol::gzip::Decoder::new()),
+/// );
+/// let mut plain = VecSink::default();
+/// stream_to_stream(&mut SliceSource::new(&compressed), decoder, &mut plain).unwrap();
+/// assert_eq!(plain.into_inner(), b"hello, hello");
+/// # }
+/// ```
+///
+/// # After `finish`
+///
+/// After the first `finish` call, `process_bounded` and `flush` fail
+/// with [`ErrorKind::ContractViolation`]. When `finish` reports
+/// [`Done`](DrainProgress::Done), a new `finish` returns
+/// `Done { written: 0 }`. To start a new stream, call
+/// [`reset`](Self::reset).
+///
+/// # Errors
+///
+/// After an `Err`, compcol calls the inner codec poisoned. So the
+/// adapter latches the error. Later calls of `process_bounded`, `flush`
+/// and `finish` return the same kind and subcode, with `consumed` and
+/// `written` zero. They do not call the inner codec. To remove the
+/// latched error, call [`reset`](Self::reset) or
+/// [`clear_error`](Self::clear_error).
+///
+/// The kind of [`Error`] for each compcol error:
+///
+/// | Kind                | `compcol::Error` |
+/// |---------------------|------------------|
+/// | `CorruptStream`     | `Corrupt`, `UnexpectedEnd`, `BadHeader`, `InvalidBlockType`, `InvalidHuffmanTree`, `InvalidDistance`, `ChecksumMismatch`, `TrailerMismatch` |
+/// | `Unsupported`       | `Unsupported`, `NeedDictionary` |
+/// | `BehindLimits`      | `OutputTooSmall`, `OutputLimitExceeded` |
+/// | `ContractViolation` | a variant that this version does not know |
+///
+/// The checks of the adapter give `ContractViolation`:
+/// - the compcol codec returns a status that its contract excludes,
+/// - a call moves no bytes and does not end the work,
+/// - a call comes after `finish`.
+///
+/// The subcode is opaque and not part of the API. To get the original
+/// compcol error, call [`compcol_error`](Self::compcol_error).
+///
+/// # Requirement on the inner codec
+///
+/// The adapter has no carry buffer. The inner codec must keep a partial
+/// atomic unit in its own state, such as part of a header on input or
+/// part of a sync marker on output. Then each call with a non-empty
+/// output moves at least one byte or ends the work. If a call moves no
+/// bytes and does not end the work, the adapter fails with
+/// [`ErrorKind::ContractViolation`].
+///
+/// The codecs of compcol 0.7.8 meet this requirement. For atomic units
+/// and carry buffers, see `CREATING-CODECS.md`.
+///
+/// # Performance
+///
+/// compcol writes into `&mut [u8]`, but the output of our codecs is
+/// `&mut [MaybeUninit<u8>]`. So each adapter call fills its output with
+/// zeros once before it calls compcol. See
+/// <https://github.com/olpa/rust-codecs/issues/19>.
 #[derive(Debug, Clone)]
 pub struct CompcolAsBoundaryAwareCodec<I, K> {
     inner: I,
@@ -387,6 +356,9 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
 
     /// The compcol error behind the latched error. `None` if there is
     /// no latched error, or if the adapter made the error itself.
+    ///
+    /// Details such as the wanted dictionary stay in the inner codec,
+    /// for example `get_ref().dictionary_id()` of a zlib decoder.
     pub fn compcol_error(&self) -> Option<CompcolError> {
         match self.failure {
             Some(Failure::Compcol(error)) => Some(error),
@@ -399,8 +371,12 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
         &self.inner
     }
 
-    /// The inner compcol codec, for configuration only. See
-    /// "Access to the inner codec" in the module docs.
+    /// The inner compcol codec, for configuration only: dictionaries,
+    /// limits, and `compcol::Decoder::discard_output`.
+    ///
+    /// Do not drive the codec through it (`encode`/`decode`, `finish`,
+    /// `flush`, `reset`). If you do, the state of the adapter no longer
+    /// matches the state of the codec. Use the adapter methods instead.
     pub fn get_mut(&mut self) -> &mut I {
         &mut self.inner
     }
@@ -413,8 +389,10 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
     /// Remove the latched error. Keep the state of the inner codec.
     ///
     /// This is a backdoor for an error that the inner codec can
-    /// recover from in place, such as `compcol::Error::NeedDictionary`.
-    /// See "After `finish` and after an error" in the module docs.
+    /// recover from in place. In compcol 0.7.8, this is
+    /// `compcol::Error::NeedDictionary` only: set the dictionary through
+    /// [`get_mut`](Self::get_mut), call `clear_error()`, and call the
+    /// adapter again.
     ///
     /// `reset()` cannot do this work, because it also resets the inner
     /// codec. For example, a zlib decoder that waits for a dictionary
@@ -606,6 +584,9 @@ impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I,
 
 /// A `compcol::Encoder` as a [`BoundaryAwareCodec`].
 ///
+/// For the behavior after `finish`, errors, and access to the inner
+/// codec, see [`CompcolAsBoundaryAwareCodec`].
+///
 /// # Example
 ///
 /// ```
@@ -647,6 +628,9 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
 ///
 /// For gzip, build the decoder with `with_multi_member(false)`.
 /// Otherwise compcol decodes concatenated members as one stream.
+///
+/// For the behavior after `finish`, errors, and access to the inner
+/// codec, see [`CompcolAsBoundaryAwareCodec`].
 ///
 /// # Example
 ///
