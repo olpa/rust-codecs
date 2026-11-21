@@ -320,14 +320,24 @@ A codec step returns \texttt{\{consumed: 0, written: 0\}}.
 Is the codec stalled?
 \end{frame}
 
-\begin{frame}{Solution}
-Consume full, or write full.
+\begin{frame}[fragile]{The solution insight: consume full or fill full}
+Consume full, or write full.\notetag{not predicted}
 
 \medskip
-The returning type: \todo{\dots}
+The example continues:
+\begin{itemize}
+\item put \texttt{Hel} into an internal buffer
+\item return \texttt{InputConsumed\{ written: 0 \}}
+\end{itemize}
 
-\bigskip
-\alert{A big insight.} If you take whatever with you, take this insight: a codec should do full.
+\medskip
+\begin{Verbatim}[fontsize=\normalsize,frame=single]
+enum BoundaryAwareProgress {
+    InputConsumed { written: usize },
+    OutputFilled  { consumed: usize },
+    Boundary      { consumed: usize, written: usize },
+}
+\end{Verbatim}
 \end{frame}
 
 \begin{frame}{Final interface}
