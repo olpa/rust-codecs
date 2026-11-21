@@ -211,12 +211,22 @@ The new Input/Output trait proposal.\notetag{not predicted}
 Coincidence: \texttt{std::io::BufRead::\{fill\_buf, consume\}}.
 \end{frame}
 
-\begin{frame}{AI slop}
+\begin{frame}{Towards the drivers}
+Interfaces are defined, now the drivers:
 \begin{itemize}
-\item I've never seen such unclear code.
-\item Manual investigation: indeed, not so easy.
-\item A corner case sits on a corner case and harnesses a corner case
+\item stream to stream
+\item codec chaining
 \end{itemize}
+
+\medskip
+Implementing:
+\begin{itemize}
+\item AI: pure slop
+\item manually: still confusing
+\end{itemize}
+
+\medskip
+It's corner cases all the way down.
 \end{frame}
 
 \begin{frame}{Base64}
