@@ -5,6 +5,7 @@
 \setbeamertemplate{footline}[frame number]
 \setbeamertemplate{itemize items}[circle]
 \usepackage{fontspec}
+\usepackage{tikz}
 \usepackage{fancyvrb}
 \setmonofont{DejaVu Sans Mono}[Scale=0.85]
 \newcommand{\hl}[1]{\colorbox{yellow}{#1}}
@@ -231,9 +232,55 @@ It's corner cases all the way down.
 
 \begin{frame}{Base64}
 \begin{itemize}
-\item Blocks of 3 bytes $\to$ blocks of 4 bytes
-\item Last block: with filling bytes (must do)
+\item \hl{Atomic unit}: 3 bytes in, 4 bytes out
+\item Last unit may be incomplete, padding required
 \end{itemize}
+
+\medskip
+\centering
+\begin{tikzpicture}[scale=0.75]
+  % Group 1: Hel -> SGVs (starts at x=0)
+  \foreach [count=\i from 0] \c in {H,e,l} {
+    \draw[fill=blue!30] (\i,1) rectangle (\i+0.9,1.9);
+    \node[font=\ttfamily\small] at (\i+0.45,1.45) {\c};
+  }
+  \foreach [count=\i from 0] \c in {S,G,V,s} {
+    \draw[fill=green!30] (\i*1.1,0) rectangle (\i*1.1+0.9,0.9);
+    \node[font=\ttfamily\small] at (\i*1.1+0.45,0.45) {\c};
+  }
+  \draw[->,thick] (1.45,1) -- (1.65,0.9);
+
+  % Group 2: lo! -> bG8h (starts at x=5.0)
+  \foreach [count=\i from 0] \c in {l,o,{!}} {
+    \draw[fill=blue!30] (5.0+\i,1) rectangle (5.0+\i+0.9,1.9);
+    \node[font=\ttfamily\small] at (5.0+\i+0.45,1.45) {\c};
+  }
+  \foreach [count=\i from 0] \c in {b,G,8,h} {
+    \draw[fill=green!30] (5.0+\i*1.1,0) rectangle (5.0+\i*1.1+0.9,0.9);
+    \node[font=\ttfamily\small] at (5.0+\i*1.1+0.45,0.45) {\c};
+  }
+  \draw[->,thick] (6.45,1) -- (6.65,0.9);
+
+  % Group 3: ! + padding -> IQ== (starts at x=10.4)
+  \draw[fill=blue!30] (10.4,1) rectangle (11.3,1.9);
+  \node[font=\ttfamily\small] at (10.85,1.45) {!};
+  \draw[fill=gray!15] (11.3,1) rectangle (12.2,1.9);
+  \draw[fill=gray!15] (12.2,1) rectangle (13.1,1.9);
+
+  \foreach [count=\i from 0] \c in {I,Q} {
+    \draw[fill=green!30] (10.4+\i*1.1,0) rectangle (10.4+\i*1.1+0.9,0.9);
+    \node[font=\ttfamily\small] at (10.4+\i*1.1+0.45,0.45) {\c};
+  }
+  \foreach [count=\i from 2] \c in {=,=} {
+    \draw[fill=yellow!40] (10.4+\i*1.1,0) rectangle (10.4+\i*1.1+0.9,0.9);
+    \node[font=\ttfamily\small] at (10.4+\i*1.1+0.45,0.45) {\c};
+  }
+  \draw[->,thick] (10.85,1) -- (10.85,0.9);
+
+  % labels
+  \node[left,font=\small] at (0,1.45) {in:};
+  \node[left,font=\small] at (0,0.45) {out:};
+\end{tikzpicture}
 \end{frame}
 
 \begin{frame}[fragile]{Base64 challenge}
