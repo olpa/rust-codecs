@@ -321,7 +321,14 @@ Is the codec stalled?
 \end{frame}
 
 \begin{frame}[fragile]{The solution insight: consume full or fill full}
-Consume full, or write full.\notetag{not predicted}
+\begin{Verbatim}[fontsize=\Large,frame=single]
+enum Progress {
+    InputConsumed { written: usize },
+    OutputFilled  { consumed: usize },
+}
+\end{Verbatim}
+
+\notetag{not predicted}
 
 \medskip
 The example continues:
@@ -329,15 +336,6 @@ The example continues:
 \item put \texttt{Hel} into an internal buffer
 \item return \texttt{InputConsumed\{ written: 0 \}}
 \end{itemize}
-
-\medskip
-\begin{Verbatim}[fontsize=\normalsize,frame=single]
-enum BoundaryAwareProgress {
-    InputConsumed { written: usize },
-    OutputFilled  { consumed: usize },
-    Boundary      { consumed: usize, written: usize },
-}
-\end{Verbatim}
 \end{frame}
 
 \begin{frame}{Final interface}
