@@ -232,7 +232,7 @@ It's corner cases all the way down.
 
 \begin{frame}{Base64}
 \begin{itemize}
-\item \hl{Atomic unit}: 3 bytes in, 4 bytes out
+\item Atomic unit\notetag{not predicted}: 3 bytes in, 4 bytes out
 \item Last unit may be incomplete, padding required
 \end{itemize}
 
@@ -336,10 +336,6 @@ The example continues:
 \item put \texttt{Hel} into an internal buffer
 \item return \texttt{InputConsumed\{ written: 0 \}}
 \end{itemize}
-\end{frame}
-
-\begin{frame}{Final interface}
-\todo{(to be filled)}
 \end{frame}
 
 \section{More of API}
