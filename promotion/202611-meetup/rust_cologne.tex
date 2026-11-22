@@ -12,6 +12,7 @@
 \newcommand{\surprise}[1]{\colorbox{orange!25}{#1}}
 \newcommand{\notetag}[1]{~\colorbox{orange!25}{\small\textit{#1}}}
 \newcommand{\todo}[1]{{\color{red}\emph{#1}}}
+\newcommand{\vhi}[1]{\colorbox{yellow}{#1}}
 
 \title{Rust codecs: streaming byte transformations}
 \author{Oleg Parashchenko}
@@ -338,8 +339,30 @@ The example continues:
 \end{itemize}
 \end{frame}
 
-\section{More of API}
+\section{API speedrun}
 \frame{\sectionpage}
+\begin{frame}[fragile]{Stream wrappers}
+\begin{Verbatim}[fontsize=\small]
+std_io::CodecReader<READER, CODEC, BUFFER>
+std_io::BufReadCodecReader<READER, CODEC>
+std_io::CodecWriter<WRITER, CODEC, BUFFER>
+
+embedded_io::CodecReader<READER, CODEC, BUFFER>
+embedded_io::BufReadCodecReader<READER, CODEC>
+embedded_io::CodecWriter<WRITER, CODEC, BUFFER>
+\end{Verbatim}
+
+\medskip
+\begin{Verbatim}[fontsize=\small,frame=single,commandchars=\\\{\}]
+let mut buffer = [0u8; 4096];
+let mut wrapped_stdout = \vhi{CodecWriter}::new(
+    io::\vhi{stdout}(), \vhi{rot13}(), &mut buffer,
+)?;
+io::copy(&mut io::stdin(), &mut wrapped_stdout)?;
+wrapped_stdout.finish()?;
+\end{Verbatim}
+\end{frame}
+
 \begin{frame}{I/O backend: Sources and Sinks}
 \begin{itemize}
 \item For zero overhead for in-memory: slices/Vecs
