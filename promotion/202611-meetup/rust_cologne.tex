@@ -363,6 +363,16 @@ wrapped_stdout.finish()?;
 \end{Verbatim}
 \end{frame}
 
+\begin{frame}[fragile]{Chain}
+\begin{Verbatim}[fontsize=\small,frame=single]
+let codec1 = gzip();
+let codec2 = base64_enc();
+let codec_composed = Chain::new(
+    codec1, codec2, [0u8; 4096],
+)?;
+\end{Verbatim}
+\end{frame}
+
 \begin{frame}{I/O backend: Sources and Sinks}
 \begin{itemize}
 \item For zero overhead for in-memory: slices/Vecs
