@@ -9,17 +9,20 @@ use crate::{
 
 /// A [`BoundaryAwareCodec`] as a [`Codec`].
 ///
-/// Every call to `process` delegates to `process_bounded`. If the inner
-/// codec reports [`Boundary`](BoundaryAwareProgress::Boundary), this adapter
-/// returns [`ErrorKind::ContractViolation`], because a plain [`Codec`]
-/// promises that nothing follows the stream.
+/// Use this adapter when the input holds exactly one stream.
+///
+/// Each call of `process` calls `process_bounded`. A [`Codec`] cannot
+/// report a boundary. So if the inner codec reports
+/// [`Boundary`](BoundaryAwareProgress::Boundary), `process` returns an
+/// error of the kind [`ErrorKind::ContractViolation`] with the subcode
+/// [`SUBCODE_UNEXPECTED_BOUNDARY`].
 #[derive(Debug, Clone)]
 pub struct BoundaryAwareCodecAsCodec<C> {
     inner: C,
 }
 
 impl<C> BoundaryAwareCodecAsCodec<C> {
-    /// Wrap `inner`.
+    /// An adapter for `inner`.
     pub fn new(inner: C) -> Self {
         Self { inner }
     }
@@ -29,12 +32,14 @@ impl<C> BoundaryAwareCodecAsCodec<C> {
         &self.inner
     }
 
-    /// The inner codec, for configuration only.
+    /// The inner codec, mutable.
+    ///
+    /// Use this method only to configure the codec.
     pub fn get_mut(&mut self) -> &mut C {
         &mut self.inner
     }
 
-    /// Unwrap the inner codec.
+    /// The inner codec, by value.
     pub fn into_inner(self) -> C {
         self.inner
     }
@@ -69,7 +74,8 @@ impl<C: BoundaryAwareCodec> Codec for BoundaryAwareCodecAsCodec<C> {
     }
 }
 
-/// [`BoundaryAwareCodecAsCodec`] found a boundary where none was expected.
+/// The subcode for a boundary from the inner codec of
+/// [`BoundaryAwareCodecAsCodec`].
 pub const SUBCODE_UNEXPECTED_BOUNDARY: usize = 0x200;
 
 #[cfg(test)]
