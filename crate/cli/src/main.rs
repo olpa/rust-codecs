@@ -12,11 +12,19 @@
 //! stdout).
 
 use std::io::{self, BufRead, Read, Write};
+use std::mem::MaybeUninit;
 
+use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
+use rust_codecs_core::compcol::{
+    CompcolDecoderAsBoundaryAwareCodec, CompcolEncoderAsBoundaryAwareCodec, FlushMode,
+};
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
 };
-use rust_codecs_core::{stream_to_stream, Chain, Codec};
+use rust_codecs_core::{
+    stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, Chain, Codec, DrainCodec,
+    DrainProgress, Error, ErrorKind, Progress,
+};
 
 /// Staging buffer size for each link in a `--readers`/`--writers` chain.
 const STAGING: usize = 4 * 1024;
@@ -43,12 +51,160 @@ const CODECS: &[CodecEntry] = &[
     }),
 ];
 
+/// Prefix of all compcol codec names: `compcol-gzip-enc`.
+const COMPCOL_PREFIX: &str = "compcol-";
+/// Suffix that selects a compcol encoder: `compcol-gzip-enc`.
+const COMPCOL_ENC: &str = "-enc";
+/// Suffix that selects a compcol decoder: `compcol-gzip-dec`.
+const COMPCOL_DEC: &str = "-dec";
+
+/// Build a codec from a compcol algorithm, named
+/// `compcol-<algorithm>-enc` or `compcol-<algorithm>-dec`. `None` if the
+/// name does not have this form or compcol has no such encoder or
+/// decoder (some algorithms only decode).
+///
+/// The encoder writes the whole stream at the end of input (`finish`).
+/// The decoder expects one stream. See [`SingleStream`].
+fn make_compcol_codec(name: &str) -> Option<Box<dyn Codec>> {
+    let name = name.strip_prefix(COMPCOL_PREFIX)?;
+    if let Some(algorithm) = name.strip_suffix(COMPCOL_ENC) {
+        let encoder = compcol_encoder(algorithm)?;
+        return Some(Box::new(BoundaryAwareCodecAsCodec::new(
+            CompcolEncoderAsBoundaryAwareCodec::new(encoder, FlushMode::Skip),
+        )));
+    }
+    if let Some(algorithm) = name.strip_suffix(COMPCOL_DEC) {
+        let decoder = compcol::factory::decoder_by_name(algorithm)?;
+        return Some(Box::new(SingleStream::new(
+            CompcolDecoderAsBoundaryAwareCodec::new(decoder),
+        )));
+    }
+    None
+}
+
+/// A decoder as a [`Codec`], for an input with one stream.
+///
+/// A compcol decoder reports a boundary at the end of the stream. If
+/// the boundary is at the end of the input, this adapter reports it as
+/// the normal end. If data follows the boundary, `process` returns an
+/// error of the kind [`ErrorKind::CorruptStream`] with the subcode
+/// [`SUBCODE_DATA_AFTER_STREAM`].
+///
+/// After the boundary, the adapter does not call `process_bounded`
+/// again. A later call with empty input succeeds. A later call with
+/// data returns the same error, with `consumed` and `written` zero.
+struct SingleStream<C> {
+    inner: C,
+    /// The inner codec reported a boundary.
+    ended: bool,
+}
+
+/// The subcode for data after the end of the stream in [`SingleStream`].
+const SUBCODE_DATA_AFTER_STREAM: usize = 1;
+
+impl<C> SingleStream<C> {
+    fn new(inner: C) -> Self {
+        Self {
+            inner,
+            ended: false,
+        }
+    }
+}
+
+/// The error for data after the end of the stream.
+fn data_after_stream(consumed: usize, written: usize) -> Error {
+    Error {
+        kind: ErrorKind::CorruptStream,
+        codec_subcode: SUBCODE_DATA_AFTER_STREAM,
+        consumed,
+        written,
+    }
+}
+
+impl<C: DrainCodec> DrainCodec for SingleStream<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.inner.flush(output)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.inner.finish(output)
+    }
+}
+
+impl<C: BoundaryAwareCodec> Codec for SingleStream<C> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        if self.ended {
+            if input.is_empty() {
+                return Ok(Progress::InputConsumed { written: 0 });
+            }
+            return Err(data_after_stream(0, 0));
+        }
+        match self.inner.process_bounded(input, output)? {
+            BoundaryAwareProgress::InputConsumed { written } => {
+                Ok(Progress::InputConsumed { written })
+            }
+            BoundaryAwareProgress::OutputFilled { consumed } => {
+                Ok(Progress::OutputFilled { consumed })
+            }
+            BoundaryAwareProgress::Boundary { consumed, written } => {
+                self.ended = true;
+                if consumed == input.len() {
+                    Ok(Progress::InputConsumed { written })
+                } else {
+                    Err(data_after_stream(consumed, written))
+                }
+            }
+        }
+    }
+}
+
+/// The compcol encoder for `algorithm`, or `None` if there is none.
+///
+/// The factory also returns an encoder for decode-only algorithms
+/// (`quantum`, `rar5`, ...), but that encoder fails every call with
+/// `Unsupported`. Finishing a fresh encoder tells the two apart: a real
+/// one writes an empty stream.
+fn compcol_encoder(algorithm: &str) -> Option<Box<dyn compcol::Encoder>> {
+    use compcol::Encoder as _;
+    let mut probe = compcol::factory::encoder_by_name(algorithm)?;
+    if let Err(compcol::Error::Unsupported) = probe.finish(&mut [0u8; STAGING]) {
+        return None;
+    }
+    compcol::factory::encoder_by_name(algorithm)
+}
+
+/// Names of all compcol codecs, `compcol-<algorithm>-enc` and
+/// `compcol-<algorithm>-dec`,
+/// for each algorithm that has an encoder or a decoder.
+fn compcol_codec_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for algorithm in compcol::factory::names() {
+        if compcol_encoder(algorithm).is_some() {
+            names.push(format!("{COMPCOL_PREFIX}{algorithm}{COMPCOL_ENC}"));
+        }
+        if compcol::factory::decoder_by_name(algorithm).is_some() {
+            names.push(format!("{COMPCOL_PREFIX}{algorithm}{COMPCOL_DEC}"));
+        }
+    }
+    names
+}
+
+/// The own codec names, then the compcol codec names.
+fn all_codec_names() -> Vec<String> {
+    CODECS
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .chain(compcol_codec_names())
+        .collect()
+}
+
 fn usage() -> String {
     let names = CODECS
         .iter()
         .map(|(name, _)| *name)
         .collect::<Vec<_>>()
         .join(", ");
+    let compcol_names = compcol::factory::names().join(", ");
     format!(
         "\
 Test harness for chaining codecs: folds --readers into one Chain and
@@ -57,8 +213,19 @@ the writers, to stdout.
 
 Usage:
   cargo run -p cli -- [--engine copy|stream] [--no-buffering] [--readers CODEC...] [--writers CODEC...]
+  cargo run -p cli -- --list
 
 Codecs: {names}
+
+Compcol codecs: compcol-ALGORITHM-enc compresses, compcol-ALGORITHM-dec
+decompresses (not every algorithm has both; --list prints the exact
+names).
+The encoder writes the whole stream at the end of input. The decoder
+reads one stream (gzip, xz and bzip2 also read concatenated streams).
+Algorithms: {compcol_names}
+
+Options:
+  --list   print every codec name, one per line, and exit
 
 --engine selects which copy path drives the chain: `copy` (default)
 wraps the chain in BufReadCodecReader/CodecWriter and drives it with
@@ -83,8 +250,9 @@ bytes first). Writer codecs also apply in the order listed (first
 listed runs first, closest to the incoming bytes, before reaching
 stdout).
 
-Example:
+Examples:
   echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
+  echo hello | cargo run -p cli -- --readers compcol-gzip-enc --writers compcol-gzip-dec
 "
     )
 }
@@ -94,12 +262,9 @@ fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, ctor)| ctor())
+        .or_else(|| make_compcol_codec(name))
         .ok_or_else(|| {
-            let names = CODECS
-                .iter()
-                .map(|(n, _)| *n)
-                .collect::<Vec<_>>()
-                .join(", ");
+            let names = all_codec_names().join(", ");
             format!("unknown codec {name:?} (expected one of: {names})")
         })
 }
@@ -485,6 +650,12 @@ fn main() {
         print!("{}", usage());
         return;
     }
+    if args.iter().any(|a| a == "--list") {
+        for name in all_codec_names() {
+            println!("{name}");
+        }
+        return;
+    }
 
     if let Err(err) = run(args.into_iter()) {
         eprintln!("error: {err}");
@@ -502,7 +673,7 @@ mod tests {
     use rust_codecs_core::sources_and_sinks::vec::{VecSink, VecSource};
     use rust_codecs_core::stream_to_stream;
 
-    use super::{compose, parse_args, run_io, run_io_stream, Engine};
+    use super::{all_codec_names, compose, make_codec, parse_args, run_io, run_io_stream, Engine};
 
     fn collect(codec: impl rust_codecs_core::Codec, bytes: &[u8]) -> Vec<u8> {
         let mut input = VecSource::new(bytes.to_vec());
@@ -656,5 +827,119 @@ mod tests {
 
         let expected = collect(rot13(), b"hi\n");
         assert_eq!(sink.0.borrow().as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn compcol_encoder_matches_across_both_engines() {
+        // The encoder never signals Boundary, so it works as a plain Codec.
+        let input = b"hello, hello, hello, compcol";
+        for enc in ["compcol-gzip-enc", "compcol-zstd-enc"] {
+            let readers = names(&[enc]);
+            let copy_output =
+                run_io(&readers, &[], Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            let stream_output =
+                run_io_stream(&readers, &[], Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            assert_eq!(copy_output, stream_output, "{enc}: copy vs stream");
+        }
+    }
+
+    #[test]
+    fn compcol_decoder_holding_bytes_at_finish_in_one_chain() {
+        // In one `Chain`, the decoder fills the output while it still
+        // holds decoded bytes, and then `finish` gets an empty output.
+        // compcol's `lzx` failed on that until the adapter stopped
+        // passing an empty output to compcol.
+        let input: Vec<u8> = (0..5000u32)
+            .map(|i| {
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                    [(i.wrapping_mul(2_654_435_761) >> 26) as usize]
+            })
+            .collect();
+        let output = run_io_stream(
+            &names(&["compcol-lzx-enc", "compcol-lzx-dec"]),
+            &[],
+            Cursor::new(input.clone()),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn compcol_decoder_accepts_a_boundary_at_the_end_of_the_input() {
+        // These decoders report the stream end from `decode`, before
+        // `finish`. The adapter reports it as `Boundary`.
+        let input = b"hello, hello, hello, compcol";
+        for algorithm in ["zlib", "zstd", "deflate", "brotli"] {
+            let readers = names(&[
+                &format!("compcol-{algorithm}-enc"),
+                &format!("compcol-{algorithm}-dec"),
+            ]);
+            let copy_output =
+                run_io(&readers, &[], Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            assert_eq!(copy_output, input, "{algorithm}: copy");
+            let stream_output =
+                run_io_stream(&readers, &[], Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            assert_eq!(stream_output, input, "{algorithm}: stream");
+        }
+    }
+
+    #[test]
+    fn compcol_decoder_rejects_data_after_the_stream() {
+        let mut compressed = run_io(
+            &names(&["compcol-zlib-enc"]),
+            &[],
+            Cursor::new(b"hello".to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+        compressed.extend_from_slice(b"junk");
+        let err = run_io(
+            &names(&["compcol-zlib-dec"]),
+            &[],
+            Cursor::new(compressed),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.contains("CorruptStream"), "{err}");
+    }
+
+    #[test]
+    fn compcol_encoder_output_is_compressed() {
+        let output = run_io(
+            &names(&["compcol-gzip-enc"]),
+            &[],
+            Cursor::new(b"hello".to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(&output[..2], &[0x1f, 0x8b], "gzip magic");
+    }
+
+    #[test]
+    fn every_listed_codec_name_builds() {
+        let all = all_codec_names();
+        assert!(all.iter().any(|n| n == "compcol-gzip-enc"));
+        assert!(all.iter().any(|n| n == "compcol-gzip-dec"));
+        for name in &all {
+            assert!(make_codec(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn unknown_compcol_names_are_rejected() {
+        // `quantum` is decode-only in compcol.
+        assert!(make_codec("compcol-quantum-dec").is_ok());
+        for name in [
+            "gzip-enc",
+            "compcol-gzip",
+            "compcol-nosuch-enc",
+            "compcol-nosuch-dec",
+            "compcol--enc",
+            "compcol-quantum-enc",
+        ] {
+            let err = make_codec(name).err().unwrap();
+            assert!(err.contains(name), "{err}");
+        }
     }
 }

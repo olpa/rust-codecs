@@ -9,6 +9,7 @@ chain and the writer chain to stdout.
 
 ```
 cargo run -p cli -- [--engine copy|stream] [--readers <name>...] [--writers <name>...]
+cargo run -p cli -- --list
 ```
 
 Both lists are optional and each codec name may repeat. Reader codecs
@@ -30,6 +31,36 @@ Currently known codec names: `identity`, `rot13`, `base64-enc`,
 
 `base64-dec` ignores ASCII whitespace, so it accepts the output of the
 `base64` tool, with its line breaks.
+
+## Compcol codecs
+
+Every algorithm of [compcol](https://docs.rs/compcol/) is also a codec:
+`compcol-<algorithm>-enc` compresses and `compcol-<algorithm>-dec`
+decompresses, for example `compcol-gzip-enc`, `compcol-zstd-dec`,
+`compcol-xz-enc`. The names come from `compcol::factory`, so new
+compcol algorithms appear without changes to the tool. `--list`
+prints every codec name, one per line.
+
+- Some algorithms are decode-only in compcol (`quantum`, `ppmd`,
+  `rar1`..`rar5`, the StuffIt and PKZIP methods, ...). They have only a
+  `compcol-<algorithm>-dec` name.
+- The encoder writes nothing on `flush`, so the whole compressed stream
+  comes out when the input ends.
+- The decoder reads one stream. Most decoders report data after the
+  end of the stream as an error. The `gzip`, `xz` and `bzip2` decoders
+  read concatenated streams as one stream, like the `gunzip`, `xz` and
+  `bzip2` tools.
+- Raw method payloads with no in-band end, such as `lh1` and `lh2`,
+  need the uncompressed size from outside the stream. The tool cannot
+  give it, so `compcol-lh1-dec` and `compcol-lh2-dec` fail with
+  `Unsupported`.
+
+```
+$ echo hello | cargo run -q -p cli -- --readers compcol-gzip-enc | gunzip
+hello
+$ echo hello | gzip | cargo run -q -p cli -- --readers compcol-gzip-dec
+hello
+```
 
 ## Example
 

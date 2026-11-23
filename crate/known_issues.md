@@ -55,9 +55,19 @@ trailer bytes of the failed commit. The doc of
 `std_io::CodecWriter::finish` warns about this. Remove the warning
 after the fix.
 
-### The minimum Rust version is 1.87, the goal is 1.81 (issue #23)
+### The minimum Rust version is 1.95, the goal is 1.81 (issue #23)
 
-`json-escape` blocks the goal. It uses edition 2024, and it comes from
+`compcol` 0.7.8 declares `rust-version = "1.95"`. Its code needs 1.88
+(`let` chains and `slice::as_chunks`). `compcol` versions before 0.4.0
+support older compilers, but miss the streaming fixes of 0.7.4 and
+0.7.8.
+
+Cargo checks `rust-version` only for the packages that it builds.
+Without the `compcol` feature, the crate builds with 1.87. But the
+tests use `compcol` as a dev-dependency, and Cargo cannot make a
+dev-dependency optional. So the crate declares 1.95.
+
+`json-escape` also blocks the goal. It uses edition 2024, and it comes from
 a git commit. A git dependency also blocks `cargo publish`. The plan is
 to copy the needed part of `json-escape` into the crate.
 

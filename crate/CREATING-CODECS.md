@@ -61,6 +61,10 @@ outcome can be reported. `Rot13::process` above shows the pattern:
 compute `n = input.len().min(output.len())`, then report which side
 ran out.
 
+If the codec consumes all of `input` and fills all of `output`, both
+`InputConsumed` and `OutputFilled` are correct. A driver must process
+the two variants in the same way.
+
 Why this matters: it avoids a class of bugs. Earlier, `Progress` was
 more relaxed. It had two fields, `consumed` and `written`. The driver
 code (`CodecReader`, `CodecWriter`, `stream_to_stream`, `Chain`) grew
