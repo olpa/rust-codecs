@@ -541,6 +541,10 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
 ///
 /// To get a plain [`Codec`](crate::Codec), wrap `codec` in
 /// [`BoundaryAwareCodecAsCodec`](crate::boundary_as_codec::BoundaryAwareCodecAsCodec).
+/// Warning: many compcol formats, such as zlib and brotli, mark the
+/// end of the stream in the data. The decoder reports a boundary at
+/// this mark, even when no data follows it. To use such a decoder as a
+/// plain `Codec`, add your own logic for the boundary.
 pub type CompcolDecoderAsBoundaryAwareCodec<D> = CompcolAsBoundaryAwareCodec<D, Decoding>;
 
 impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
