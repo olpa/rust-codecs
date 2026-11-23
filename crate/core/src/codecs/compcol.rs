@@ -476,9 +476,8 @@ impl<I, K: CompcolKind<I>> DrainCodec for CompcolAsBoundaryAwareCodec<I, K> {
 }
 
 impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I, K> {
-    /// After the first `finish` call, `process_bounded` fails with
-    /// [`ErrorKind::ContractViolation`]. To start a new stream, call
-    /// [`reset`](Self::reset).
+    /// This method can call `encode` or `decode` of the inner codec
+    /// several times.
     fn process_bounded(
         &mut self,
         input: &[u8],
