@@ -130,7 +130,7 @@ enum Failure {
 }
 
 // ----
-// Encoder and decoder behind one trait
+// Encoding and decoding kinds
 // ----
 
 mod sealed {
@@ -223,7 +223,7 @@ mod sealed {
 use sealed::{CompcolKind, Decoding, Encoding};
 
 // ----
-// Adapter
+// Generic adapter
 // ----
 
 /// The generic type behind [`CompcolEncoderAsBoundaryAwareCodec`] and
@@ -491,7 +491,7 @@ impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I,
 }
 
 // ----
-// Encoder adapter
+// Encoder and decoder aliases
 // ----
 
 /// A `compcol::Encoder` as a [`BoundaryAwareCodec`].
@@ -529,10 +529,6 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
     }
 }
 
-// ----
-// Decoder adapter
-// ----
-
 /// A `compcol::Decoder` as a [`BoundaryAwareCodec`].
 ///
 /// This type is [`CompcolAsBoundaryAwareCodec`] for a decoder.
@@ -554,6 +550,10 @@ impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
         Self::from_parts(inner, Decoding)
     }
 }
+
+// ----
+// Tests
+// ----
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
