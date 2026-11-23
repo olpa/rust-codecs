@@ -9,12 +9,9 @@ use crate::{
 
 /// A [`BoundaryAwareCodec`] as a [`Codec`].
 ///
-/// Use this adapter when the input holds exactly one stream.
-///
-/// Each call of `process` calls `process_bounded`. A [`Codec`] cannot
-/// report a boundary. So if the inner codec reports
-/// [`Boundary`](BoundaryAwareProgress::Boundary), `process` returns an
-/// error of the kind [`ErrorKind::ContractViolation`] with the subcode
+/// Use this adapter when you need a [`Codec`] and you know that the
+/// input has no boundary. Otherwise, `process` returns an error of the
+/// kind [`ErrorKind::ContractViolation`] with the subcode
 /// [`SUBCODE_UNEXPECTED_BOUNDARY`].
 ///
 /// After the boundary, each later call of `process` returns the same
@@ -43,8 +40,6 @@ impl<C> BoundaryAwareCodecAsCodec<C> {
     }
 
     /// The inner codec, mutable.
-    ///
-    /// Use this method only to configure the codec.
     pub fn get_mut(&mut self) -> &mut C {
         &mut self.inner
     }
