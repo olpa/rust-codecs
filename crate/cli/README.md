@@ -46,8 +46,10 @@ prints every codec name, one per line.
   `compcol-<algorithm>-dec` name.
 - The encoder writes nothing on `flush`, so the whole compressed stream
   comes out when the input ends.
-- The decoder expects exactly one stream. Data after the end of the
-  stream is an error, so concatenated gzip members do not decode.
+- The decoder reads one stream. Most decoders report data after the
+  end of the stream as an error. The `gzip`, `xz` and `bzip2` decoders
+  read concatenated streams as one stream, like the `gunzip`, `xz` and
+  `bzip2` tools.
 - Raw method payloads with no in-band end, such as `lh1` and `lh2`,
   need the uncompressed size from outside the stream. The tool cannot
   give it, so `compcol-lh1-dec` and `compcol-lh2-dec` fail with

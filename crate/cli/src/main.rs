@@ -221,7 +221,8 @@ Compcol codecs: compcol-ALGORITHM-enc compresses, compcol-ALGORITHM-dec
 decompresses (not every algorithm has both; --list prints the exact
 names).
 The encoder writes the whole stream at the end of input. The decoder
-expects exactly one stream. Algorithms: {compcol_names}
+reads one stream (gzip, xz and bzip2 also read concatenated streams).
+Algorithms: {compcol_names}
 
 Options:
   --list   print every codec name, one per line, and exit
