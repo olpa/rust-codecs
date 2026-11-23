@@ -12,6 +12,7 @@
 //! stdout).
 
 use std::io::{self, BufRead, Write};
+use std::mem::MaybeUninit;
 
 use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
 use rust_codecs_core::compcol::{
@@ -20,7 +21,10 @@ use rust_codecs_core::compcol::{
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
 };
-use rust_codecs_core::{stream_to_stream, Chain, Codec};
+use rust_codecs_core::{
+    stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, Chain, Codec, DrainCodec,
+    DrainProgress, Error, ErrorKind, Progress,
+};
 
 /// Staging buffer size for each link in a `--readers`/`--writers` chain.
 const STAGING: usize = 4 * 1024;
@@ -60,8 +64,7 @@ const COMPCOL_DEC: &str = "-dec";
 /// decoder (some algorithms only decode).
 ///
 /// The encoder writes the whole stream at the end of input (`finish`).
-/// The decoder expects one stream; a boundary (data after the stream end)
-/// is a [`ErrorKind::ContractViolation`](rust_codecs_core::ErrorKind).
+/// The decoder expects one stream. See [`SingleStream`].
 fn make_compcol_codec(name: &str) -> Option<Box<dyn Codec>> {
     let name = name.strip_prefix(COMPCOL_PREFIX)?;
     if let Some(algorithm) = name.strip_suffix(COMPCOL_ENC) {
@@ -72,11 +75,87 @@ fn make_compcol_codec(name: &str) -> Option<Box<dyn Codec>> {
     }
     if let Some(algorithm) = name.strip_suffix(COMPCOL_DEC) {
         let decoder = compcol::factory::decoder_by_name(algorithm)?;
-        return Some(Box::new(BoundaryAwareCodecAsCodec::new(
+        return Some(Box::new(SingleStream::new(
             CompcolDecoderAsBoundaryAwareCodec::new(decoder),
         )));
     }
     None
+}
+
+/// A decoder as a [`Codec`], for an input with one stream.
+///
+/// A compcol decoder reports a boundary at the end of the stream. If
+/// the boundary is at the end of the input, this adapter reports it as
+/// the normal end. If data follows the boundary, `process` returns an
+/// error of the kind [`ErrorKind::CorruptStream`] with the subcode
+/// [`SUBCODE_DATA_AFTER_STREAM`].
+///
+/// After the boundary, the adapter does not call `process_bounded`
+/// again. A later call with empty input succeeds. A later call with
+/// data returns the same error, with `consumed` and `written` zero.
+struct SingleStream<C> {
+    inner: C,
+    /// The inner codec reported a boundary.
+    ended: bool,
+}
+
+/// The subcode for data after the end of the stream in [`SingleStream`].
+const SUBCODE_DATA_AFTER_STREAM: usize = 1;
+
+impl<C> SingleStream<C> {
+    fn new(inner: C) -> Self {
+        Self {
+            inner,
+            ended: false,
+        }
+    }
+}
+
+/// The error for data after the end of the stream.
+fn data_after_stream(consumed: usize, written: usize) -> Error {
+    Error {
+        kind: ErrorKind::CorruptStream,
+        codec_subcode: SUBCODE_DATA_AFTER_STREAM,
+        consumed,
+        written,
+    }
+}
+
+impl<C: DrainCodec> DrainCodec for SingleStream<C> {
+    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.inner.flush(output)
+    }
+
+    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        self.inner.finish(output)
+    }
+}
+
+impl<C: BoundaryAwareCodec> Codec for SingleStream<C> {
+    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+        if self.ended {
+            if input.is_empty() {
+                return Ok(Progress::InputConsumed { written: 0 });
+            }
+            return Err(data_after_stream(0, 0));
+        }
+        match self.inner.process_bounded(input, output)? {
+            BoundaryAwareProgress::InputConsumed { written } => {
+                Ok(Progress::InputConsumed { written })
+            }
+            BoundaryAwareProgress::OutputFilled { consumed } => {
+                Ok(Progress::OutputFilled { consumed })
+            }
+            BoundaryAwareProgress::Boundary { consumed, written } => {
+                self.ended = true;
+                if consumed == input.len() {
+                    Ok(Progress::InputConsumed { written })
+                } else {
+                    Err(data_after_stream(consumed, written))
+                }
+            }
+        }
+    }
 }
 
 /// The compcol encoder for `algorithm`, or `None` if there is none.
@@ -539,8 +618,6 @@ mod tests {
     #[test]
     fn compcol_encoder_matches_across_both_engines() {
         // The encoder never signals Boundary, so it works as a plain Codec.
-        // The decoder signals Boundary at stream end and cannot be used as
-        // a plain Codec via BoundaryAwareCodecAsCodec.
         let input = b"hello, hello, hello, compcol";
         for enc in ["compcol-gzip-enc", "compcol-zstd-enc"] {
             let readers = names(&[enc]);
@@ -572,6 +649,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn compcol_decoder_accepts_a_boundary_at_the_end_of_the_input() {
+        // These decoders report the stream end from `decode`, before
+        // `finish`. The adapter reports it as `Boundary`.
+        let input = b"hello, hello, hello, compcol";
+        for algorithm in ["zlib", "zstd", "deflate", "brotli"] {
+            let readers = names(&[
+                &format!("compcol-{algorithm}-enc"),
+                &format!("compcol-{algorithm}-dec"),
+            ]);
+            let copy_output =
+                run_io(&readers, &[], Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            assert_eq!(copy_output, input, "{algorithm}: copy");
+            let stream_output =
+                run_io_stream(&readers, &[], Cursor::new(input.to_vec()), Vec::new()).unwrap();
+            assert_eq!(stream_output, input, "{algorithm}: stream");
+        }
+    }
+
+    #[test]
+    fn compcol_decoder_rejects_data_after_the_stream() {
+        let mut compressed = run_io(
+            &names(&["compcol-zlib-enc"]),
+            &[],
+            Cursor::new(b"hello".to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+        compressed.extend_from_slice(b"junk");
+        let err = run_io(
+            &names(&["compcol-zlib-dec"]),
+            &[],
+            Cursor::new(compressed),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.contains("CorruptStream"), "{err}");
     }
 
     #[test]
