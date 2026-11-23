@@ -22,10 +22,6 @@ use crate::{
 /// Return type of a single compcol `encode`/`decode`/`finish`/`flush` call.
 pub(crate) type CompcolResult = Result<(CompcolProgress, CompcolStatus), CompcolError>;
 
-// ----
-// Flush mode
-// ----
-
 /// What [`CompcolEncoderAsBoundaryAwareCodec`] does on [`DrainCodec::flush`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushMode {
@@ -39,13 +35,8 @@ pub enum FlushMode {
     Compcol(CompcolFlush),
 }
 
-// ----
-// Shared adapter core
-// ----
-
 /// The errors of the adapter. Private to this module.
 impl Error {
-    // Opaque subcodes, not part of the API.
     /// The compcol codec returned a status that its contract excludes.
     const SUBCODE_UNEXPECTED_STATUS: usize = 0x102;
     /// The compcol codec moved no bytes and did not end the work.
@@ -100,6 +91,12 @@ impl Error {
         };
         Self::contract_violation(codec_subcode, consumed, written)
     }
+
+    /// The error for a compcol call that claims more bytes than it
+    /// received.
+    fn byte_count_claim(consumed: usize, written: usize) -> Self {
+        Self::contract_violation(Self::SUBCODE_BYTE_COUNT_CLAIM, consumed, written)
+    }
 }
 
 /// Fail if a compcol call claims more bytes than it received.
@@ -112,11 +109,7 @@ fn check_counts(
     written: usize,
 ) -> Result<(), Error> {
     if progress.consumed > input_len || progress.written > output_len {
-        return Err(Error::contract_violation(
-            Error::SUBCODE_BYTE_COUNT_CLAIM,
-            consumed,
-            written,
-        ));
+        return Err(Error::byte_count_claim(consumed, written));
     }
     Ok(())
 }
