@@ -271,13 +271,39 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
         }
     }
 
-    /// The compcol error behind the latched error. The method returns
-    /// `None` when:
-    /// - there is no latched error,
-    /// - the adapter made the error itself.
+    /// The inner compcol codec.
+    ///
+    /// Use this method to read the state of the codec. For example,
+    /// after a zlib decoder returns `compcol::Error::NeedDictionary`,
+    /// `get_ref().dictionary_id()` gives the ID of the dictionary that
+    /// the decoder needs.
+    pub fn get_ref(&self) -> &I {
+        &self.inner
+    }
+
+    /// The inner compcol codec, mutable.
+    ///
+    /// Use this method only to configure the codec, for example to set
+    /// a dictionary, a limit, or a parameter.
+    ///
+    /// Do not call the methods that process data.
+    pub fn get_mut(&mut self) -> &mut I {
+        &mut self.inner
+    }
+
+    /// The inner compcol codec, by value.
+    pub fn into_inner(self) -> I {
+        self.inner
+    }
+
+    /// The compcol error, if any.
+    ///
+    /// The adapter can also make an error itself, not from compcol. For
+    /// example, the inner codec does not obey its contract. For such an
+    /// error, the method returns `None`.
     ///
     /// The adapter has no method that returns the latched error. The
-    /// client already has it from the call that failed.
+    /// caller already has it from the call that failed.
     pub fn compcol_error(&self) -> Option<CompcolError> {
         match self.failure {
             Some(Failure::Compcol(error)) => Some(error),
@@ -285,42 +311,11 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
         }
     }
 
-    /// The inner compcol codec.
-    ///
-    /// Use it to read the state of the codec. For example, after
-    /// `compcol::Error::NeedDictionary` from a zlib decoder,
-    /// `get_ref().dictionary_id()` gives the ID of the wanted dictionary.
-    pub fn get_ref(&self) -> &I {
-        &self.inner
-    }
-
-    /// The inner compcol codec, for configuration only: dictionaries,
-    /// limits, and `compcol::Decoder::discard_output`.
-    ///
-    /// Do not drive the codec through it (`encode`/`decode`, `finish`,
-    /// `flush`, `reset`). If you do, the state of the adapter no longer
-    /// matches the state of the codec. Use the adapter methods instead.
-    pub fn get_mut(&mut self) -> &mut I {
-        &mut self.inner
-    }
-
-    /// Unwrap the inner compcol codec.
-    pub fn into_inner(self) -> I {
-        self.inner
-    }
-
     /// Remove the latched error. Keep the state of the inner codec.
     ///
-    /// This is a backdoor for an error that the inner codec can
-    /// recover from in place. In compcol 0.7.8, this is
-    /// `compcol::Error::NeedDictionary` only: set the dictionary through
-    /// [`get_mut`](Self::get_mut), call `clear_error()`, and call the
-    /// adapter again.
-    ///
-    /// `reset()` cannot do this work, because it also resets the inner
-    /// codec. For example, a zlib decoder that waits for a dictionary
-    /// accepts `set_dictionary` only in that state. After `reset()`, the
-    /// state is gone.
+    /// Use this method as part of the recovery from a recoverable codec
+    /// error, such as `compcol::Error::NeedDictionary`. Do not use
+    /// `reset()` for the recovery, because it also resets the inner codec.
     pub fn clear_error(&mut self) {
         self.failure = None;
     }
@@ -373,11 +368,6 @@ impl<I, K> CompcolAsBoundaryAwareCodec<I, K> {
 
 impl<I, K: CompcolKind<I>> CompcolAsBoundaryAwareCodec<I, K> {
     /// Reset the inner codec and the adapter for a new stream.
-    ///
-    /// It calls `reset` of the inner compcol codec. compcol keeps the
-    /// configuration, such as a dictionary or a limit. Then it resets
-    /// the adapter: it removes the latched error, and makes
-    /// `process_bounded` and `flush` work again after `finish`.
     pub fn reset(&mut self) {
         self.kind.reset(&mut self.inner);
         self.clear_error();
@@ -528,7 +518,9 @@ impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I,
 pub type CompcolEncoderAsBoundaryAwareCodec<E> = CompcolAsBoundaryAwareCodec<E, Encoding>;
 
 impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
-    /// Wrap `inner`. `flush_mode` decides what [`DrainCodec::flush`] does.
+    /// An encoder adapter for `inner`.
+    ///
+    /// `flush_mode` sets what [`DrainCodec::flush`] does.
     pub fn new(inner: E, flush_mode: FlushMode) -> Self {
         Self::from_parts(inner, Encoding { flush_mode })
     }
@@ -538,7 +530,7 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
         self.kind.flush_mode
     }
 
-    /// Change the flush mode between calls.
+    /// Set the flush mode. The next call of `flush` uses the new mode.
     pub fn set_flush_mode(&mut self, flush_mode: FlushMode) {
         self.kind.flush_mode = flush_mode;
     }
@@ -564,7 +556,7 @@ impl<E> CompcolEncoderAsBoundaryAwareCodec<E> {
 pub type CompcolDecoderAsBoundaryAwareCodec<D> = CompcolAsBoundaryAwareCodec<D, Decoding>;
 
 impl<D> CompcolDecoderAsBoundaryAwareCodec<D> {
-    /// Wrap `inner`.
+    /// A decoder adapter for `inner`.
     pub fn new(inner: D) -> Self {
         Self::from_parts(inner, Decoding)
     }
