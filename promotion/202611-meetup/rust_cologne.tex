@@ -373,6 +373,37 @@ let codec_composed = Chain::new(
 \end{Verbatim}
 \end{frame}
 
+\begin{frame}[fragile]{Stream to stream}
+\begin{Verbatim}[fontsize=\small,frame=single]
+fn stream_to_stream<INPUT, OUTPUT, CODEC>(
+    input:  &mut INPUT,
+    codec:  CODEC,
+    output: &mut OUTPUT,
+) -> Result<...>
+where INPUT: Source, OUTPUT: Sink, CODEC: BoundaryAwareCodec
+\end{Verbatim}
+
+\medskip
+\begin{columns}
+\column{0.5\textwidth}
+\textbf{Sources over}
+\begin{itemize}
+  \item \texttt{\&[u8]}
+  \item \texttt{Vec<u8>}
+  \item \texttt{std::io::\{Read, BufRead\}}
+  \item \texttt{embedded\_io::\{Read, BufRead\}}
+\end{itemize}
+\column{0.5\textwidth}
+\textbf{Sinks over}
+\begin{itemize}
+  \item \texttt{[u8]}
+  \item \texttt{Vec<u8>}
+  \item \texttt{std::io::Write}
+  \item \texttt{embedded\_io::Write}
+\end{itemize}
+\end{columns}
+\end{frame}
+
 \begin{frame}{I/O backend: Sources and Sinks}
 \begin{itemize}
 \item For zero overhead for in-memory: slices/Vecs
