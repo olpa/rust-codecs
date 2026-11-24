@@ -2,8 +2,6 @@
 //!
 //! Behind the `rot13` feature flag.
 
-use core::mem::MaybeUninit;
-
 use crate::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 /// Rotate an ASCII letter by 13 places. Keep all other bytes.
@@ -20,24 +18,23 @@ fn rot13_byte(b: u8) -> u8 {
 pub struct Rot13;
 
 impl DrainCodec for Rot13 {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 
-    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 }
 
 impl Codec for Rot13 {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let n = input.len().min(output.len());
         let out_iter = output[..n].iter_mut();
         let in_iter = input[..n].iter();
         for (out, &inp) in out_iter.zip(in_iter) {
-            // `write` compiles to a plain store even in debug builds (no
-            // call), and release builds autovectorize this whole loop.
-            out.write(rot13_byte(inp));
+            // Release builds autovectorize this loop.
+            *out = rot13_byte(inp);
         }
         if n == input.len() {
             Ok(Progress::InputConsumed { written: n })

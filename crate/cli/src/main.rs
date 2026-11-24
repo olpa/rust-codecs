@@ -12,7 +12,6 @@
 //! stdout).
 
 use std::io::{self, BufRead, Read, Write};
-use std::mem::MaybeUninit;
 
 use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
 use rust_codecs_core::compcol::{
@@ -122,17 +121,17 @@ fn data_after_stream(consumed: usize, written: usize) -> Error {
 }
 
 impl<C: DrainCodec> DrainCodec for SingleStream<C> {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         self.inner.flush(output)
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         self.inner.finish(output)
     }
 }
 
 impl<C: BoundaryAwareCodec> Codec for SingleStream<C> {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         if self.ended {
             if input.is_empty() {
                 return Ok(Progress::InputConsumed { written: 0 });

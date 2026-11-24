@@ -1,12 +1,11 @@
 use alloc::vec::Vec;
 use core::convert::Infallible;
-use core::mem::MaybeUninit;
 
 use crate::{Sink, Source};
 
 // `VecSource` and `VecSink` have no `get_mut` method. `get_ref` and
 // `into_inner` exist, so `get_mut` may look missing by accident. It is
-// not. Each type keeps a position (`pos` or `offered`) that must match
+// not. Each type keeps a position (`pos` or `committed`) that must match
 // the vec's real size. A public `get_mut` would let outside code
 // resize the vec directly, and that could make the position wrong
 // with no check to catch it.
@@ -54,9 +53,17 @@ impl Source for VecSource {
 }
 
 /// `Vec<u8>` auto-growing output stream.
+///
+/// The sink writes zeros into new capacity of the vec before it lends
+/// the capacity to a codec. Each byte is zeroed only once. Space that
+/// the codec does not commit stays initialized, and the next `spare`
+/// lends it again without zeroing.
 #[derive(Debug)]
 pub struct VecSink {
+    // `inner.len()` is the initialized length. The committed output is
+    // `inner[..committed]`.
     inner: Vec<u8>,
+    committed: usize,
     grow_by: usize,
     offered: usize,
 }
@@ -76,8 +83,11 @@ impl VecSink {
     /// Build a `VecSink` that requests at least `grow_by` bytes of extra
     /// capacity each time the vec is full. A `grow_by` of 0 means
     /// [`Self::DEFAULT_GROWTH`].
+    ///
+    /// The bytes already in `inner` stay. The sink appends after them.
     pub fn with_growth(inner: Vec<u8>, grow_by: usize) -> Self {
         Self {
+            committed: inner.len(),
             inner,
             grow_by: if grow_by > 0 {
                 grow_by
@@ -88,8 +98,9 @@ impl VecSink {
         }
     }
 
-    pub fn get_ref(&self) -> &Vec<u8> {
-        &self.inner
+    /// Return the committed bytes.
+    pub fn get_ref(&self) -> &[u8] {
+        &self.inner[..self.committed]
     }
 
     // Forbidden to add: see the file-level comment above.
@@ -97,7 +108,9 @@ impl VecSink {
     //     &mut self.inner
     // }
 
-    pub fn into_inner(self) -> Vec<u8> {
+    /// Return the vec with the committed bytes only.
+    pub fn into_inner(mut self) -> Vec<u8> {
+        self.inner.truncate(self.committed);
         self.inner
     }
 }
@@ -110,27 +123,23 @@ impl Default for VecSink {
 
 impl Sink for VecSink {
     type Error = Infallible;
-    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
-        if self.inner.spare_capacity_mut().is_empty() {
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+        if self.committed == self.inner.len() {
             self.inner.reserve(self.grow_by);
+            self.inner.resize(self.inner.capacity(), 0);
         }
-        let spare = self.inner.spare_capacity_mut();
+        let spare = &mut self.inner[self.committed..];
         self.offered = spare.len();
         Ok(Some(spare))
     }
 
-    // SAFETY: the driver must only pass an `amount` that reflects how much
-    // of the spare slice it actually initialized since the last `spare` call.
-    // FIXME: Safe commit relies on caller-provided initialization.
-    // Track the output API safety fix: https://github.com/olpa/rust-codecs/issues/19
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         debug_assert!(
             amount <= self.offered,
             "commit({amount}) exceeds the {} bytes offered by spare()",
             self.offered
         );
-        let amount = amount.min(self.offered);
-        unsafe { self.inner.set_len(self.inner.len() + amount) };
+        self.committed += amount.min(self.offered);
         self.offered = 0;
         Ok(())
     }
@@ -153,9 +162,29 @@ mod tests {
     fn sink_spare_is_never_none_even_after_filling() {
         let mut sink = VecSink::with_growth(Vec::new(), 4);
         let offered = sink.spare().unwrap().unwrap().len();
+        sink.spare().unwrap().unwrap().fill(b'a');
         sink.commit(offered).unwrap();
         // Unlike `SliceSink`, `VecSink` grows on demand: filling every
         // byte offered so far must not produce `None`.
         assert!(sink.spare().unwrap().is_some());
+    }
+
+    #[test]
+    fn sink_keeps_existing_bytes_and_returns_only_committed_bytes() {
+        let mut sink = VecSink::with_growth(alloc::vec![b'x'], 4);
+        let spare = sink.spare().unwrap().unwrap();
+        assert!(spare.len() > 2);
+        spare[..2].copy_from_slice(b"ab");
+        sink.commit(2).unwrap();
+        assert_eq!(sink.get_ref(), b"xab");
+        assert_eq!(sink.into_inner(), b"xab");
+    }
+
+    #[test]
+    fn sink_offers_uncommitted_space_again() {
+        let mut sink = VecSink::with_growth(Vec::new(), 4);
+        let first = sink.spare().unwrap().unwrap().len();
+        sink.commit(0).unwrap();
+        assert_eq!(sink.spare().unwrap().unwrap().len(), first);
     }
 }

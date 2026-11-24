@@ -11,13 +11,10 @@
 //! [`u8::is_ascii_whitespace`]). So it accepts the output of the
 //! `base64` tool, and MIME and PEM data with line breaks.
 
-use core::mem::MaybeUninit;
-
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
 use super::base64_shared::{self, PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
-use crate::uninit::zero_init_mut;
 use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// Base64 decoder, parameterized over the [`Engine`] (alphabet and
@@ -101,7 +98,7 @@ impl<E: Engine> Base64Dec<E> {
 impl<E: Engine> DrainCodec for Base64Dec<E> {
     /// Write the pending output. A partial group of input stays
     /// pending: only `finish` can convert it.
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         let written = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
             debug_assert_eq!(written, output.len());
@@ -110,7 +107,7 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
         Ok(DrainProgress::Done { written })
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
             debug_assert_eq!(out_pos, output.len());
@@ -137,7 +134,7 @@ impl<E: Engine> DrainCodec for Base64Dec<E> {
 impl<E: Engine> Codec for Base64Dec<E> {
     /// Split `input` into runs without whitespace, and decode each run
     /// with `process_run`. The whitespace bytes count as consumed.
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let mut in_pos = 0;
         let mut out_pos = 0;
         loop {
@@ -186,11 +183,7 @@ impl<E: Engine> Codec for Base64Dec<E> {
 impl<E: Engine> Base64Dec<E> {
     /// Decode `input` that contains no whitespace. Same contract as
     /// [`Codec::process`].
-    fn process_run(
-        &mut self,
-        input: &[u8],
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<Progress, Error> {
+    fn process_run(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let mut in_pos = 0;
 
         //
@@ -263,12 +256,7 @@ impl<E: Engine> Base64Dec<E> {
         if groups > 0 {
             let in_bytes = groups * ENCODED_GROUP;
             let out_bytes = groups * GROUP;
-            // `decode_slice` requires an already-initialized `&mut [u8]`
-            // and fully overwrites the bytes it reports as written
-            // before returning; block-init once to bridge to that
-            // foreign API rather than reading through `output`'s
-            // `MaybeUninit<u8>` elements one at a time.
-            let dst = zero_init_mut(&mut output[out_pos..out_pos + out_bytes]);
+            let dst = &mut output[out_pos..out_pos + out_bytes];
             // If the block is corrupt, do not report an error yet. The
             // group loop below decodes the valid groups again, one by
             // one, and reports the error at the corrupt group.
@@ -351,8 +339,6 @@ pub fn base64_dec() -> Base64Dec {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use crate::uninit::as_uninit_mut;
-
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::super::base64_shared::SUBCODE_UNEXPECTED_END;
@@ -394,9 +380,8 @@ mod tests {
         let truncated = &ENCODED[..ENCODED.len() - 2];
         let mut dec = base64_dec();
         let mut out = [0u8; 32];
-        dec.process(truncated.as_bytes(), as_uninit_mut(&mut out))
-            .unwrap();
-        let error = dec.finish(as_uninit_mut(&mut out)).unwrap_err();
+        dec.process(truncated.as_bytes(), &mut out).unwrap();
+        let error = dec.finish(&mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.codec_subcode, SUBCODE_UNEXPECTED_END);
     }
@@ -407,7 +392,7 @@ mod tests {
         // position -- genuine corruption, not a stream cut short.
         let mut dec = base64_dec();
         let mut out = [0u8; 32];
-        let error = dec.process(b"A=BC", as_uninit_mut(&mut out)).unwrap_err();
+        let error = dec.process(b"A=BC", &mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.codec_subcode, 0);
     }
@@ -428,8 +413,8 @@ mod tests {
         // this slips through as "AA" instead of being rejected.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
-        dec.process(b"QQ==", as_uninit_mut(&mut out)).unwrap();
-        assert!(dec.process(b"QQ==", as_uninit_mut(&mut out)).is_err());
+        dec.process(b"QQ==", &mut out).unwrap();
+        assert!(dec.process(b"QQ==", &mut out).is_err());
     }
 
     #[test]
@@ -439,10 +424,10 @@ mod tests {
         // decodes right away; finish() then has nothing left to do.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
-        let outcome = dec.process(b"QQ==", as_uninit_mut(&mut out)).unwrap();
+        let outcome = dec.process(b"QQ==", &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 1 });
         assert_eq!(&out[..1], b"A");
-        let drain = dec.finish(as_uninit_mut(&mut out)).unwrap();
+        let drain = dec.finish(&mut out).unwrap();
         assert_eq!(drain, DrainProgress::Done { written: 0 });
     }
 
@@ -452,12 +437,12 @@ mod tests {
         // across two process() calls that land mid-group.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
-        let outcome = dec.process(b"Q", as_uninit_mut(&mut out)).unwrap();
+        let outcome = dec.process(b"Q", &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let outcome = dec.process(b"Q==", as_uninit_mut(&mut out)).unwrap();
+        let outcome = dec.process(b"Q==", &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 1 });
         assert_eq!(&out[..1], b"A");
-        assert!(dec.process(b"more", as_uninit_mut(&mut out)).is_err());
+        assert!(dec.process(b"more", &mut out).is_err());
     }
 
     #[test]
@@ -468,12 +453,10 @@ mod tests {
         // proves no more input follows.
         let mut dec = base64_dec();
         let mut out = [0u8; 16];
-        let outcome = dec.process(b"SGVsbG8=", as_uninit_mut(&mut out)).unwrap();
+        let outcome = dec.process(b"SGVsbG8=", &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 5 });
         assert_eq!(&out[..5], b"Hello");
-        assert!(dec
-            .process(b"IFdvcmxkIQ==", as_uninit_mut(&mut out))
-            .is_err());
+        assert!(dec.process(b"IFdvcmxkIQ==", &mut out).is_err());
     }
 
     #[test]
@@ -490,14 +473,14 @@ mod tests {
         // the tail loop to decode one group at a time.
         let mut dec = base64_dec();
         let mut out = [0u8; 4];
-        let outcome = dec.process(b"SGVsbG8=", as_uninit_mut(&mut out)).unwrap();
+        let outcome = dec.process(b"SGVsbG8=", &mut out).unwrap();
         assert_eq!(outcome, Progress::OutputFilled { consumed: 8 });
         assert_eq!(&out[..4], b"Hell");
         let mut out = [0u8; 16];
-        let outcome = dec.process(&[], as_uninit_mut(&mut out)).unwrap();
+        let outcome = dec.process(&[], &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 1 });
         assert_eq!(&out[..1], b"o");
-        assert!(dec.process(b"more", as_uninit_mut(&mut out)).is_err());
+        assert!(dec.process(b"more", &mut out).is_err());
     }
 
     #[test]
@@ -508,13 +491,11 @@ mod tests {
         // call writes "o" and then reports the error.
         let mut dec = base64_dec();
         let mut out = [0u8; 4];
-        let outcome = dec
-            .process(b"SGVsbG8=SGVs", as_uninit_mut(&mut out))
-            .unwrap();
+        let outcome = dec.process(b"SGVsbG8=SGVs", &mut out).unwrap();
         assert_eq!(outcome, Progress::OutputFilled { consumed: 8 });
         assert_eq!(&out[..4], b"Hell");
         let mut out = [0u8; 16];
-        let error = dec.process(b"SGVs", as_uninit_mut(&mut out)).unwrap_err();
+        let error = dec.process(b"SGVs", &mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 0);
@@ -537,7 +518,7 @@ mod tests {
         for chunk in chunks {
             let mut pos = 0;
             loop {
-                match dec.process(&chunk[pos..], as_uninit_mut(&mut out)) {
+                match dec.process(&chunk[pos..], &mut out) {
                     Ok(Progress::OutputFilled { consumed }) => {
                         decoded.extend_from_slice(&out);
                         pos += consumed;
@@ -591,11 +572,9 @@ mod tests {
         for (completion, position) in [(&b"=!"[..], 0), (b"=!xx", 0), (b"\n=\n!\n", 3)] {
             let mut dec = base64_dec();
             let mut out = [0u8; 16];
-            let progress = dec.process(b"QU", as_uninit_mut(&mut out)).unwrap();
+            let progress = dec.process(b"QU", &mut out).unwrap();
             assert_eq!(progress, Progress::InputConsumed { written: 0 });
-            let error = dec
-                .process(completion, as_uninit_mut(&mut out))
-                .unwrap_err();
+            let error = dec.process(completion, &mut out).unwrap_err();
             assert_eq!(error.kind, ErrorKind::CorruptStream);
             assert_eq!(error.codec_subcode, 0);
             assert_eq!(error.consumed, position, "completion {completion:?}");
@@ -609,11 +588,11 @@ mod tests {
         // decoder holds "bc" as pending output.
         let mut dec = base64_dec();
         let mut out = [0u8; 8];
-        let progress = dec.process(b"YWJj", as_uninit_mut(&mut out[..1])).unwrap();
+        let progress = dec.process(b"YWJj", &mut out[..1]).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 4 });
         assert_eq!(out[0], b'a');
 
-        let drained = dec.flush(as_uninit_mut(&mut out)).unwrap();
+        let drained = dec.flush(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 2 });
         assert_eq!(&out[..2], b"bc");
     }
@@ -646,14 +625,14 @@ mod tests {
         // call boundaries.
         let mut dec = base64_dec();
         let mut out = [0u8; 8];
-        let progress = dec.process(b"Q\n", as_uninit_mut(&mut out)).unwrap();
+        let progress = dec.process(b"Q\n", &mut out).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 0 });
-        let progress = dec.process(b" Q=", as_uninit_mut(&mut out)).unwrap();
+        let progress = dec.process(b" Q=", &mut out).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 0 });
-        let progress = dec.process(b"\r\n=\n", as_uninit_mut(&mut out)).unwrap();
+        let progress = dec.process(b"\r\n=\n", &mut out).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 1 });
         assert_eq!(out[0], b'A');
-        let drained = dec.finish(as_uninit_mut(&mut out)).unwrap();
+        let drained = dec.finish(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 0 });
     }
 
@@ -661,10 +640,10 @@ mod tests {
     fn accepts_whitespace_after_padding_but_not_data() {
         let mut dec = base64_dec();
         let mut out = [0u8; 8];
-        dec.process(b"QQ==", as_uninit_mut(&mut out)).unwrap();
-        let progress = dec.process(b"\n \n", as_uninit_mut(&mut out)).unwrap();
+        dec.process(b"QQ==", &mut out).unwrap();
+        let progress = dec.process(b"\n \n", &mut out).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 0 });
-        let error = dec.process(b"\nQQ==", as_uninit_mut(&mut out)).unwrap_err();
+        let error = dec.process(b"\nQQ==", &mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 1);
@@ -677,12 +656,10 @@ mod tests {
         // the second group, and holds "ef".
         let mut dec = base64_dec();
         let mut out = [0u8; 8];
-        let progress = dec
-            .process(b"YWJj ZGVm", as_uninit_mut(&mut out[..4]))
-            .unwrap();
+        let progress = dec.process(b"YWJj ZGVm", &mut out[..4]).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 9 });
         assert_eq!(&out[..4], b"abcd");
-        let drained = dec.finish(as_uninit_mut(&mut out)).unwrap();
+        let drained = dec.finish(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 2 });
         assert_eq!(&out[..2], b"ef");
     }
@@ -692,9 +669,7 @@ mod tests {
         // "YWJj" decodes to "abc". Then "A=BC" is corrupt.
         let mut dec = base64_dec();
         let mut out = [0u8; 8];
-        let error = dec
-            .process(b"YWJj\nA=BC", as_uninit_mut(&mut out))
-            .unwrap_err();
+        let error = dec.process(b"YWJj\nA=BC", &mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 5);
@@ -709,9 +684,7 @@ mod tests {
         // not the counts from before the block.
         let mut dec = base64_dec();
         let mut out = [0u8; 8];
-        let error = dec
-            .process(b"YWJjA=BC", as_uninit_mut(&mut out))
-            .unwrap_err();
+        let error = dec.process(b"YWJjA=BC", &mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.codec_subcode, 0);
         assert_eq!(error.consumed, 4);

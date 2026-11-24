@@ -18,7 +18,7 @@ pub trait Source {
 
 pub trait Sink {
     type Error;
-    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error>;
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
 }
 ```

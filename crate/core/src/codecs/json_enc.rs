@@ -10,11 +10,8 @@
 //!
 //! Behind the `json` feature flag.
 
-use core::mem::MaybeUninit;
-
 use json_escape::explicit::escape_bytes;
 
-use crate::uninit::copy_to_uninit;
 use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// The stream ended where it should not have.
@@ -47,18 +44,14 @@ pub struct JsonEnc {
 }
 
 impl JsonEnc {
-    fn flush_pending(
-        &mut self,
-        input: &[u8],
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<(usize, usize), Error> {
+    fn flush_pending(&mut self, input: &[u8], output: &mut [u8]) -> Result<(usize, usize), Error> {
         let mut consumed = 0;
         let mut written = 0;
 
         if let PendingEscape::Started(tail) = self.pending_escape {
             let bytes = tail.as_bytes();
             let n = bytes.len().min(output.len() - written);
-            copy_to_uninit(&mut output[written..written + n], &bytes[..n]);
+            output[written..written + n].copy_from_slice(&bytes[..n]);
             written += n;
             if n < bytes.len() {
                 self.pending_escape = PendingEscape::Started(&tail[n..]);
@@ -69,7 +62,7 @@ impl JsonEnc {
 
         if self.pending_literal_len > 0 {
             let n = self.pending_literal_len.min(output.len() - written);
-            copy_to_uninit(&mut output[written..written + n], &input[..n]);
+            output[written..written + n].copy_from_slice(&input[..n]);
             written += n;
             consumed += n;
             self.pending_literal_len -= n;
@@ -82,7 +75,7 @@ impl JsonEnc {
             consumed += 1;
             let bytes = s.as_bytes();
             let n = bytes.len().min(output.len() - written);
-            copy_to_uninit(&mut output[written..written + n], &bytes[..n]);
+            output[written..written + n].copy_from_slice(&bytes[..n]);
             written += n;
             self.pending_escape = if n < bytes.len() {
                 PendingEscape::Started(&s[n..])
@@ -100,13 +93,13 @@ impl DrainCodec for JsonEnc {
     /// is held inside the codec. A pending literal and a not-started
     /// escape belong to input that `process` did not consume yet. The
     /// caller still has that input.
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         let PendingEscape::Started(tail) = self.pending_escape else {
             return Ok(DrainProgress::Done { written: 0 });
         };
         let bytes = tail.as_bytes();
         let n = bytes.len().min(output.len());
-        copy_to_uninit(&mut output[..n], &bytes[..n]);
+        output[..n].copy_from_slice(&bytes[..n]);
         if n < bytes.len() {
             self.pending_escape = PendingEscape::Started(&tail[n..]);
             return Ok(DrainProgress::OutputFilled);
@@ -115,7 +108,7 @@ impl DrainCodec for JsonEnc {
         Ok(DrainProgress::Done { written: n })
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         // A well-behaved driver never reaches this with pending_literal_len
         // nonzero: as long as it's nonzero, `process` reports less than
         // full input consumed, which keeps the driver calling `process`
@@ -137,7 +130,7 @@ impl DrainCodec for JsonEnc {
 }
 
 impl Codec for JsonEnc {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let (mut consumed, mut written) = self.flush_pending(input, output)?;
         if self.pending_literal_len > 0 || matches!(self.pending_escape, PendingEscape::Started(_))
         {
@@ -152,7 +145,7 @@ impl Codec for JsonEnc {
         for chunk in escape_bytes(&input[consumed..]) {
             let literal = chunk.literal();
             let n = literal.len().min(output.len() - written);
-            copy_to_uninit(&mut output[written..written + n], &literal[..n]);
+            output[written..written + n].copy_from_slice(&literal[..n]);
             written += n;
             consumed += n;
             if n < literal.len() {
@@ -173,7 +166,7 @@ impl Codec for JsonEnc {
             consumed += 1;
             let bytes = s.as_bytes();
             let n = bytes.len().min(output.len() - written);
-            copy_to_uninit(&mut output[written..written + n], &bytes[..n]);
+            output[written..written + n].copy_from_slice(&bytes[..n]);
             written += n;
             if n < bytes.len() {
                 self.pending_escape = PendingEscape::Started(&s[n..]);
@@ -199,7 +192,6 @@ mod tests {
     use super::{escape_bytes, json_enc, JsonEnc, PendingEscape, SUBCODE_UNEXPECTED_END};
     use crate::sources_and_sinks::std_io::{CodecReader, CodecWriter};
     use crate::sources_and_sinks::vec::{encode_string, VecSink, VecSource};
-    use crate::uninit::as_uninit_mut;
     use crate::{Codec, DrainCodec, DrainProgress, DriveErrorKind, ErrorKind, Progress};
 
     #[test]
@@ -243,9 +235,7 @@ mod tests {
         // it.
         let mut codec = JsonEnc::default();
         let mut output = [0u8; 2];
-        let progress = codec
-            .process(b"AAA\n", crate::uninit::as_uninit_mut(&mut output))
-            .unwrap();
+        let progress = codec.process(b"AAA\n", &mut output).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 2 });
         assert_eq!(&output, b"AA");
         assert_eq!(codec.pending_literal_len, 1);
@@ -336,14 +326,12 @@ mod tests {
         // internally.
         let mut codec = json_enc();
         let mut output = [0u8; 2];
-        let progress = codec
-            .process(b"AAA\n", crate::uninit::as_uninit_mut(&mut output))
-            .unwrap();
+        let progress = codec.process(b"AAA\n", &mut output).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 2 });
         assert_eq!(codec.pending_literal_len, 1);
 
         let mut finish_output = [0u8; 16];
-        let result = codec.finish(crate::uninit::as_uninit_mut(&mut finish_output));
+        let result = codec.finish(&mut finish_output);
         let error = result.unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
         assert_eq!(error.codec_subcode, SUBCODE_UNEXPECTED_END);
@@ -366,21 +354,15 @@ mod tests {
         let mut codec = json_enc();
         let mut output = [0u8; 16];
         assert_eq!(
-            codec
-                .process(b"hi", crate::uninit::as_uninit_mut(&mut output))
-                .unwrap(),
+            codec.process(b"hi", &mut output).unwrap(),
             Progress::InputConsumed { written: 2 }
         );
         assert_eq!(
-            codec
-                .finish(crate::uninit::as_uninit_mut(&mut output))
-                .unwrap(),
+            codec.finish(&mut output).unwrap(),
             DrainProgress::Done { written: 0 }
         );
         assert_eq!(
-            codec
-                .finish(crate::uninit::as_uninit_mut(&mut output))
-                .unwrap(),
+            codec.finish(&mut output).unwrap(),
             DrainProgress::Done { written: 0 }
         );
     }
@@ -391,13 +373,13 @@ mod tests {
         // backslash. The codec holds "n".
         let mut enc = json_enc();
         let mut out = [0u8; 1];
-        let progress = enc.process(b"\n", as_uninit_mut(&mut out)).unwrap();
+        let progress = enc.process(b"\n", &mut out).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 1 });
         assert_eq!(&out, b"\\");
 
-        let drained = enc.flush(as_uninit_mut(&mut [])).unwrap();
+        let drained = enc.flush(&mut []).unwrap();
         assert_eq!(drained, DrainProgress::OutputFilled);
-        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        let drained = enc.flush(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 1 });
         assert_eq!(&out, b"n");
     }
@@ -408,10 +390,10 @@ mod tests {
         // "b", so it holds no output for "b".
         let mut enc = json_enc();
         let mut out = [0u8; 8];
-        let progress = enc.process(b"ab", as_uninit_mut(&mut out[..1])).unwrap();
+        let progress = enc.process(b"ab", &mut out[..1]).unwrap();
         assert_eq!(progress, Progress::OutputFilled { consumed: 1 });
 
-        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        let drained = enc.flush(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 0 });
     }
 }

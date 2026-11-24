@@ -6,26 +6,6 @@ you have new facts: a new reproduction, a new impact, or a new fix.
 
 ## Open problems
 
-### Uninitialized bytes through the safe output API (issue #19)
-
-Safe code can make uninitialized bytes part of an output buffer. There
-are three paths:
-
-- `VecSink::commit` is a safe function that calls `Vec::set_len`.
-- `as_uninit_mut` lends initialized `u8` storage as
-  `&mut [MaybeUninit<u8>]`. Safe code can store `MaybeUninit::uninit()`
-  into it.
-- `Codec` is a safe trait. The drivers trust a codec that reports
-  `OutputFilled` or `InputConsumed { written }`. They check only the
-  bounds of the counts.
-
-Making only `Sink::commit` unsafe does not close the second and third
-path. The fix will change the public `Codec` and `Sink` signatures.
-The plan is to do it before the first release.
-
-The clamp in `VecSink::commit` keeps a count inside the capacity. It
-does not make the bytes initialized.
-
 ### A failed `Write::write` has already consumed input (issue #20)
 
 `transfer_step` consumes input before it commits output. If the commit

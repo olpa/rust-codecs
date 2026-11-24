@@ -6,15 +6,12 @@
 //!
 //! Behind the `compcol` feature flag.
 
-use core::mem::MaybeUninit;
-
 use ::compcol::{
     Error as CompcolError, Flush as CompcolFlush, Progress as CompcolProgress,
     Status as CompcolStatus,
 };
 
 use crate::step::FinishPhase;
-use crate::uninit::zero_init_mut;
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress, Error, ErrorKind,
 };
@@ -373,7 +370,7 @@ impl<I, K: CompcolKind<I>> CompcolAsBoundaryAwareCodec<I, K> {
     fn transfer_loop(
         &mut self,
         input: &[u8],
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error> {
         // An empty output is legal for our codecs: `Chain` and `Pump` pass
         // one when their output is full. Some compcol codecs fail on an
@@ -383,7 +380,6 @@ impl<I, K: CompcolKind<I>> CompcolAsBoundaryAwareCodec<I, K> {
         if output.is_empty() {
             return Ok(BoundaryAwareProgress::OutputFilled { consumed: 0 });
         }
-        let output = zero_init_mut(output);
         let (mut consumed, mut written) = (0, 0);
         loop {
             let rest_in = &input[consumed..];
@@ -419,13 +415,12 @@ impl<I, K: CompcolKind<I>> CompcolAsBoundaryAwareCodec<I, K> {
     /// or `output` is full.
     fn drain_loop(
         &mut self,
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
         mut step: impl FnMut(&mut K, &mut I, &mut [u8]) -> CompcolResult,
     ) -> Result<DrainProgress, Error> {
         if output.is_empty() {
             return Ok(DrainProgress::OutputFilled);
         }
-        let output = zero_init_mut(output);
         let mut written = 0;
         loop {
             let rest_out = &mut output[written..];
@@ -453,7 +448,7 @@ impl<I, K: CompcolKind<I>> DrainCodec for CompcolAsBoundaryAwareCodec<I, K> {
     /// After the first `finish` call, `flush` fails with
     /// [`ErrorKind::ContractViolation`]. To start a new stream, call
     /// [`reset`](Self::reset).
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         self.check_not_failed()?;
         self.finish_phase.check_open()?;
         self.drain_loop(output, K::flush)
@@ -461,7 +456,7 @@ impl<I, K: CompcolKind<I>> DrainCodec for CompcolAsBoundaryAwareCodec<I, K> {
 
     /// If `finish` reported `Done`, a new call writes no bytes and
     /// reports `Done` again. It does not call the inner codec.
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         self.check_not_failed()?;
         if self.finish_phase.is_finished() {
             return Ok(DrainProgress::Done { written: 0 });
@@ -481,7 +476,7 @@ impl<I, K: CompcolKind<I>> BoundaryAwareCodec for CompcolAsBoundaryAwareCodec<I,
     fn process_bounded(
         &mut self,
         input: &[u8],
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error> {
         self.check_not_failed()?;
         self.finish_phase.check_open()?;
@@ -568,7 +563,6 @@ mod tests {
     use crate::codecs::test_support::{OneByteAtATimeSink, SplitSource};
     use crate::sources_and_sinks::vec::VecSink;
     use crate::stream_to_stream;
-    use crate::uninit::as_uninit_mut;
 
     fn sample() -> Vec<u8> {
         let mut data = Vec::new();
@@ -595,7 +589,7 @@ mod tests {
             chunk_size,
         };
         if chunk_size == 1 {
-            let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+            let mut sink = OneByteAtATimeSink::new();
             let counts = stream_to_stream(&mut source, codec, &mut sink).unwrap();
             return (sink.bytes, counts.consumed);
         }
@@ -675,9 +669,7 @@ mod tests {
 
         let mut dec = CompcolDecoderAsBoundaryAwareCodec::new(zlib::Decoder::new());
         let mut out = [0u8; 64];
-        let error = dec
-            .process_bounded(&compressed, as_uninit_mut(&mut out))
-            .unwrap_err();
+        let error = dec.process_bounded(&compressed, &mut out).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Unsupported);
         assert_eq!(error.codec_subcode, 12);
         assert_eq!(dec.compcol_error(), Some(::compcol::Error::NeedDictionary));
@@ -688,7 +680,7 @@ mod tests {
         assert_eq!(dec.compcol_error(), None);
 
         let rest = &compressed[error.consumed..];
-        let progress = dec.process_bounded(rest, as_uninit_mut(&mut out)).unwrap();
+        let progress = dec.process_bounded(rest, &mut out).unwrap();
         assert_eq!(
             progress,
             BoundaryAwareProgress::Boundary {
@@ -712,15 +704,9 @@ mod tests {
         run(&mut dec, &compressed, 64);
 
         let mut out = [0u8; 64];
-        assert_eq!(
-            dec.process_bounded(b"x", as_uninit_mut(&mut out)),
-            Err(after_finish)
-        );
-        assert_eq!(dec.flush(as_uninit_mut(&mut out)), Err(after_finish));
-        assert_eq!(
-            dec.finish(as_uninit_mut(&mut out)),
-            Ok(DrainProgress::Done { written: 0 })
-        );
+        assert_eq!(dec.process_bounded(b"x", &mut out), Err(after_finish));
+        assert_eq!(dec.flush(&mut out), Err(after_finish));
+        assert_eq!(dec.finish(&mut out), Ok(DrainProgress::Done { written: 0 }));
         assert_eq!(dec.compcol_error(), None);
 
         dec.reset();
@@ -739,35 +725,31 @@ mod tests {
         let mut buf = [0u8; 256];
         let mut pos = 0;
 
-        let progress = enc
-            .process_bounded(b"hello, ", as_uninit_mut(&mut buf[pos..]))
-            .unwrap();
+        let progress = enc.process_bounded(b"hello, ", &mut buf[pos..]).unwrap();
         let BoundaryAwareProgress::InputConsumed { written } = progress else {
             panic!("unexpected: {progress:?}");
         };
         pos += written;
-        let progress = enc.flush(as_uninit_mut(&mut buf[pos..])).unwrap();
+        let progress = enc.flush(&mut buf[pos..]).unwrap();
         let DrainProgress::Done { written } = progress else {
             panic!("unexpected: {progress:?}");
         };
         assert!(written > 0, "the first flush wrote nothing");
         pos += written;
 
-        let progress = enc
-            .process_bounded(b"sync", as_uninit_mut(&mut buf[pos..]))
-            .unwrap();
+        let progress = enc.process_bounded(b"sync", &mut buf[pos..]).unwrap();
         let BoundaryAwareProgress::InputConsumed { written } = progress else {
             panic!("unexpected: {progress:?}");
         };
         pos += written;
-        let progress = enc.flush(as_uninit_mut(&mut buf[pos..])).unwrap();
+        let progress = enc.flush(&mut buf[pos..]).unwrap();
         let DrainProgress::Done { written } = progress else {
             panic!("unexpected: {progress:?}");
         };
         assert!(written > 0, "the second flush wrote nothing");
         pos += written;
 
-        let progress = enc.finish(as_uninit_mut(&mut buf[pos..])).unwrap();
+        let progress = enc.finish(&mut buf[pos..]).unwrap();
         let DrainProgress::Done { written } = progress else {
             panic!("unexpected: {progress:?}");
         };

@@ -2,8 +2,6 @@
 //! output sink. [`Pump`], the helper behind it, is also used directly
 //! by `std_io`/`embedded_io` wrappers.
 
-use core::mem::MaybeUninit;
-
 use crate::step::{boundary_aware_step, finish_step, flush_step, FinishPhase};
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, DrainProgress, Error, ErrorKind, Sink, Source,
@@ -483,7 +481,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     fn drain_loop<O: Sink>(
         &mut self,
         output: &mut O,
-        mut step: impl FnMut(&mut Self, &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>,
+        mut step: impl FnMut(&mut Self, &mut [u8]) -> Result<DrainProgress, Error>,
     ) -> Result<PumpDrain, DriveError<core::convert::Infallible, O::Error>> {
         self.check_not_failed()?;
         loop {
@@ -548,10 +546,7 @@ impl<C: BoundaryAwareCodec> Pump<C> {
     /// already reported `Done`. The [`DrainCodec`](crate::DrainCodec)
     /// contract does not specify a repeat call. We skip it for
     /// defensive programming: a repeat call could replay a trailer.
-    fn latched_finish_step(
-        &mut self,
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<DrainProgress, Error> {
+    fn latched_finish_step(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         if self.is_done() {
             return Ok(DrainProgress::Done { written: 0 });
         }
@@ -565,7 +560,6 @@ impl<C: BoundaryAwareCodec> Pump<C> {
 
 #[cfg(test)]
 mod tests {
-    use core::mem::MaybeUninit;
 
     use super::{Pump, PumpDrain, PumpStop, PumpTransfer};
     use crate::codecs::test_support::{
@@ -591,7 +585,7 @@ mod tests {
     impl Sink for NullSink {
         type Error = core::convert::Infallible;
 
-        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
             Ok(Some(&mut []))
         }
 
@@ -609,10 +603,8 @@ mod tests {
     impl Sink for RecordingSink {
         type Error = core::convert::Infallible;
 
-        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
-            Ok(Some(crate::uninit::as_uninit_mut(
-                &mut self.bytes[self.written..],
-            )))
+        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+            Ok(Some(&mut self.bytes[self.written..]))
         }
 
         fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
@@ -631,10 +623,9 @@ mod tests {
     impl Sink for OneByteWindowSink {
         type Error = core::convert::Infallible;
 
-        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
             let end = (self.written + 1).min(self.bytes.len());
-            Ok((self.written < end)
-                .then(|| crate::uninit::as_uninit_mut(&mut self.bytes[self.written..end])))
+            Ok((self.written < end).then(|| &mut self.bytes[self.written..end]))
         }
 
         fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
@@ -655,10 +646,9 @@ mod tests {
     impl Sink for FailsOnCommit {
         type Error = ();
 
-        fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+        fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
             let end = (self.written + 2).min(self.bytes.len());
-            Ok((self.written < end)
-                .then(|| crate::uninit::as_uninit_mut(&mut self.bytes[self.written..end])))
+            Ok((self.written < end).then(|| &mut self.bytes[self.written..end]))
         }
 
         fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {

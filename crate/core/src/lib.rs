@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![forbid(unsafe_code)]
 
 //! Provides a stream interface for rewriting input and output byte
 //! streams. The core is `no_std`-compatible, runs incrementally, and
@@ -220,8 +221,6 @@ pub use protocol::{
     BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, EmptyBufferError,
     Error, ErrorKind, Progress, Sink, Source, StreamError, StreamErrorKind, TransferCounts,
 };
-
-pub mod uninit;
 
 mod step;
 

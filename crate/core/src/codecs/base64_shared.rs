@@ -17,9 +17,6 @@
 //! `PendingOutput` is checked the same way, via
 //! [`PendingOutput::is_empty`].
 
-use core::mem::MaybeUninit;
-
-use crate::uninit::copy_to_uninit;
 use crate::{Error, ErrorKind};
 
 /// The stream ended where it should not have.
@@ -158,12 +155,12 @@ impl<const N: usize> PendingOutput<N> {
 
     /// Copy held bytes into the front of `out`; returns how many were
     /// copied. After this, either this is empty or `out` is full.
-    pub(super) fn drain(&mut self, out: &mut [MaybeUninit<u8>]) -> usize {
+    pub(super) fn drain(&mut self, out: &mut [u8]) -> usize {
         if self.is_empty() {
             return 0;
         }
         let take = (self.len - self.pos).min(out.len());
-        copy_to_uninit(&mut out[..take], &self.buf[self.pos..self.pos + take]);
+        out[..take].copy_from_slice(&self.buf[self.pos..self.pos + take]);
         self.pos += take;
         take
     }
@@ -244,7 +241,6 @@ pub(super) fn stage_group<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::{stage_group, PendingOutput, PendingOutputError, SUBCODE_INTERNAL_BUFFER};
-    use crate::uninit::as_uninit_mut;
     use crate::{Error, ErrorKind};
 
     fn fill(pending: &mut PendingOutput<4>, bytes: &[u8]) -> Result<(), PendingOutputError> {
@@ -259,11 +255,11 @@ mod tests {
 
         fill(&mut pending, b"abcd").unwrap();
         assert_eq!(pending.drain(&mut []), 0);
-        assert_eq!(pending.drain(as_uninit_mut(&mut output[..1])), 1);
+        assert_eq!(pending.drain(&mut output[..1]), 1);
         assert!(!pending.is_empty());
-        assert_eq!(pending.drain(as_uninit_mut(&mut output[1..3])), 2);
+        assert_eq!(pending.drain(&mut output[1..3]), 2);
         assert!(!pending.is_empty());
-        assert_eq!(pending.drain(as_uninit_mut(&mut output[3..])), 1);
+        assert_eq!(pending.drain(&mut output[3..]), 1);
         assert!(pending.is_empty());
         assert_eq!(&output, b"abcd");
     }
