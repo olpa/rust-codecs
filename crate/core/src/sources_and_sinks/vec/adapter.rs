@@ -185,8 +185,13 @@ mod tests {
     #[test]
     fn sink_offers_uncommitted_space_again() {
         let mut sink = VecSink::with_growth(Vec::new(), 4);
-        let first = sink.spare().unwrap().unwrap().len();
-        sink.commit(0).unwrap();
-        assert_eq!(sink.spare().unwrap().unwrap().len(), first);
+        let spare = sink.spare().unwrap().unwrap();
+        let (first_ptr, first_len) = (spare.as_ptr(), spare.len());
+        spare[..2].copy_from_slice(b"ab");
+        sink.commit(1).unwrap();
+        let spare = sink.spare().unwrap().unwrap();
+        assert_eq!(spare.as_ptr(), first_ptr.wrapping_add(1));
+        assert_eq!(spare.len(), first_len - 1);
+        assert_eq!(spare[0], b'b');
     }
 }
