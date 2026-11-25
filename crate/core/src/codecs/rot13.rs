@@ -33,9 +33,13 @@ impl Codec for Rot13 {
             *out = rot13_byte(inp);
         }
         if input.len() <= output.len() {
-            Ok(Progress::InputConsumed { written: input.len() })
+            Ok(Progress::InputConsumed {
+                written: input.len(),
+            })
         } else {
-            Ok(Progress::OutputFilled { consumed: output.len() })
+            Ok(Progress::OutputFilled {
+                consumed: output.len(),
+            })
         }
     }
 }
