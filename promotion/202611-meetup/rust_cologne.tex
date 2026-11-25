@@ -426,13 +426,17 @@ let s = encode_string(
 Provisional, for bootstrapping:
 \begin{itemize}
 \item \texttt{base64}
-\item \texttt{encoding-rs} \todo{(TODO)}
+\item \texttt{json} (WIP)
+\item \texttt{quoted-printable}, \texttt{urlencode} (TODO)
 \end{itemize}
 
 \medskip
-Production, all from \texttt{compcol}:
+Bundled:
 \begin{itemize}
-\item gzip, brotli, zstd, lz4, \dots
+\item \texttt{identity}
+\item \texttt{rot13}
+\item all from \texttt{compcol}: \texttt{gzip}, \texttt{brotli}, \texttt{zstd}, \dots
+\item \texttt{encoding-rs} (TODO)
 \end{itemize}
 \end{frame}
 
