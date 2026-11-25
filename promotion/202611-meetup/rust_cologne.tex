@@ -440,7 +440,7 @@ Bundled:
 \end{itemize}
 \end{frame}
 
-\section{Early stop for more goods}
+\section{From codecs to parsing}
 \frame{\sectionpage}
 
 \begin{frame}[fragile]{Today's irritating way}
@@ -475,7 +475,7 @@ But \texttt{Base64DecoderWriter} and likes don't exist.
 \end{frame}
 
 \begin{frame}[fragile]{Idea for future: code}
-Replace \texttt{rjiter.write\_long\_bytes} with:
+Replace \texttt{rjiter.write\_long\_bytes} with:\notetag{not predicted}
 \begin{Verbatim}[fontsize=\small,frame=single,commandchars=\\\{\}]
 let mut sink = StdSink::new(File::create(file_name)?, [0u8; 4096])?;
 \vhi{stream\_to\_stream}(
@@ -505,47 +505,8 @@ Future:
 \end{itemize}
 \end{frame}
 
-\begin{frame}[fragile]{Early stop: the idea}
-Original idea: replace with a codec --- pass through or unescape to a \texttt{Sink}.
-
-\medskip
-Idea now:
-\begin{Verbatim}[fontsize=\small,frame=single]
-let codec = UnescapeCodec(/* stop on */ '"');
-stream_to_stream(source, codec, sink);
-\end{Verbatim}
-\end{frame}
-
-\begin{frame}[fragile]{Early stop: proof of concept}
-\texttt{crate/core/tests/tokenizer.rs}
-
-\begin{Verbatim}[fontsize=\footnotesize,frame=single]
-let lookahead_codec = StateMachineCodec::new();
-
-while !finished {
-    let lookahead = lookahead_codec.look_ahead(source);
-    match lookahead {
-        BeginString => {
-            StringDecoder::new().decode(source, sink);
-            // stream_to_stream, BoundaryAwareCodec
-        }
-        BeginNumber => {
-            let number = NumberDecoder::new().decode();
-            // stream_to_stream, BoundaryAwareCodec, inner Sink
-        }
-        ...
-    }
-}
-\end{Verbatim}
-\end{frame}
-
-\begin{frame}{Early stop: positions}
-Same code, but positions instead of tokens.
-
-\medskip
-\todo{TODO: expand}
-\end{frame}
-
+\section{Conclusion}
+\frame{\sectionpage}
 \begin{frame}{Conclusions, take-off}
 Technical implementation:
 \begin{itemize}
@@ -564,15 +525,6 @@ Contribute a codec, a parser or an I/O backend.
 
 \medskip
 All together I think I've discovered a potentially foundational interface. Please help with publicity. I don't have a wide audience.
-\end{frame}
-
-\section{Attic}
-\frame{\sectionpage}
-\begin{frame}{What's going on? More examples}
-\begin{itemize}
-\item Slide 2: stream to stream: from \texttt{std::io}, base64 encode, \texttt{embedded\_io} output
-\item Slide 3: json-escape/unescape to a string
-\end{itemize}
 \end{frame}
 
 \end{document}
