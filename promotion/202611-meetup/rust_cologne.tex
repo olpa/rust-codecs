@@ -474,6 +474,27 @@ But \texttt{Base64DecoderWriter} and likes don't exist.
 \end{itemize}
 \end{frame}
 
+\begin{frame}[fragile]{Idea for future}
+State machine instead of a parser:
+\begin{Verbatim}[fontsize=\small,frame=single]
+let mut sink = StdSink::new(File::create(file_name)?, [0u8; 4096])?;
+stream_to_stream(
+    &mut source,
+    Chain::new(
+        UnescapeString { end_char: '"', dialect: Dialect::Json },
+        Base64Dec::new(),
+        [0u8; 4096],
+    )?,
+    &mut sink,
+)?;
+json_parser_state_machine.advance_past_string();
+\end{Verbatim}
+
+\smallskip
+Now: \texttt{rjiter.write\_long\_bytes}\\
+Future: \texttt{stream\_to\_stream} with boundary-aware step, then state machine update
+\end{frame}
+
 \begin{frame}[fragile]{Early stop: the idea}
 Original idea: replace with a codec --- pass through or unescape to a \texttt{Sink}.
 
