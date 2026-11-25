@@ -5,7 +5,7 @@ use crate::{Sink, Source};
 
 // `VecSource` and `VecSink` have no `get_mut` method. `get_ref` and
 // `into_inner` exist, so `get_mut` may look missing by accident. It is
-// not. Each type keeps a position (`pos` or `committed`) that must match
+// not. Each type keeps a position (`pos`) that must match
 // the vec's real size. A public `get_mut` would let outside code
 // resize the vec directly, and that could make the position wrong
 // with no check to catch it.
@@ -53,18 +53,16 @@ impl Source for VecSource {
 }
 
 /// `Vec<u8>` auto-growing output stream.
-///
-/// The sink writes zeros into new capacity of the vec before it lends
-/// the capacity to a codec. Each byte is zeroed only once. Space that
-/// the codec does not commit stays initialized, and the next `spare`
-/// lends it again without zeroing.
 #[derive(Debug)]
 pub struct VecSink {
-    // `inner.len()` is the initialized length. The committed output is
-    // `inner[..committed]`.
+    // - `inner[..pos]` is the output.
+    // - `inner[pos..len]` is initialized but not committed: space that
+    //   was lent before and not used.
+    // - `inner[len..capacity]` is raw memory that is never lent.
     inner: Vec<u8>,
-    committed: usize,
+    pos: usize,
     grow_by: usize,
+    // Set by the last `spare`, cleared by `commit`.
     offered: usize,
 }
 
@@ -87,7 +85,7 @@ impl VecSink {
     /// The bytes already in `inner` stay. The sink appends after them.
     pub fn with_growth(inner: Vec<u8>, grow_by: usize) -> Self {
         Self {
-            committed: inner.len(),
+            pos: inner.len(),
             inner,
             grow_by: if grow_by > 0 {
                 grow_by
@@ -100,7 +98,7 @@ impl VecSink {
 
     /// Return the committed bytes.
     pub fn get_ref(&self) -> &[u8] {
-        &self.inner[..self.committed]
+        &self.inner[..self.pos]
     }
 
     // Forbidden to add: see the file-level comment above.
@@ -110,7 +108,7 @@ impl VecSink {
 
     /// Return the vec with the committed bytes only.
     pub fn into_inner(mut self) -> Vec<u8> {
-        self.inner.truncate(self.committed);
+        self.inner.truncate(self.pos);
         self.inner
     }
 }
@@ -123,12 +121,16 @@ impl Default for VecSink {
 
 impl Sink for VecSink {
     type Error = Infallible;
+    // The sink writes zeros into new capacity of the vec before it lends
+    // the capacity to a codec. Each byte is zeroed only once. Space that
+    // the codec does not commit stays initialized, and the next `spare`
+    // lends it again without zeroing.
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
-        if self.committed == self.inner.len() {
+        if self.pos == self.inner.len() {
             self.inner.reserve(self.grow_by);
             self.inner.resize(self.inner.capacity(), 0);
         }
-        let spare = &mut self.inner[self.committed..];
+        let spare = &mut self.inner[self.pos..];
         self.offered = spare.len();
         Ok(Some(spare))
     }
@@ -139,7 +141,7 @@ impl Sink for VecSink {
             "commit({amount}) exceeds the {} bytes offered by spare()",
             self.offered
         );
-        self.committed += amount.min(self.offered);
+        self.pos += amount.min(self.offered);
         self.offered = 0;
         Ok(())
     }
