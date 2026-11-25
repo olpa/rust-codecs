@@ -53,7 +53,6 @@ impl Source for VecSource {
 }
 
 /// `Vec<u8>` auto-growing output stream.
-#[derive(Debug)]
 pub struct VecSink {
     // - `inner[..pos]` is the output.
     // - `inner[pos..len]` is initialized but not committed: space that
@@ -110,6 +109,17 @@ impl VecSink {
     pub fn into_inner(mut self) -> Vec<u8> {
         self.inner.truncate(self.pos);
         self.inner
+    }
+}
+
+impl core::fmt::Debug for VecSink {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VecSink")
+            .field("len", &self.pos)
+            .field("capacity", &self.inner.capacity())
+            .field("grow_by", &self.grow_by)
+            .field("offered", &self.offered)
+            .finish_non_exhaustive()
     }
 }
 
