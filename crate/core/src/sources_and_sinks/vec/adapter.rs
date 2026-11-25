@@ -55,9 +55,8 @@ impl Source for VecSource {
 
 /// `Vec<u8>` auto-growing output stream.
 ///
-/// With a maximum window of `n`, `spare` lends at most `n` bytes.
-/// Without one, it lends all spare capacity, and `Vec` growth sets
-/// the size.
+/// You can limit the size of the window that `spare` returns. Otherwise,
+/// the window is all spare capacity, and the growth of `Vec` sets its size.
 pub struct VecSink {
     // - `inner[..pos]` is the output.
     // - `inner[pos..len]` is initialized but not committed: space that
