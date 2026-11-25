@@ -442,42 +442,69 @@ Bundled:
 
 \section{Early stop for more goods}
 \frame{\sectionpage}
-\begin{frame}{Early stop}
-\begin{itemize}
-\item Codec: \texttt{ParseString}
-\item Taken from the compression codecs (compcol)
-\item New use case: parsing
-\item Example: parse until a quote
-\item \texttt{stream\_to\_stream}: getting tokens
-\item But: \texttt{NullSink}, getting position $\to$ in-place parsing, no byte moving
-\item In investigation, a topic for the next year
-\end{itemize}
+
+\begin{frame}[fragile]{Today's irritating way}
+\begin{Verbatim}[fontsize=\small,frame=single]
+{
+  "image": "iVBORw0KGgoAAAANS..."
+}
+\end{Verbatim}
+
+Using \texttt{RJiter}, a streaming JSON parser:
+\begin{Verbatim}[fontsize=\small,frame=single,commandchars=\\\{\}]
+let mut reader = ...; // impl embedded_io::Read
+let mut buffer = [0u8; 4096];
+let mut rjiter = RJiter::new(&mut reader, &mut buffer);
+
+// ...
+
+let mut base64dec = // impl embedded_io::Write
+    Base64DecoderWriter::new(File::create(file_name)?);
+rjiter.\vhi{write_long_bytes}(&mut \vhi{base64dec}).unwrap();
+\end{Verbatim}
+
+But \texttt{Base64DecoderWriter} and likes don't exist.
 \end{frame}
 
-\begin{frame}{Call for participation: Codecs}
-Create codecs:
-\begin{itemize}
-\item ``convert'' function
-\item Inner staging to hold bytes when it can't produce reasonable output, but must consume full input
-\end{itemize}
-No need to care for I/O and UX, just convert.
+\begin{frame}[fragile]{Early stop: the idea}
+Original idea: replace with a codec --- pass through or unescape to a \texttt{Sink}.
 
 \medskip
-This is a mega-bonus: before, each transformation crate had to invent its own interface for bytes. No need for it anymore.
-
-\medskip
-Second insight from the talk: the byte pull-push got a new potential standard.
-
-\medskip
-\texttt{CREATING-CODECS.md}
+Idea now:
+\begin{Verbatim}[fontsize=\small,frame=single]
+let codec = UnescapeCodec(/* stop on */ '"');
+stream_to_stream(source, codec, sink);
+\end{Verbatim}
 \end{frame}
 
-\begin{frame}{Call for participation: Parser combinators}
-Nothing done by me yet, but the way is clear.
+\begin{frame}[fragile]{Early stop: proof of concept}
+\texttt{crate/core/tests/tokenizer.rs}
+
+\begin{Verbatim}[fontsize=\footnotesize,frame=single]
+let lookahead_codec = StateMachineCodec::new();
+
+while !finished {
+    let lookahead = lookahead_codec.look_ahead(source);
+    match lookahead {
+        BeginString => {
+            StringDecoder::new().decode(source, sink);
+            // stream_to_stream, BoundaryAwareCodec
+        }
+        BeginNumber => {
+            let number = NumberDecoder::new().decode();
+            // stream_to_stream, BoundaryAwareCodec, inner Sink
+        }
+        ...
+    }
+}
+\end{Verbatim}
 \end{frame}
 
-\begin{frame}{Call for participation: I/O backends}
-More complicated, but doable. Bundled \texttt{std::io} and \texttt{embedded\_io} are thin wrappers.
+\begin{frame}{Early stop: positions}
+Same code, but positions instead of tokens.
+
+\medskip
+\todo{TODO: expand}
 \end{frame}
 
 \begin{frame}{Conclusions, take-off}
