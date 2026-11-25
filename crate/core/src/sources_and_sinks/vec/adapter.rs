@@ -161,14 +161,16 @@ mod tests {
     }
 
     #[test]
-    fn sink_spare_is_never_none_even_after_filling() {
+    fn sink_grows_when_all_offered_space_is_committed() {
         let mut sink = VecSink::with_growth(Vec::new(), 4);
-        let offered = sink.spare().unwrap().unwrap().len();
-        sink.spare().unwrap().unwrap().fill(b'a');
+        let spare = sink.spare().unwrap().unwrap();
+        spare.fill(b'a');
+        let offered = spare.len();
         sink.commit(offered).unwrap();
         // Unlike `SliceSink`, `VecSink` grows on demand: filling every
-        // byte offered so far must not produce `None`.
-        assert!(sink.spare().unwrap().is_some());
+        // byte offered so far must not produce `None` or an empty slice.
+        let spare = sink.spare().unwrap().unwrap();
+        assert!(!spare.is_empty());
     }
 
     #[test]
