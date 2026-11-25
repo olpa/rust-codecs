@@ -29,17 +29,13 @@ impl DrainCodec for Rot13 {
 
 impl Codec for Rot13 {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-        let n = input.len().min(output.len());
-        let out_iter = output[..n].iter_mut();
-        let in_iter = input[..n].iter();
-        for (out, &inp) in out_iter.zip(in_iter) {
-            // Release builds autovectorize this loop.
+        for (out, &inp) in output.iter_mut().zip(input) {
             *out = rot13_byte(inp);
         }
-        if n == input.len() {
-            Ok(Progress::InputConsumed { written: n })
+        if input.len() <= output.len() {
+            Ok(Progress::InputConsumed { written: input.len() })
         } else {
-            Ok(Progress::OutputFilled { consumed: n })
+            Ok(Progress::OutputFilled { consumed: output.len() })
         }
     }
 }

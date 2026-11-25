@@ -27,14 +27,13 @@ pub struct Rot13;
 
 impl Codec for Rot13 {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
-        let n = input.len().min(output.len());
-        for (out, &inp) in output[..n].iter_mut().zip(&input[..n]) {
+        for (out, &inp) in output.iter_mut().zip(input) {
             *out = rot13_byte(inp);
         }
-        if n == input.len() {
-            Ok(Progress::InputConsumed { written: n })
+        if input.len() <= output.len() {
+            Ok(Progress::InputConsumed { written: input.len() })
         } else {
-            Ok(Progress::OutputFilled { consumed: n })
+            Ok(Progress::OutputFilled { consumed: output.len() })
         }
     }
 }
@@ -56,13 +55,9 @@ There is one rule every `process` call must obey. Each call either
 consumes all of `input`, or fills all of `output`.
 
 `Progress` is an enum with exactly those two variants. No other
-outcome can be reported. `Rot13::process` above shows the pattern:
-compute `n = input.len().min(output.len())`, then report which side
-ran out.
-
-If the codec consumes all of `input` and fills all of `output`, both
-`InputConsumed` and `OutputFilled` are correct. A driver must process
-the two variants in the same way.
+outcome can be reported. If the codec consumes all of `input` and
+fills all of `output`, both `InputConsumed` and `OutputFilled` are
+correct. A driver must process the two variants in the same way.
 
 Why this matters: it avoids a class of bugs. Earlier, `Progress` was
 more relaxed. It had two fields, `consumed` and `written`. The driver
