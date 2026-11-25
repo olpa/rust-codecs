@@ -100,8 +100,7 @@ Nobody can check most wrong counts. The one visible error is an
 checks it with `debug_assert!` and clamps the amount.
 
 We do not use a panic in release builds. A panic on the one visible
-error would suggest that the contract is enforced, but it is not. The
-trait docs of `Source::consume` and `Sink::commit` say this.
+error would suggest that the contract is enforced, but it is not.
 
 The `std_io` and `embedded_io` source adapters pass `consume` to the
 inner reader. They follow the rules of that reader. This is on purpose.
