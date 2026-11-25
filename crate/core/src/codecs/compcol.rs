@@ -563,6 +563,7 @@ mod tests {
     use crate::codecs::test_support::{OneByteAtATimeSink, SplitSource};
     use crate::sources_and_sinks::vec::VecSink;
     use crate::stream_to_stream;
+    use core::num::NonZeroUsize;
 
     fn sample() -> Vec<u8> {
         let mut data = Vec::new();
@@ -593,7 +594,7 @@ mod tests {
             let counts = stream_to_stream(&mut source, codec, &mut sink).unwrap();
             return (sink.bytes, counts.consumed);
         }
-        let mut sink = VecSink::with_growth(Vec::new(), chunk_size);
+        let mut sink = VecSink::with_max_window(Vec::new(), NonZeroUsize::new(chunk_size).unwrap());
         let counts = stream_to_stream(&mut source, codec, &mut sink).unwrap();
         (sink.into_inner(), counts.consumed)
     }

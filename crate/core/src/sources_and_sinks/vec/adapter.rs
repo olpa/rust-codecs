@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use core::convert::Infallible;
+use core::num::NonZeroUsize;
 
 use crate::{Sink, Source};
 
@@ -53,6 +54,10 @@ impl Source for VecSource {
 }
 
 /// `Vec<u8>` auto-growing output stream.
+///
+/// With a maximum window of `n`, `spare` lends at most `n` bytes.
+/// Without one, it lends all spare capacity, and `Vec` growth sets
+/// the size.
 pub struct VecSink {
     // - `inner[..pos]` is the output.
     // - `inner[pos..len]` is initialized but not committed: space that
@@ -60,37 +65,27 @@ pub struct VecSink {
     // - `inner[len..capacity]` is raw memory that is never lent.
     inner: Vec<u8>,
     pos: usize,
-    grow_by: usize,
+    max_window_len: Option<NonZeroUsize>,
     // Set by the last `spare`, cleared by `commit`.
     offered: usize,
 }
 
 impl VecSink {
-    /// The minimum extra capacity requested each time the vec runs out of
-    /// spare space. `Vec::reserve`'s underlying allocator still amortizes
-    /// growth on top of this (roughly doubling capacity once it's past a
-    /// small size), so this value is a floor, not the actual step size.
-    pub const DEFAULT_GROWTH: usize = 1024;
-
-    /// Build a `VecSink` that grows by [`Self::DEFAULT_GROWTH`].
+    /// Build a `VecSink` with no maximum window.
     pub fn new(inner: Vec<u8>) -> Self {
-        Self::with_growth(inner, Self::DEFAULT_GROWTH)
+        Self::build(inner, None)
     }
 
-    /// Build a `VecSink` that requests at least `grow_by` bytes of extra
-    /// capacity each time the vec is full. A `grow_by` of 0 means
-    /// [`Self::DEFAULT_GROWTH`].
-    ///
-    /// The bytes already in `inner` stay. The sink appends after them.
-    pub fn with_growth(inner: Vec<u8>, grow_by: usize) -> Self {
+    /// Build a `VecSink` with a maximum window of `max_window_len` bytes.
+    pub fn with_max_window(inner: Vec<u8>, max_window_len: NonZeroUsize) -> Self {
+        Self::build(inner, Some(max_window_len))
+    }
+
+    fn build(inner: Vec<u8>, max_window_len: Option<NonZeroUsize>) -> Self {
         Self {
             pos: inner.len(),
             inner,
-            grow_by: if grow_by > 0 {
-                grow_by
-            } else {
-                Self::DEFAULT_GROWTH
-            },
+            max_window_len,
             offered: 0,
         }
     }
@@ -117,7 +112,7 @@ impl core::fmt::Debug for VecSink {
         f.debug_struct("VecSink")
             .field("len", &self.pos)
             .field("capacity", &self.inner.capacity())
-            .field("grow_by", &self.grow_by)
+            .field("max_window_len", &self.max_window_len)
             .field("offered", &self.offered)
             .finish_non_exhaustive()
     }
@@ -137,8 +132,15 @@ impl Sink for VecSink {
     // lends it again without zeroing.
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
         if self.pos == self.inner.len() {
-            self.inner.reserve(self.grow_by);
-            self.inner.resize(self.inner.capacity(), 0);
+            let new_len = match self.max_window_len {
+                Some(n) => self.inner.len() + n.get(),
+                None => {
+                    // Not 1 byte: `Vec` grows by its amortized step (roughly doubles).
+                    self.inner.reserve(1);
+                    self.inner.capacity()
+                }
+            };
+            self.inner.resize(new_len, 0);
         }
         let spare = &mut self.inner[self.pos..];
         self.offered = spare.len();
@@ -172,7 +174,7 @@ mod tests {
 
     #[test]
     fn sink_grows_when_all_offered_space_is_committed() {
-        let mut sink = VecSink::with_growth(Vec::new(), 4);
+        let mut sink = VecSink::with_max_window(Vec::new(), NonZeroUsize::new(4).unwrap());
         let spare = sink.spare().unwrap().unwrap();
         spare.fill(b'a');
         let offered = spare.len();
@@ -185,7 +187,7 @@ mod tests {
 
     #[test]
     fn sink_keeps_existing_bytes_and_returns_only_committed_bytes() {
-        let mut sink = VecSink::with_growth(alloc::vec![b'x'], 4);
+        let mut sink = VecSink::with_max_window(alloc::vec![b'x'], NonZeroUsize::new(4).unwrap());
         let spare = sink.spare().unwrap().unwrap();
         assert!(spare.len() > 2);
         spare[..2].copy_from_slice(b"ab");
@@ -196,7 +198,7 @@ mod tests {
 
     #[test]
     fn sink_offers_uncommitted_space_again() {
-        let mut sink = VecSink::with_growth(Vec::new(), 4);
+        let mut sink = VecSink::with_max_window(Vec::new(), NonZeroUsize::new(4).unwrap());
         let spare = sink.spare().unwrap().unwrap();
         let (first_ptr, first_len) = (spare.as_ptr(), spare.len());
         spare[..2].copy_from_slice(b"ab");
@@ -205,5 +207,23 @@ mod tests {
         assert_eq!(spare.as_ptr(), first_ptr.wrapping_add(1));
         assert_eq!(spare.len(), first_len - 1);
         assert_eq!(spare[0], b'b');
+    }
+
+    #[test]
+    fn sink_window_is_at_most_max_window_len() {
+        let mut sink =
+            VecSink::with_max_window(Vec::with_capacity(64), NonZeroUsize::new(4).unwrap());
+        for _ in 0..3 {
+            let spare = sink.spare().unwrap().unwrap();
+            assert_eq!(spare.len(), 4);
+            sink.commit(4).unwrap();
+        }
+    }
+
+    #[test]
+    fn sink_without_max_window_lends_all_spare_capacity() {
+        let mut sink = VecSink::new(Vec::with_capacity(64));
+        let spare = sink.spare().unwrap().unwrap();
+        assert!(spare.len() >= 64);
     }
 }
