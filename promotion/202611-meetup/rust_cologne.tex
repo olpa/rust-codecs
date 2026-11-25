@@ -474,25 +474,35 @@ But \texttt{Base64DecoderWriter} and likes don't exist.
 \end{itemize}
 \end{frame}
 
-\begin{frame}[fragile]{Idea for future}
-State machine instead of a parser:
-\begin{Verbatim}[fontsize=\small,frame=single]
+\begin{frame}[fragile]{Idea for future: code}
+Replace \texttt{rjiter.write\_long\_bytes} with:
+\begin{Verbatim}[fontsize=\small,frame=single,commandchars=\\\{\}]
 let mut sink = StdSink::new(File::create(file_name)?, [0u8; 4096])?;
-stream_to_stream(
+\vhi{stream\_to\_stream}(
     &mut source,
     Chain::new(
-        UnescapeString { end_char: '"', dialect: Dialect::Json },
+        \vhi{UnescapeString} \{ end\_char: '"' \},
         Base64Dec::new(),
         [0u8; 4096],
     )?,
     &mut sink,
 )?;
-json_parser_state_machine.advance_past_string();
+json\_parser\_state\_machine.\vhi{advance\_past\_string}();
 \end{Verbatim}
+\end{frame}
 
-\smallskip
-Now: \texttt{rjiter.write\_long\_bytes}\\
-Future: \texttt{stream\_to\_stream} with boundary-aware step, then state machine update
+\begin{frame}{Idea for future: summary}
+Now:
+\begin{itemize}
+\item \texttt{parser.token(\dots)}
+\end{itemize}
+
+\medskip
+Future:
+\begin{itemize}
+\item \texttt{stream\_to\_stream} with a \texttt{BoundaryAwareCodec}, then
+\item state machine update
+\end{itemize}
 \end{frame}
 
 \begin{frame}[fragile]{Early stop: the idea}
