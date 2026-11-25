@@ -12,7 +12,7 @@
 \newcommand{\surprise}[1]{\colorbox{orange!25}{#1}}
 \newcommand{\notetag}[1]{~\colorbox{orange!25}{\small\textit{#1}}}
 \newcommand{\todo}[1]{{\color{red}\emph{#1}}}
-\newcommand{\vhi}[1]{\colorbox{yellow}{#1}}
+\newcommand{\vhi}[1]{\mbox{\colorbox{yellow}{#1}}}
 
 \title{Rust codecs: streaming byte transformations}
 \author{Oleg Parashchenko}
@@ -404,33 +404,35 @@ where INPUT: Source, OUTPUT: Sink, CODEC: BoundaryAwareCodec
 \end{columns}
 \end{frame}
 
-\begin{frame}{I/O backend: Sources and Sinks}
-\begin{itemize}
-\item For zero overhead for in-memory: slices/Vecs
-\item \todo{\dots interface \dots}
-\item Differentiator from other codec stuff, which is tied to Reader, Writer and their async versions
-\end{itemize}
-\end{frame}
-
-\begin{frame}{Inside}
-\begin{itemize}
-\item \texttt{stream\_to\_stream}
-\item Sink/Source and CodecReader/CodecWriter for \texttt{std::io} and \texttt{embedded\_io}
-\item Async version later
-\item Source for \texttt{u8} slice, Source/Sink for \texttt{u8} Vec
-\end{itemize}
-\end{frame}
-
-\begin{frame}{Inside: codecs}
-All codecs from ``compcol'' (lz, \dots), encoding-rs, slip, async-compression, bytes\_rw
+\begin{frame}[fragile]{String conversions}
+\begin{Verbatim}[fontsize=\small,frame=single]
+fn encode_str   (codec: impl Codec, input: impl AsRef<str>)
+    -> Result<Vec<u8>, EncodeError>
+fn encode_string(codec: impl Codec, input: impl AsRef<str>)
+    -> Result<String,  EncodeError>
+\end{Verbatim}
 
 \medskip
-Provisional (mostly AI generated with review):
+\begin{Verbatim}[fontsize=\large,frame=single,commandchars=\\\{\}]
+let s = encode_string(
+    json_enc(),
+    r#"say \vhi{"}hi\vhi{"}"#,
+)?;
+/* s == r#"say \vhi{\textbackslash{}"}hi\vhi{\textbackslash{}"}"# */
+\end{Verbatim}
+\end{frame}
+
+\begin{frame}{Codecs}
+Provisional, for bootstrapping:
 \begin{itemize}
-\item base64
-\item json encode and decode
-\item TODO quoted-printable
-\item TODO urlencode
+\item \texttt{base64}
+\item \texttt{encoding-rs} \todo{(TODO)}
+\end{itemize}
+
+\medskip
+Production, all from \texttt{compcol}:
+\begin{itemize}
+\item gzip, brotli, zstd, lz4, \dots
 \end{itemize}
 \end{frame}
 
