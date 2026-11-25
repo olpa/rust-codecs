@@ -466,6 +466,14 @@ rjiter.\vhi{write_long_bytes}(&mut \vhi{base64dec}).unwrap();
 But \texttt{Base64DecoderWriter} and likes don't exist.
 \end{frame}
 
+\begin{frame}{The initial plan}
+\begin{itemize}
+\item What trait is \texttt{Base64DecoderWriter}?
+\item Is \texttt{embedded\_io::Write} the right trait?
+\item If not, what then?
+\end{itemize}
+\end{frame}
+
 \begin{frame}[fragile]{Early stop: the idea}
 Original idea: replace with a codec --- pass through or unescape to a \texttt{Sink}.
 
