@@ -566,20 +566,26 @@ Contributions are welcome:
 \end{itemize}
 \end{frame}
 
-\begin{frame}{Conclusions, take-off}
-Technical implementation:
+\begin{frame}{Takeaways}
+\textbf{Technical learnings}
 \begin{itemize}
-\item Codec step should consume all or fill output
-\item Source/Sink as an alternative to Reader and Writer
-\end{itemize}
-Effect:
-\begin{itemize}
-\item Streaming \emph{or} zero overhead in memory
-\item Early stop enables parser combinators
+\item Codec step must consume all input or fill all output
+\item \texttt{Source} / \texttt{Sink}: alternative to \texttt{Read} / \texttt{Write}
+  \begin{itemize}
+  \item streaming, or sliding view over \texttt{\&[u8]}
+  \end{itemize}
 \end{itemize}
 
 \medskip
-All together, I think I've discovered a potentially foundational interface.
+\textbf{Ecosystem benefits}
+\begin{itemize}
+\item Codec authors: write the codec, get I/O for free\\
+  {\small (std, embedded-io, slices, \texttt{Vec}, chaining)}
+\item Parser authors: concentrate on state transitions (investigating)
+\end{itemize}
+
+\bigskip
+Overall: \textbf{a potentially foundational interface}
 \end{frame}
 
 \end{document}
