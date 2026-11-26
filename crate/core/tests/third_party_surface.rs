@@ -12,7 +12,6 @@
 
 use core::convert::Infallible;
 use core::hint::black_box;
-use core::mem::MaybeUninit;
 
 use rust_codecs_core::sources_and_sinks::shared_io::{
     boundary_aware_pump_read, pump_finish, pump_write,
@@ -43,7 +42,7 @@ struct DummySink;
 impl Sink for DummySink {
     type Error = Infallible;
 
-    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Infallible> {
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Infallible> {
         Ok(None)
     }
 
@@ -60,21 +59,17 @@ impl Sink for DummySink {
 struct DummyCodec;
 
 impl DrainCodec for DummyCodec {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 
-    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 }
 
 impl Codec for DummyCodec {
-    fn process(
-        &mut self,
-        _input: &[u8],
-        _output: &mut [MaybeUninit<u8>],
-    ) -> Result<Progress, Error> {
+    fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
         Ok(Progress::InputConsumed { written: 0 })
     }
 }
@@ -87,11 +82,11 @@ impl Codec for DummyCodec {
 struct DummyBoundaryCodec;
 
 impl DrainCodec for DummyBoundaryCodec {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 
-    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 }
@@ -100,7 +95,7 @@ impl BoundaryAwareCodec for DummyBoundaryCodec {
     fn process_bounded(
         &mut self,
         input: &[u8],
-        _output: &mut [MaybeUninit<u8>],
+        _output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error> {
         Ok(BoundaryAwareProgress::Boundary {
             consumed: input.len(),
@@ -118,7 +113,7 @@ impl BoundaryAwareCodec for &mut DummyBoundaryCodec {
     fn process_bounded(
         &mut self,
         input: &[u8],
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error> {
         (**self).process_bounded(input, output)
     }
@@ -218,17 +213,13 @@ impl DummyWriter {
 impl Sink for DummyWriter {
     type Error = Infallible;
 
-    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Infallible> {
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Infallible> {
         if self.len == self.buf.len() {
             return Ok(None);
         }
         let spare = &mut self.buf[self.len..];
         self.offered = spare.len();
-        // Safe. `MaybeUninit<u8>` has the same layout as `u8`. An
-        // already-initialized `u8` is always a valid `MaybeUninit<u8>`.
-        Ok(Some(unsafe {
-            &mut *(spare as *mut [u8] as *mut [MaybeUninit<u8>])
-        }))
+        Ok(Some(spare))
     }
 
     fn commit(&mut self, amount: usize) -> Result<(), Infallible> {

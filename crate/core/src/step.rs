@@ -4,8 +4,6 @@
 //! [`Pump`](crate::stream::Pump) and [`Chain`](crate::Chain)
 //! share this module.
 
-use core::mem::MaybeUninit;
-
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, ErrorKind,
     Progress, TransferCounts,
@@ -16,7 +14,7 @@ use crate::{
 pub(crate) fn codec_step<C: Codec + ?Sized>(
     codec: &mut C,
     input: &[u8],
-    output: &mut [MaybeUninit<u8>],
+    output: &mut [u8],
 ) -> Result<TransferCounts, Error> {
     let input_len = input.len();
     let output_len = output.len();
@@ -41,7 +39,7 @@ pub(crate) fn codec_step<C: Codec + ?Sized>(
 pub(crate) fn boundary_aware_step<C: BoundaryAwareCodec + ?Sized>(
     codec: &mut C,
     input: &[u8],
-    output: &mut [MaybeUninit<u8>],
+    output: &mut [u8],
 ) -> Result<BoundaryAwareProgress, Error> {
     codec
         .process_bounded(input, output)?
@@ -51,7 +49,7 @@ pub(crate) fn boundary_aware_step<C: BoundaryAwareCodec + ?Sized>(
 /// Run one `flush` step against `codec` and validate the result.
 pub(crate) fn flush_step<C: DrainCodec + ?Sized>(
     codec: &mut C,
-    output: &mut [MaybeUninit<u8>],
+    output: &mut [u8],
 ) -> Result<DrainProgress, Error> {
     codec.flush(output)?.validated(output.len())
 }
@@ -59,7 +57,7 @@ pub(crate) fn flush_step<C: DrainCodec + ?Sized>(
 /// Run one `finish` step against `codec` and validate the result.
 pub(crate) fn finish_step<C: DrainCodec + ?Sized>(
     codec: &mut C,
-    output: &mut [MaybeUninit<u8>],
+    output: &mut [u8],
 ) -> Result<DrainProgress, Error> {
     codec.finish(output)?.validated(output.len())
 }
@@ -119,7 +117,6 @@ impl FinishPhase {
 
 #[cfg(test)]
 mod tests {
-    use core::mem::MaybeUninit;
 
     use super::{boundary_aware_step, FinishPhase};
     use crate::codecs::test_support::{FailsAfterInner, HoldsOutput, Scripted};
@@ -131,8 +128,7 @@ mod tests {
             process: BoundaryAwareProgress::OutputFilled { consumed: 2 },
             drain: DrainProgress::Done { written: 0 },
         };
-        let progress =
-            boundary_aware_step(&mut codec, b"abc", &mut [MaybeUninit::uninit(); 4]).unwrap();
+        let progress = boundary_aware_step(&mut codec, b"abc", &mut [0u8; 4]).unwrap();
         assert_eq!(
             progress,
             BoundaryAwareProgress::OutputFilled { consumed: 2 }
@@ -161,7 +157,7 @@ mod tests {
                 drain: DrainProgress::Done { written: 0 },
             };
             assert_eq!(
-                boundary_aware_step(&mut codec, b"abc", &mut [MaybeUninit::uninit(); 5]),
+                boundary_aware_step(&mut codec, b"abc", &mut [0u8; 5]),
                 Err(violation),
                 "{process:?}"
             );
@@ -180,7 +176,7 @@ mod tests {
                     ..Default::default()
                 },
                 b"abc",
-                &mut [MaybeUninit::uninit(); 5]
+                &mut [0u8; 5]
             ),
             Err(Error {
                 kind: ErrorKind::CorruptStream,

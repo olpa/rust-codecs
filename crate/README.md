@@ -11,6 +11,8 @@ incrementally and does not allocate.
 - It bundles the `identity` and `rot13` codecs. It also bundles
   `base64_enc`/`base64_dec` and `json_enc` escaping, until these get
   their own crates.
+- It adapts the `compcol` crate, a collection of compression
+  algorithms.
 - It bundles I/O backends for `std::io` and `embedded_io`. These
   provide the `CodecReader`, `BufReadCodecReader`, and `CodecWriter`
   wrappers around a `Read`, `BufRead`, or `Write`.

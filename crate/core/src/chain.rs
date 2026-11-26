@@ -3,10 +3,7 @@
 //! [`BoundaryAwareCodec`](crate::BoundaryAwareCodec) is not
 //! supported. A terminating composition would need its own design.
 
-use core::mem::MaybeUninit;
-
 use crate::step::{codec_step, finish_step, flush_step, FinishPhase};
-use crate::uninit::as_uninit_mut;
 use crate::{Codec, DrainCodec, DrainProgress, EmptyBufferError, Error, ErrorKind, Progress};
 
 /// Compose two codecs into a single [`Codec`].
@@ -254,7 +251,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// because `first` failed first.
     fn deliver_error_if_due(
         &mut self,
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
         out_pos: usize,
         consumed: usize,
     ) -> ErrorDelivery {
@@ -403,7 +400,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// [`Codec::process`]'s contract.
     fn drain_staging_into(
         &mut self,
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
         out_pos: usize,
         caller_consumed_so_far: usize,
     ) -> Result<usize, Error> {
@@ -452,7 +449,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
     /// See the doc comment of `process`.
     fn drain_through(
         &mut self,
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
         mode: DrainMode,
     ) -> Result<DrainProgress, Error> {
         let mut out_pos = 0;
@@ -521,7 +518,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Chain<A, B, S> {
             // Drain `first` into `staging`.
             //
             let staging = self.staging.as_mut();
-            let moved = match mode.step(&mut self.first, as_uninit_mut(staging)) {
+            let moved = match mode.step(&mut self.first, staging) {
                 Ok(moved) => moved,
                 Err(error) => {
                     let error = error
@@ -560,11 +557,7 @@ enum DrainMode {
 }
 
 impl DrainMode {
-    fn step<C: DrainCodec>(
-        self,
-        codec: &mut C,
-        output: &mut [MaybeUninit<u8>],
-    ) -> Result<DrainProgress, Error> {
+    fn step<C: DrainCodec>(self, codec: &mut C, output: &mut [u8]) -> Result<DrainProgress, Error> {
         match self {
             DrainMode::Flush => flush_step(codec, output),
             DrainMode::Finish => finish_step(codec, output),
@@ -577,7 +570,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     /// `second`.
     ///
     /// The chain handles errors as in [`Chain::process`](Codec::process).
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         self.finish_phase.check_open()?;
         let progress = self.drain_through(output, DrainMode::Flush);
         // When the flush cycle ends, the next `flush` starts a new cycle
@@ -599,7 +592,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> DrainCodec for Chain<A, B, S> {
     /// [`Chain::process`](Codec::process). But if `finish` reported `Done`,
     /// a new call of `finish` is not an error. It writes no bytes and
     /// reports `Done` again.
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         if self.finish_phase.is_finished() {
             return Ok(DrainProgress::Done { written: 0 });
         }
@@ -644,7 +637,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
     /// subcode. For a latched error, `consumed` and `written` are zero.
     ///
     /// See also [`Chain::failures`].
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         self.finish_phase.check_open()?;
         // New input starts a new flush cycle.
         self.first_flushed = false;
@@ -706,8 +699,7 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
             let staging = self.staging.as_mut();
             let input_len = input.len() - in_pos;
             let output_len = staging.len();
-            let moved = match codec_step(&mut self.first, &input[in_pos..], as_uninit_mut(staging))
-            {
+            let moved = match codec_step(&mut self.first, &input[in_pos..], staging) {
                 Ok(moved) => moved,
                 Err(error) => {
                     let error = error
@@ -734,7 +726,6 @@ impl<A: Codec, B: Codec, S: AsMut<[u8]>> Codec for Chain<A, B, S> {
 #[cfg(all(test, feature = "alloc", feature = "base64"))]
 mod tests {
     use core::convert::Infallible;
-    use core::mem::MaybeUninit;
 
     use alloc::{boxed::Box, vec, vec::Vec};
 
@@ -748,7 +739,6 @@ mod tests {
     use crate::rot13::rot13;
     use crate::sources_and_sinks::slice::{SliceSink, SliceSource};
     use crate::sources_and_sinks::vec::{encode_string, EncodeError};
-    use crate::uninit::{as_uninit_mut, copy_to_uninit};
     use crate::{
         stream_to_stream, Codec, DrainCodec, DrainProgress, DriveError, DriveErrorKind,
         EmptyBufferError, Error, ErrorKind, Progress, Pump, StreamError, StreamErrorKind,
@@ -824,9 +814,7 @@ mod tests {
     fn tiny_output_buffer_forces_partial_progress() {
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 8]).unwrap();
         let mut out = [0u8; 1];
-        let outcome = chain
-            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
-            .unwrap();
+        let outcome = chain.process(INPUT.as_bytes(), &mut out).unwrap();
         // 8-byte staging caps `first` at 8 bytes consumed, even though
         // `output` only fits 1 of those through `second`.
         assert_eq!(outcome, Progress::OutputFilled { consumed: 8 });
@@ -840,9 +828,7 @@ mod tests {
         // later.
         let mut chain = Chain::new(rot13(), rot13(), vec![0u8; 64]).unwrap();
         let mut out = [0u8; 64];
-        let outcome = chain
-            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
-            .unwrap();
+        let outcome = chain.process(INPUT.as_bytes(), &mut out).unwrap();
         assert_eq!(
             outcome,
             Progress::InputConsumed {
@@ -858,7 +844,7 @@ mod tests {
         // it through a sink that only ever offers one byte at a time.
         let chain = Chain::new(base64_enc(), rot13(), vec![0u8; 4]).unwrap();
         let mut input = SliceSource::new(INPUT.as_bytes());
-        let mut output = OneByteAtATimeSink { bytes: Vec::new() };
+        let mut output = OneByteAtATimeSink::new();
         stream_to_stream(&mut input, chain, &mut output).unwrap();
         assert_eq!(output.bytes, ROT13_OF_BASE64_INPUT.as_bytes());
     }
@@ -875,13 +861,13 @@ mod tests {
     }
 
     impl DrainCodec for Hoarder {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
 
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             let n = self.buf.len().min(output.len());
-            copy_to_uninit(&mut output[..n], &self.buf[..n]);
+            output[..n].copy_from_slice(&self.buf[..n]);
             self.buf.drain(..n);
             if self.buf.is_empty() {
                 Ok(DrainProgress::Done { written: n })
@@ -892,11 +878,7 @@ mod tests {
     }
 
     impl Codec for Hoarder {
-        fn process(
-            &mut self,
-            input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             self.buf.extend_from_slice(input);
             Ok(Progress::InputConsumed { written: 0 })
         }
@@ -910,11 +892,9 @@ mod tests {
         let expected = encode_string(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(Hoarder::default(), rot13(), vec![0u8; 4]).unwrap();
         let mut out = [0u8; 64];
-        let outcome = chain
-            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
-            .unwrap();
+        let outcome = chain.process(INPUT.as_bytes(), &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let drain = chain.finish(as_uninit_mut(&mut out)).unwrap();
+        let drain = chain.finish(&mut out).unwrap();
         assert_eq!(
             drain,
             DrainProgress::Done {
@@ -931,11 +911,9 @@ mod tests {
         let expected = encode_string(rot13(), INPUT).unwrap();
         let mut chain = Chain::new(rot13(), Hoarder::default(), vec![0u8; 64]).unwrap();
         let mut out = [0u8; 64];
-        let outcome = chain
-            .process(INPUT.as_bytes(), as_uninit_mut(&mut out))
-            .unwrap();
+        let outcome = chain.process(INPUT.as_bytes(), &mut out).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
-        let drain = chain.finish(as_uninit_mut(&mut out)).unwrap();
+        let drain = chain.finish(&mut out).unwrap();
         assert_eq!(
             drain,
             DrainProgress::Done {
@@ -952,22 +930,18 @@ mod tests {
     }
 
     impl DrainCodec for CountingFinisher {
-        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.inner.flush(output)
         }
 
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.finish_calls += 1;
             self.inner.finish(output)
         }
     }
 
     impl Codec for CountingFinisher {
-        fn process(
-            &mut self,
-            input: &[u8],
-            output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             self.inner.process(input, output)
         }
     }
@@ -982,16 +956,14 @@ mod tests {
         .unwrap();
         let mut output = [0u8; 8];
 
-        let outcome = chain
-            .process(INPUT.as_bytes(), as_uninit_mut(&mut output))
-            .unwrap();
+        let outcome = chain.process(INPUT.as_bytes(), &mut output).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
 
         let mut small_output = [0u8; 1];
         let mut outer_finish_calls = 0;
         loop {
             outer_finish_calls += 1;
-            match chain.finish(as_uninit_mut(&mut small_output)).unwrap() {
+            match chain.finish(&mut small_output).unwrap() {
                 DrainProgress::OutputFilled => continue,
                 DrainProgress::Done { .. } => break,
             }
@@ -1012,7 +984,7 @@ mod tests {
     fn process_and_flush_fail_after_finish_is_done() {
         let mut chain = Chain::new(identity(), identity(), vec![0u8; 16]).unwrap();
         let mut output = [0u8; 8];
-        let progress = chain.finish(as_uninit_mut(&mut output)).unwrap();
+        let progress = chain.finish(&mut output).unwrap();
         assert_eq!(progress, DrainProgress::Done { written: 0 });
 
         let after_finish = Error {
@@ -1021,11 +993,8 @@ mod tests {
             consumed: 0,
             written: 0,
         };
-        assert_eq!(
-            chain.process(b"b", as_uninit_mut(&mut output)),
-            Err(after_finish)
-        );
-        assert_eq!(chain.flush(as_uninit_mut(&mut output)), Err(after_finish));
+        assert_eq!(chain.process(b"b", &mut output), Err(after_finish));
+        assert_eq!(chain.flush(&mut output), Err(after_finish));
     }
 
     // ----
@@ -1038,7 +1007,7 @@ mod tests {
         let mut collected = Vec::new();
         loop {
             let mut out = [0u8; 1];
-            match codec.flush(as_uninit_mut(&mut out)).unwrap() {
+            match codec.flush(&mut out).unwrap() {
                 DrainProgress::OutputFilled => collected.push(out[0]),
                 DrainProgress::Done { written } => {
                     collected.extend_from_slice(&out[..written]);
@@ -1126,7 +1095,7 @@ mod tests {
 
         // `first` holds one 'X' for each input byte.
         let mut output = [0u8; 8];
-        let outcome = chain.process(b"ab", as_uninit_mut(&mut output)).unwrap();
+        let outcome = chain.process(b"ab", &mut output).unwrap();
         assert_eq!(outcome, Progress::InputConsumed { written: 0 });
         assert_eq!(flush_one_byte_at_a_time(&mut chain), b"XX");
 
@@ -1142,21 +1111,17 @@ mod tests {
     struct Overclaimer;
 
     impl DrainCodec for Overclaimer {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
 
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
     }
 
     impl Codec for Overclaimer {
-        fn process(
-            &mut self,
-            input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(Progress::OutputFilled {
                 consumed: input.len() + 1,
             })
@@ -1186,11 +1151,11 @@ mod tests {
     struct DrainOverclaimer;
 
     impl DrainCodec for DrainOverclaimer {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
 
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done {
                 written: output.len() + 1,
             })
@@ -1198,11 +1163,7 @@ mod tests {
     }
 
     impl Codec for DrainOverclaimer {
-        fn process(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(Progress::InputConsumed { written: 0 })
         }
     }
@@ -1215,7 +1176,7 @@ mod tests {
         // ever uses it to set `stage_end`.
         let mut chain = Chain::new(DrainOverclaimer, identity(), vec![0u8; 4]).unwrap();
         let mut output = [0u8; 8];
-        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        let error = chain.finish(&mut output).unwrap_err();
         assert_eq!(
             error,
             Error {
@@ -1238,13 +1199,11 @@ mod tests {
         let mut output = [0u8; 8];
 
         let mut chain = Chain::new(FailsWithOverclaim, identity(), vec![0u8; 4]).unwrap();
-        let error = chain
-            .process(b"abc", as_uninit_mut(&mut output))
-            .unwrap_err();
+        let error = chain.process(b"abc", &mut output).unwrap_err();
         assert_eq!(error, violation);
 
         let mut chain = Chain::new(FailsWithOverclaim, identity(), vec![0u8; 4]).unwrap();
-        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        let error = chain.finish(&mut output).unwrap_err();
         assert_eq!(error, violation);
     }
 
@@ -1255,9 +1214,7 @@ mod tests {
         // `first` moves the 3 input bytes to staging. So the chain
         // reports them as consumed, but `second` writes nothing.
         let mut chain = Chain::new(identity(), FailsWithOverclaim, vec![0u8; 4]).unwrap();
-        let error = chain
-            .process(b"abc", as_uninit_mut(&mut output))
-            .unwrap_err();
+        let error = chain.process(b"abc", &mut output).unwrap_err();
         assert_eq!(
             error,
             Error {
@@ -1269,7 +1226,7 @@ mod tests {
         );
 
         let mut chain = Chain::new(identity(), FailsWithOverclaim, vec![0u8; 4]).unwrap();
-        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        let error = chain.finish(&mut output).unwrap_err();
         assert_eq!(
             error,
             Error {
@@ -1292,24 +1249,20 @@ mod tests {
     }
 
     impl DrainCodec for FailsOnce {
-        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.inner.flush(output)
         }
 
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.inner.finish(output)
         }
     }
 
     impl Codec for FailsOnce {
-        fn process(
-            &mut self,
-            input: &[u8],
-            output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             if !self.failed {
                 self.failed = true;
-                copy_to_uninit(&mut output[..1], &input[..1]);
+                output[..1].copy_from_slice(&input[..1]);
                 return Err(Error {
                     kind: crate::ErrorKind::CorruptStream,
                     codec_subcode: 0,
@@ -1350,27 +1303,23 @@ mod tests {
     }
 
     impl DrainCodec for FailsAtByte {
-        fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
 
-        fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
     }
 
     impl Codec for FailsAtByte {
-        fn process(
-            &mut self,
-            input: &[u8],
-            output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             let good = input
                 .iter()
                 .position(|&b| b == self.marker)
                 .unwrap_or(input.len());
             let n = good.min(output.len());
-            copy_to_uninit(&mut output[..n], &input[..n]);
+            output[..n].copy_from_slice(&input[..n]);
             if n == good && n < input.len() {
                 return Err(Error {
                     kind: self.kind,
@@ -1396,10 +1345,10 @@ mod tests {
     }
 
     impl FailsWhileDraining {
-        fn drain(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn drain(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             let left = &self.text[self.emitted..];
             let n = left.len().min(output.len());
-            copy_to_uninit(&mut output[..n], &left[..n]);
+            output[..n].copy_from_slice(&left[..n]);
             self.emitted += n;
             if self.emitted == self.text.len() {
                 return Err(Error {
@@ -1414,21 +1363,17 @@ mod tests {
     }
 
     impl DrainCodec for FailsWhileDraining {
-        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.drain(output)
         }
 
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.drain(output)
         }
     }
 
     impl Codec for FailsWhileDraining {
-        fn process(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, _input: &[u8], _output: &mut [u8]) -> Result<Progress, Error> {
             Ok(Progress::InputConsumed { written: 0 })
         }
     }
@@ -1493,7 +1438,7 @@ mod tests {
     #[test]
     fn process_passes_output_of_first_through_before_the_error_of_first() {
         let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), identity(), vec![0u8; 64]).unwrap();
-        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+        let mut sink = OneByteAtATimeSink::new();
         let error = process_until_error(chain, b"abcde!!!!", &mut sink);
         assert_eq!(codec_error_cause(&error), (ErrorKind::CorruptStream, 0));
         assert_eq!(sink.bytes, b"abcde");
@@ -1510,7 +1455,7 @@ mod tests {
                 emitted: 0,
             };
             let chain = Chain::new(first, identity(), vec![0u8; 64]).unwrap();
-            let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+            let mut sink = OneByteAtATimeSink::new();
             let error = drain_until_error(chain, mode, &mut sink);
             assert_eq!(
                 codec_error_cause(&error),
@@ -1531,7 +1476,7 @@ mod tests {
     fn process_reports_the_error_of_first_when_second_fails_on_its_bytes() {
         let second = FailsAtByte::distinct_subcode_at(b'e');
         let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), second, vec![0u8; 64]).unwrap();
-        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+        let mut sink = OneByteAtATimeSink::new();
         let error = process_until_error(chain, b"abcdef!!!!", &mut sink);
         assert_eq!(codec_error_cause(&error), (ErrorKind::CorruptStream, 0));
         assert_eq!(sink.bytes, b"abcd");
@@ -1548,7 +1493,7 @@ mod tests {
             };
             let second = FailsAtByte::distinct_subcode_at(b'4');
             let chain = Chain::new(first, second, vec![0u8; 64]).unwrap();
-            let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+            let mut sink = OneByteAtATimeSink::new();
             let error = drain_until_error(chain, mode, &mut sink);
             assert_eq!(
                 codec_error_cause(&error),
@@ -1570,7 +1515,7 @@ mod tests {
             ..Default::default()
         };
         let chain = Chain::new(FailsAtByte::corrupt_at(b'!'), second, vec![0u8; 64]).unwrap();
-        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+        let mut sink = OneByteAtATimeSink::new();
         let error = process_until_error(chain, b"a!", &mut sink);
         assert_eq!(codec_error_cause(&error), (ErrorKind::CorruptStream, 0));
         assert_eq!(sink.bytes, b"XX");
@@ -1591,7 +1536,7 @@ mod tests {
                 ..Default::default()
             };
             let chain = Chain::new(first, second, vec![0u8; 64]).unwrap();
-            let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+            let mut sink = OneByteAtATimeSink::new();
             let error = drain_until_error(chain, mode, &mut sink);
             assert_eq!(
                 codec_error_cause(&error),
@@ -1617,7 +1562,7 @@ mod tests {
         };
         let first = FailsAtByte::distinct_subcode_at(b'!');
         let chain = Chain::new(first, second, vec![0u8; 64]).unwrap();
-        let mut sink = OneByteAtATimeSink { bytes: Vec::new() };
+        let mut sink = OneByteAtATimeSink::new();
         let error = process_until_error(chain, b"a!", &mut sink);
         assert_eq!(
             codec_error_cause(&error),
@@ -1640,9 +1585,7 @@ mod tests {
         .unwrap();
         let mut output = [0; 8];
 
-        let error = chain
-            .process(b"abc", as_uninit_mut(&mut output))
-            .unwrap_err();
+        let error = chain.process(b"abc", &mut output).unwrap_err();
         assert_eq!(
             error,
             Error {
@@ -1657,7 +1600,7 @@ mod tests {
         // The chain latched the error. It does not offer `bc` to
         // `second` again.
         assert_eq!(
-            chain.process(b"", as_uninit_mut(&mut output)),
+            chain.process(b"", &mut output),
             Err(Error {
                 kind: crate::ErrorKind::CorruptStream,
                 codec_subcode: 0,
@@ -1691,20 +1634,20 @@ mod tests {
 
         let first = FailsAtByte::corrupt_at(b'!');
         let mut chain = Chain::new(first, identity(), vec![0; 8]).unwrap();
-        let _ = chain.process(b"ab!", as_uninit_mut(&mut output));
+        let _ = chain.process(b"ab!", &mut output);
         assert_eq!(chain.failures(), (Some(from_first), None));
 
         let second = FailsAtByte::distinct_subcode_at(b'!');
         let mut chain = Chain::new(identity(), second, vec![0; 8]).unwrap();
-        let _ = chain.process(b"ab!", as_uninit_mut(&mut output));
+        let _ = chain.process(b"ab!", &mut output);
         assert_eq!(chain.failures(), (None, Some(from_second)));
 
         let first = FailsAtByte::corrupt_at(b'!');
         let second = FailsAtByte::distinct_subcode_at(b'b');
         let mut chain = Chain::new(first, second, vec![0; 8]).unwrap();
-        let _ = chain.process(b"abc!", as_uninit_mut(&mut output));
+        let _ = chain.process(b"abc!", &mut output);
         assert_eq!(chain.failures(), (Some(from_first), Some(from_second)));
-        let _ = chain.process(b"abc!", as_uninit_mut(&mut output));
+        let _ = chain.process(b"abc!", &mut output);
         assert_eq!(chain.failures(), (Some(from_first), Some(from_second)));
     }
 
@@ -1866,23 +1809,19 @@ mod tests {
     }
 
     impl DrainCodec for FailsOnFirstCall {
-        fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.enter()?;
             self.inner.flush(output)
         }
 
-        fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
             self.enter()?;
             self.inner.finish(output)
         }
     }
 
     impl Codec for FailsOnFirstCall {
-        fn process(
-            &mut self,
-            input: &[u8],
-            output: &mut [MaybeUninit<u8>],
-        ) -> Result<Progress, Error> {
+        fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
             self.enter()?;
             self.inner.process(input, output)
         }
@@ -1904,17 +1843,12 @@ mod tests {
         let mut chain = Chain::new(identity(), FailsOnFirstCall::default(), vec![0u8; 16]).unwrap();
         let mut output = [0u8; 8];
 
-        let error = chain
-            .process(b"abc", as_uninit_mut(&mut output))
-            .unwrap_err();
+        let error = chain.process(b"abc", &mut output).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
 
         // `second` did not take the 3 bytes in `staging`. A chain
         // without the latch offers them to `second` again.
-        assert_eq!(
-            chain.process(b"", as_uninit_mut(&mut output)),
-            Err(repeated_error())
-        );
+        assert_eq!(chain.process(b"", &mut output), Err(repeated_error()));
         let (_first, second, _staging) = chain.into_parts();
         assert_eq!(second.calls, 1, "second must not run after its error");
     }
@@ -1924,13 +1858,10 @@ mod tests {
         let mut chain = Chain::new(identity(), FailsOnFirstCall::default(), vec![0u8; 16]).unwrap();
         let mut output = [0u8; 8];
 
-        let error = chain.flush(as_uninit_mut(&mut output)).unwrap_err();
+        let error = chain.flush(&mut output).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
 
-        assert_eq!(
-            chain.flush(as_uninit_mut(&mut output)),
-            Err(repeated_error())
-        );
+        assert_eq!(chain.flush(&mut output), Err(repeated_error()));
         let (_first, second, _staging) = chain.into_parts();
         assert_eq!(second.calls, 1, "second must not run after its error");
     }
@@ -1940,13 +1871,10 @@ mod tests {
         let mut chain = Chain::new(identity(), FailsOnFirstCall::default(), vec![0u8; 16]).unwrap();
         let mut output = [0u8; 8];
 
-        let error = chain.finish(as_uninit_mut(&mut output)).unwrap_err();
+        let error = chain.finish(&mut output).unwrap_err();
         assert_eq!(error.kind, ErrorKind::CorruptStream);
 
-        assert_eq!(
-            chain.finish(as_uninit_mut(&mut output)),
-            Err(repeated_error())
-        );
+        assert_eq!(chain.finish(&mut output), Err(repeated_error()));
         let (_first, second, _staging) = chain.into_parts();
         assert_eq!(second.calls, 1, "second must not run after its error");
     }

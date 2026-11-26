@@ -7,13 +7,10 @@
 //!
 //! Behind the `base64` feature flag.
 
-use core::mem::MaybeUninit;
-
 use base64::engine::general_purpose::{GeneralPurpose, STANDARD};
 use base64::engine::Engine;
 
 use super::base64_shared::{self, PendingInput, PendingOutput, ENCODED_GROUP, GROUP};
-use crate::uninit::zero_init_mut;
 use crate::{Codec, DrainCodec, DrainProgress, Error, ErrorKind, Progress};
 
 /// Base64 encoder, parameterized over the [`Engine`] (alphabet and
@@ -67,7 +64,7 @@ impl<E: Engine> Base64Enc<E> {
 impl<E: Engine> DrainCodec for Base64Enc<E> {
     /// Write the pending output. A partial group of input stays
     /// pending: only `finish` can convert it.
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         let written = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
             debug_assert_eq!(written, output.len());
@@ -76,7 +73,7 @@ impl<E: Engine> DrainCodec for Base64Enc<E> {
         Ok(DrainProgress::Done { written })
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         let mut out_pos = self.pending_output.drain(output);
         if !self.pending_output.is_empty() {
             debug_assert_eq!(out_pos, output.len());
@@ -99,7 +96,7 @@ impl<E: Engine> DrainCodec for Base64Enc<E> {
 }
 
 impl<E: Engine> Codec for Base64Enc<E> {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         let mut in_pos = 0;
 
         //
@@ -141,11 +138,7 @@ impl<E: Engine> Codec for Base64Enc<E> {
         if groups > 0 {
             let in_bytes = groups * GROUP;
             let out_bytes = groups * ENCODED_GROUP;
-            // `encode_slice` requires an already-initialized `&mut [u8]`
-            // and fully overwrites it before returning; block-init once
-            // to bridge to that foreign API rather than reading through
-            // `output`'s `MaybeUninit<u8>` elements one at a time.
-            let dst = zero_init_mut(&mut output[out_pos..out_pos + out_bytes]);
+            let dst = &mut output[out_pos..out_pos + out_bytes];
             out_pos += self
                 .engine
                 .encode_slice(&input[in_pos..in_pos + in_bytes], dst)
@@ -194,7 +187,6 @@ pub fn base64_enc() -> Base64Enc {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
-    use crate::uninit::as_uninit_mut;
 
     use super::base64_enc;
     use crate::{Codec, DrainCodec, DrainProgress, Progress};
@@ -214,10 +206,7 @@ mod tests {
         let mut in_pos = 0;
         while in_pos < input.len() {
             let mut out = [0u8; 1];
-            match enc
-                .process(&input[in_pos..], as_uninit_mut(&mut out))
-                .unwrap()
-            {
+            match enc.process(&input[in_pos..], &mut out).unwrap() {
                 Progress::InputConsumed { written } => {
                     collected.extend_from_slice(&out[..written]);
                     in_pos = input.len();
@@ -230,7 +219,7 @@ mod tests {
         }
         loop {
             let mut out = [0u8; 1];
-            match enc.finish(as_uninit_mut(&mut out)).unwrap() {
+            match enc.finish(&mut out).unwrap() {
                 DrainProgress::OutputFilled => collected.extend_from_slice(&out),
                 DrainProgress::Done { written } => {
                     collected.extend_from_slice(&out[..written]);
@@ -249,13 +238,13 @@ mod tests {
         let mut out = [0u8; 2];
         // The call consumes all input and fills all output. The
         // `Progress` contract allows either variant, so ignore it.
-        enc.process(b"abc", as_uninit_mut(&mut out[..1])).unwrap();
+        enc.process(b"abc", &mut out[..1]).unwrap();
         assert_eq!(out[0], b'Y');
 
-        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        let drained = enc.flush(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::OutputFilled);
         assert_eq!(&out, b"WJ");
-        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        let drained = enc.flush(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 1 });
         assert_eq!(&out[..1], b"j");
     }
@@ -266,13 +255,13 @@ mod tests {
         // the encoding needs padding.
         let mut enc = base64_enc();
         let mut out = [0u8; 8];
-        let progress = enc.process(b"abcd", as_uninit_mut(&mut out)).unwrap();
+        let progress = enc.process(b"abcd", &mut out).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 4 });
         assert_eq!(&out[..4], b"YWJj");
 
-        let drained = enc.flush(as_uninit_mut(&mut out)).unwrap();
+        let drained = enc.flush(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 0 });
-        let drained = enc.finish(as_uninit_mut(&mut out)).unwrap();
+        let drained = enc.finish(&mut out).unwrap();
         assert_eq!(drained, DrainProgress::Done { written: 4 });
         assert_eq!(&out[..4], b"ZA==");
     }

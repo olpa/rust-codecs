@@ -1,7 +1,5 @@
 //! The vocabulary and contracts for codecs and I/O backends.
 
-use core::mem::MaybeUninit;
-
 // ----
 // I/O backend contracts
 // ----
@@ -25,12 +23,9 @@ pub trait Source {
     /// This method returns no error. It only updates accounting. Put any
     /// fallible work in `chunk`.
     ///
-    /// The caller must give a correct `amount`. The implementation
-    /// trusts it and cannot check most errors.
-    ///
-    /// One error is visible: an `amount` larger than the chunk. The
-    /// sources in this crate check it with `debug_assert!`. They also
-    /// clamp the amount to the chunk length.
+    /// If `amount` is larger than the chunk, the sources in this crate
+    /// fail a `debug_assert!`. In release builds, they clamp the amount
+    /// to the chunk length.
     ///
     /// The exception is the `BufReadSource` types of `std_io` and
     /// `embedded_io`. They pass `consume` to the wrapped reader and
@@ -53,21 +48,16 @@ pub trait Sink {
     /// A caller can call this function again before it commits bytes.
     /// Then the function can return the same space again. The caller
     /// can then write over the bytes that it did not commit.
-    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error>;
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error>;
 
     /// Commit the first `amount` bytes of the space that `spare` returned.
     ///
     /// This method returns an error on failure. Unlike `Source::consume`,
     /// it can do I/O.
     ///
-    /// The caller must give a correct `amount`. It must initialize each
-    /// byte that it commits. The implementation trusts the caller. It
-    /// cannot check the initialization or most other errors.
-    ///
-    /// One error is visible: an `amount` larger than the space that
-    /// `spare` returned. The sinks in this crate check it with
-    /// `debug_assert!`. They also clamp the amount to the length of that
-    /// space.
+    /// If `amount` is larger than the space that `spare` returned, the
+    /// sinks in this crate fail a `debug_assert!`. In release builds,
+    /// they clamp the amount to the length of that space.
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error>;
 }
 
@@ -87,7 +77,7 @@ pub trait DrainCodec {
     /// returns [`DrainProgress::OutputFilled`]. Call `flush` again until
     /// it returns [`DrainProgress::Done`]. This is a recommendation, not a
     /// contract.
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>;
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error>;
 
     /// Tell the codec that no more input will come. The codec flushes
     /// any buffered state. If the format has a trailer or a checksum,
@@ -100,7 +90,7 @@ pub trait DrainCodec {
     /// all pending output, `finish` returns [`DrainProgress::OutputFilled`]
     /// instead of [`DrainProgress::Done`]. Call `finish` repeatedly until it
     /// returns [`DrainProgress::Done`].
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error>;
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error>;
 }
 
 /// A stateful transform for a complete chunked stream.
@@ -134,7 +124,7 @@ pub trait Codec: DrainCodec {
     ///   process input, or
     /// - a codec that has closed its format, for example by writing a
     ///   final checksum, may return `Err`.
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error>;
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error>;
 }
 
 /// A stateful transform that can recognize the logical end of its input
@@ -171,7 +161,7 @@ pub trait BoundaryAwareCodec: DrainCodec {
     fn process_bounded(
         &mut self,
         input: &[u8],
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error>;
 }
 
@@ -179,7 +169,7 @@ impl<C: Codec> BoundaryAwareCodec for C {
     fn process_bounded(
         &mut self,
         input: &[u8],
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error> {
         Codec::process(self, input, output).map(Into::into)
     }
@@ -324,17 +314,17 @@ pub struct TransferCounts {
 // Lets a `&mut C` stand in anywhere a `Codec` is expected, so the
 // caller keeps the codec.
 impl<C: DrainCodec + ?Sized> DrainCodec for &mut C {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         (**self).flush(output)
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         (**self).finish(output)
     }
 }
 
 impl<C: Codec + ?Sized> Codec for &mut C {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         (**self).process(input, output)
     }
 }
@@ -346,11 +336,11 @@ use alloc::boxed::Box;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         (**self).flush(output)
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         (**self).finish(output)
     }
 }
@@ -358,7 +348,7 @@ impl<C: DrainCodec + ?Sized> DrainCodec for Box<C> {
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 impl<C: Codec + ?Sized> Codec for Box<C> {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         (**self).process(input, output)
     }
 }
@@ -379,7 +369,7 @@ macro_rules! forward_boundary_aware_for_dyn {
             fn process_bounded(
                 &mut self,
                 input: &[u8],
-                output: &mut [MaybeUninit<u8>],
+                output: &mut [u8],
             ) -> Result<BoundaryAwareProgress, Error> {
                 (**self).process_bounded(input, output)
             }
@@ -391,7 +381,7 @@ macro_rules! forward_boundary_aware_for_dyn {
             fn process_bounded(
                 &mut self,
                 input: &[u8],
-                output: &mut [MaybeUninit<u8>],
+                output: &mut [u8],
             ) -> Result<BoundaryAwareProgress, Error> {
                 (**self).process_bounded(input, output)
             }

@@ -12,7 +12,6 @@ to write. Then `process` does the work, and `flush` and `finish` are no-ops.
 `core/src/codecs/rot13.rs` is essentially that:
 
 ```rust
-use core::mem::MaybeUninit;
 use rust_codecs_core::{Codec, DrainCodec, DrainProgress, Error, Progress};
 
 fn rot13_byte(b: u8) -> u8 {
@@ -27,25 +26,24 @@ fn rot13_byte(b: u8) -> u8 {
 pub struct Rot13;
 
 impl Codec for Rot13 {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
-        let n = input.len().min(output.len());
-        for (out, &inp) in output[..n].iter_mut().zip(&input[..n]) {
-            out.write(rot13_byte(inp));
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
+        for (out, &inp) in output.iter_mut().zip(input) {
+            *out = rot13_byte(inp);
         }
-        if n == input.len() {
-            Ok(Progress::InputConsumed { written: n })
+        if input.len() <= output.len() {
+            Ok(Progress::InputConsumed { written: input.len() })
         } else {
-            Ok(Progress::OutputFilled { consumed: n })
+            Ok(Progress::OutputFilled { consumed: output.len() })
         }
     }
 }
 
 impl DrainCodec for Rot13 {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 
-    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 }
@@ -57,13 +55,9 @@ There is one rule every `process` call must obey. Each call either
 consumes all of `input`, or fills all of `output`.
 
 `Progress` is an enum with exactly those two variants. No other
-outcome can be reported. `Rot13::process` above shows the pattern:
-compute `n = input.len().min(output.len())`, then report which side
-ran out.
-
-If the codec consumes all of `input` and fills all of `output`, both
-`InputConsumed` and `OutputFilled` are correct. A driver must process
-the two variants in the same way.
+outcome can be reported. If the codec consumes all of `input` and
+fills all of `output`, both `InputConsumed` and `OutputFilled` are
+correct. A driver must process the two variants in the same way.
 
 Why this matters: it avoids a class of bugs. Earlier, `Progress` was
 more relaxed. It had two fields, `consumed` and `written`. The driver
@@ -174,7 +168,7 @@ impl BoundaryAwareCodec for &mut MyBoundaryAwareCodec {
     fn process_bounded(
         &mut self,
         input: &[u8],
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error> {
         (**self).process_bounded(input, output)
     }
@@ -195,18 +189,3 @@ bytes on and only then reports the error.
 To help with troubleshooting, you can set `codec_subcode` to identify
 the cause of the failure. A generic driver does not interpret the
 subcode and only prints it.
-
-## Helpers for the output buffer
-
-The output buffer is `&mut [MaybeUninit<u8>]`, not `&mut [u8]`. The
-module `rust_codecs_core::uninit` has two helpers for it:
-
-- `copy_to_uninit(dst, src)` copies bytes into the buffer. Use it when
-  a codec copies input to output without a change.
-- `zero_init_mut(dst)` fills the buffer with zeros and returns it as
-  `&mut [u8]`. Use it to pass the buffer to a library that accepts
-  only `&mut [u8]`. The base64 codecs use it for the `base64` crate.
-
-This crate supports Rust versions older than 1.93. So it cannot use
-the standard methods `write_copy_of_slice` and `assume_init_mut`,
-which are stable only since Rust 1.93. The helpers replace them.

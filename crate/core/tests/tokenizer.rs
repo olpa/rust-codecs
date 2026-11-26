@@ -16,21 +16,19 @@ use core::convert::Infallible;
 
 use rust_codecs_core::sources_and_sinks::slice::SliceSource;
 use rust_codecs_core::sources_and_sinks::vec::VecSink;
-use rust_codecs_core::uninit::copy_to_uninit;
 use rust_codecs_core::{
     stream_to_stream, BoundaryAwareCodec, BoundaryAwareProgress, DrainCodec, DrainProgress,
     DriveError, Error, Source,
 };
-use std::mem::MaybeUninit;
 
 struct QuoteEnd;
 
 impl DrainCodec for QuoteEnd {
-    fn flush(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 
-    fn finish(&mut self, _output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, _output: &mut [u8]) -> Result<DrainProgress, Error> {
         Ok(DrainProgress::Done { written: 0 })
     }
 }
@@ -39,12 +37,12 @@ impl BoundaryAwareCodec for QuoteEnd {
     fn process_bounded(
         &mut self,
         input: &[u8],
-        output: &mut [MaybeUninit<u8>],
+        output: &mut [u8],
     ) -> Result<BoundaryAwareProgress, Error> {
         let quote_pos = input.iter().position(|&b| b == b'"');
         let available = quote_pos.unwrap_or(input.len());
         let n = available.min(output.len());
-        copy_to_uninit(&mut output[..n], &input[..n]);
+        output[..n].copy_from_slice(&input[..n]);
         if n < available {
             // Output ran out before the quote, or before the end of input.
             Ok(BoundaryAwareProgress::OutputFilled { consumed: n })

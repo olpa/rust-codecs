@@ -1,7 +1,5 @@
 use core::convert::Infallible;
-use core::mem::MaybeUninit;
 
-use crate::uninit::as_uninit_mut;
 use crate::{Sink, Source};
 
 /// A borrowed `&[u8]` used directly as an input stream.
@@ -54,10 +52,10 @@ impl<'a> SliceSink<'a> {
 
 impl Sink for SliceSink<'_> {
     type Error = Infallible;
-    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
         // Not `self.bytes.get_mut(self.pos..)`: that returns `Some(&mut [])`
         // when `pos == len`, but a full sink must report `None`.
-        Ok((self.pos < self.bytes.len()).then_some(as_uninit_mut(&mut self.bytes[self.pos..])))
+        Ok((self.pos < self.bytes.len()).then_some(&mut self.bytes[self.pos..]))
     }
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
         debug_assert!(

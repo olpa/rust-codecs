@@ -1,7 +1,5 @@
 //! Adapter from [`BoundaryAwareCodec`] to [`Codec`].
 
-use core::mem::MaybeUninit;
-
 use crate::{
     BoundaryAwareCodec, BoundaryAwareProgress, Codec, DrainCodec, DrainProgress, Error, ErrorKind,
     Progress,
@@ -51,17 +49,17 @@ impl<C> BoundaryAwareCodecAsCodec<C> {
 }
 
 impl<C: DrainCodec> DrainCodec for BoundaryAwareCodecAsCodec<C> {
-    fn flush(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         self.inner.flush(output)
     }
 
-    fn finish(&mut self, output: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+    fn finish(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
         self.inner.finish(output)
     }
 }
 
 impl<C: BoundaryAwareCodec> Codec for BoundaryAwareCodecAsCodec<C> {
-    fn process(&mut self, input: &[u8], output: &mut [MaybeUninit<u8>]) -> Result<Progress, Error> {
+    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         if self.boundary_seen {
             return Err(unexpected_boundary(0, 0));
         }
@@ -96,7 +94,6 @@ pub const SUBCODE_UNEXPECTED_BOUNDARY: usize = 0x200;
 
 #[cfg(test)]
 mod tests {
-    use crate::uninit::as_uninit_mut;
 
     use super::*;
 
@@ -107,10 +104,10 @@ mod tests {
     }
 
     impl DrainCodec for AlwaysBoundary {
-        fn flush(&mut self, _: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn flush(&mut self, _: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
-        fn finish(&mut self, _: &mut [MaybeUninit<u8>]) -> Result<DrainProgress, Error> {
+        fn finish(&mut self, _: &mut [u8]) -> Result<DrainProgress, Error> {
             Ok(DrainProgress::Done { written: 0 })
         }
     }
@@ -119,7 +116,7 @@ mod tests {
         fn process_bounded(
             &mut self,
             _input: &[u8],
-            _output: &mut [MaybeUninit<u8>],
+            _output: &mut [u8],
         ) -> Result<BoundaryAwareProgress, Error> {
             self.calls += 1;
             Ok(BoundaryAwareProgress::Boundary {
@@ -133,7 +130,7 @@ mod tests {
     fn boundary_becomes_contract_violation() {
         let mut codec = BoundaryAwareCodecAsCodec::new(AlwaysBoundary::default());
         let mut out = [0u8; 8];
-        let err = codec.process(b"x", as_uninit_mut(&mut out)).unwrap_err();
+        let err = codec.process(b"x", &mut out).unwrap_err();
         assert_eq!(err.kind, ErrorKind::ContractViolation);
         assert_eq!(err.codec_subcode, SUBCODE_UNEXPECTED_BOUNDARY);
         assert_eq!(err.consumed, 1);
@@ -144,8 +141,8 @@ mod tests {
     fn process_after_boundary_does_not_call_the_inner_codec() {
         let mut codec = BoundaryAwareCodecAsCodec::new(AlwaysBoundary::default());
         let mut out = [0u8; 8];
-        codec.process(b"x", as_uninit_mut(&mut out)).unwrap_err();
-        let err = codec.process(b"y", as_uninit_mut(&mut out)).unwrap_err();
+        codec.process(b"x", &mut out).unwrap_err();
+        let err = codec.process(b"y", &mut out).unwrap_err();
         assert_eq!(err, unexpected_boundary(0, 0));
         assert_eq!(codec.get_ref().calls, 1);
     }
@@ -155,7 +152,7 @@ mod tests {
         use crate::codecs::identity::identity;
         let mut codec = BoundaryAwareCodecAsCodec::new(identity());
         let mut out = [0u8; 8];
-        let progress = codec.process(b"hello", as_uninit_mut(&mut out)).unwrap();
+        let progress = codec.process(b"hello", &mut out).unwrap();
         assert_eq!(progress, Progress::InputConsumed { written: 5 });
         assert_eq!(&out[..5], b"hello");
     }

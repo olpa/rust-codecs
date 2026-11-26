@@ -1,6 +1,3 @@
-use core::mem::MaybeUninit;
-
-use crate::uninit::as_uninit_mut;
 use crate::{EmptyBufferError, Sink};
 
 /// A backend's "write this whole buffer out", already retrying
@@ -72,10 +69,10 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> ScratchSink<W, S> {
 impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
     type Error = W::Error;
 
-    fn spare(&mut self) -> Result<Option<&mut [MaybeUninit<u8>]>, Self::Error> {
+    fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
         let buf = self.buffer.as_mut();
         self.offered = buf.len();
-        Ok(Some(as_uninit_mut(buf)))
+        Ok(Some(buf))
     }
 
     fn commit(&mut self, amount: usize) -> Result<(), Self::Error> {
@@ -95,7 +92,6 @@ impl<W: RetryingWrite, S: AsMut<[u8]>> Sink for ScratchSink<W, S> {
 #[cfg(test)]
 mod tests {
     use super::{RetryingWrite, ScratchSink};
-    use crate::uninit::copy_to_uninit;
     use crate::Sink;
     use core::convert::Infallible;
 
@@ -137,7 +133,7 @@ mod tests {
     fn commit_writes_only_the_committed_prefix_through() {
         let mut output = ScratchSink::new(RecordingWriter::default(), [0u8; 8]).unwrap();
         let spare = output.spare().unwrap().unwrap();
-        copy_to_uninit(&mut spare[..5], b"abcde");
+        spare[..5].copy_from_slice(b"abcde");
         output.commit(3).unwrap();
         let inner = output.get_ref();
         assert_eq!(&inner.bytes[..inner.written], b"abc");
