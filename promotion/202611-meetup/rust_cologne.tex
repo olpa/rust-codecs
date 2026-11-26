@@ -7,12 +7,19 @@
 \usepackage{fontspec}
 \usepackage{tikz}
 \usepackage{fancyvrb}
+\usepackage{qrcode}
 \setmonofont{DejaVu Sans Mono}[Scale=0.85]
 \newcommand{\hl}[1]{\colorbox{yellow}{#1}}
 \newcommand{\surprise}[1]{\colorbox{orange!25}{#1}}
 \newcommand{\notetag}[1]{~\colorbox{orange!25}{\small\textit{#1}}}
 \newcommand{\todo}[1]{{\color{red}\emph{#1}}}
 \newcommand{\vhi}[1]{\mbox{\colorbox{yellow}{#1}}}
+% QR code as a clickable link. xdvipdfmx drops \href links over rules-only
+% content (the QR code), so place the link annotation explicitly.
+\newsavebox{\qrbox}
+\newcommand{\qrlink}[2][3.5cm]{\sbox{\qrbox}{\qrcode[nolink,height=#1]{#2}}%
+  \leavevmode\special{pdf:ann width \the\wd\qrbox\space height \the\ht\qrbox\space depth \the\dp\qrbox\space
+  <</Type/Annot/Subtype/Link/Border[0 0 0]/A<</S/URI/URI(#2)>>>>}\usebox{\qrbox}}
 
 \title{Rust codecs: streaming byte transformations}
 \author{Oleg Parashchenko}
@@ -586,6 +593,32 @@ Contributions are welcome:
 
 \bigskip
 Overall: \textbf{a potentially foundational interface}
+\end{frame}
+
+\begin{frame}[fragile]{Thank you! Questions?}
+\begin{columns}[T]
+\column{0.62\textwidth}
+\textbf{Oleg Parashchenko}
+
+\smallskip
+\url{https://uucode.com/}\\
+\url{https://github.com/olpa/}\\
+\url{https://www.linkedin.com/in/olepar/}
+
+\bigskip
+\begin{Verbatim}[fontsize=\footnotesize,frame=single]
+$ cargo add --git \
+  https://github.com/olpa/rust-codecs \
+  rust-codecs-core --features \
+  rot13,base64,json,embedded-io,compcol
+\end{Verbatim}
+\column{0.34\textwidth}
+\centering
+\qrlink[4.7cm]{https://github.com/olpa/rust-codecs}
+
+\smallskip
+{\small\href{https://github.com/olpa/rust-codecs}{github.com/olpa/rust-codecs}}
+\end{columns}
 \end{frame}
 
 \end{document}
