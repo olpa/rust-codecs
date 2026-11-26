@@ -507,6 +507,44 @@ Future:
 
 \section{Conclusion}
 \frame{\sectionpage}
+\begin{frame}[fragile]{Quick start: a rot13 filter}
+\begin{columns}[T]
+\column{0.49\textwidth}
+\begin{Verbatim}[fontsize=\scriptsize,frame=single,commandchars=\\\{\}]
+$ cargo new sample_rot13
+$ cd sample_rot13
+$ cargo add --git \textbackslash{}
+  \vhi{https://github.com/olpa/rust-codecs} \textbackslash{}
+  rust-codecs-core --features rot13
+
+$ cargo doc
+$ open target/doc/rust_codecs_core/index.html
+\end{Verbatim}
+\column{0.49\textwidth}
+\begin{Verbatim}[fontsize=\scriptsize,frame=single,commandchars=\\\{\}]
+$ cat > src/main.rs <<'EOF'
+use rust_codecs_core::\{
+    rot13::rot13,
+    sources_and_sinks::std_io::CodecWriter,
+\};
+use std::io;
+
+fn main()
+    -> Result<(), Box<dyn std::error::Error>> \{
+    let mut out = CodecWriter::new(
+        io::stdout(), rot13(), [0u8; 4096])?;
+    io::copy(&mut io::stdin(), &mut out)?;
+    out.finish()?;
+    Ok(())
+\}
+EOF
+
+$ echo 'Hello, Cologne!' | cargo run -q
+Uryyb, Pbybtar!
+\end{Verbatim}
+\end{columns}
+\end{frame}
+
 \begin{frame}{Conclusions, take-off}
 Technical implementation:
 \begin{itemize}
