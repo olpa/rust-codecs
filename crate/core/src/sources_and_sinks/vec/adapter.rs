@@ -55,8 +55,13 @@ impl Source for VecSource {
 
 /// `Vec<u8>` auto-growing output stream.
 ///
-/// You can limit the size of the window that `spare` returns. Otherwise,
-/// the window is all spare capacity, and the growth of `Vec` sets its size.
+/// You can set a maximum window. Then the window that `spare` returns is
+/// `max_window_len` bytes or less. If you do not set a maximum window,
+/// the window is all spare capacity of the vec.
+///
+/// The sink writes zeros to new memory before it lends this memory.
+/// Without a maximum window, one `spare` call writes zeros to all spare
+/// capacity, and this can be a large block.
 pub struct VecSink {
     // - `inner[..pos]` is the output.
     // - `inner[pos..len]` is initialized but not committed: space that
@@ -125,19 +130,21 @@ impl Default for VecSink {
 
 impl Sink for VecSink {
     type Error = Infallible;
-    // The sink writes zeros into new capacity of the vec before it lends
-    // the capacity to a codec. Each byte is zeroed only once. Space that
-    // the codec does not commit stays initialized, and the next `spare`
-    // lends it again without zeroing.
+    // When all lent space is committed, the sink zeroes the next part of
+    // the spare capacity and lends it. Space that the codec does not commit
+    // stays initialized, and the next `spare` lends it again without zeroing.
     fn spare(&mut self) -> Result<Option<&mut [u8]>, Self::Error> {
+        // All zeroed bytes are committed, so there is no space to lend
+        // again. The vec can still have spare capacity.
         if self.pos == self.inner.len() {
+            // No-op while spare capacity exists. Otherwise, despite
+            // `reserve(1)`, the vec grows by its amortized step (the
+            // capacity roughly doubles).
+            self.inner.reserve(1);
+            let capacity = self.inner.capacity();
             let new_len = match self.max_window_len {
-                Some(n) => self.inner.len() + n.get(),
-                None => {
-                    // Not 1 byte: `Vec` grows by its amortized step (roughly doubles).
-                    self.inner.reserve(1);
-                    self.inner.capacity()
-                }
+                Some(n) => capacity.min(self.inner.len().saturating_add(n.get())),
+                None => capacity,
             };
             self.inner.resize(new_len, 0);
         }
@@ -206,6 +213,18 @@ mod tests {
         assert_eq!(spare.as_ptr(), first_ptr.wrapping_add(1));
         assert_eq!(spare.len(), first_len - 1);
         assert_eq!(spare[0], b'b');
+    }
+
+    #[test]
+    fn sink_huge_max_window_is_limited_by_capacity() {
+        let mut sink = VecSink::with_max_window(Vec::new(), NonZeroUsize::MAX);
+        for _ in 0..2 {
+            let spare = sink.spare().unwrap().unwrap();
+            let len = spare.len();
+            // The window ends at the capacity: no overflow, no huge allocation.
+            assert_eq!(sink.pos + len, sink.inner.capacity());
+            sink.commit(len).unwrap();
+        }
     }
 
     #[test]
