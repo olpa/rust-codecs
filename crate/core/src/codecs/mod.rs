@@ -24,5 +24,9 @@ pub mod json_enc;
 #[cfg_attr(docsrs, doc(cfg(feature = "compcol")))]
 pub mod compcol;
 
+#[cfg(feature = "encoding_rs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encoding_rs")))]
+pub mod encoding_rs;
+
 #[cfg(test)]
 pub(crate) mod test_support;

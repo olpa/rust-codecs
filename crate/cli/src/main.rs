@@ -17,6 +17,9 @@ use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
 use rust_codecs_core::compcol::{
     CompcolDecoderAsBoundaryAwareCodec, CompcolEncoderAsBoundaryAwareCodec, FlushMode,
 };
+use rust_codecs_core::encoding_rs::{
+    EncodingRsDecoderAsCodec, EncodingRsEncoderAsCodec, ErrorMode,
+};
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
 };
@@ -188,12 +191,115 @@ fn compcol_codec_names() -> Vec<String> {
     names
 }
 
-/// The own codec names, then the compcol codec names.
+/// Prefix of all encoding_rs codec names: `encoding:shift_jis-dec`.
+const ENCODING_PREFIX: &str = "encoding:";
+/// Suffix that selects an encoding_rs encoder: `encoding:shift_jis-enc`.
+const ENCODING_ENC: &str = "-enc";
+/// Suffix that selects an encoding_rs decoder: `encoding:shift_jis-dec`.
+const ENCODING_DEC: &str = "-dec";
+
+/// All encodings of encoding_rs. encoding_rs has no such list, so the
+/// list is here. `--list` uses it.
+const ENCODINGS: &[&encoding_rs::Encoding] = &[
+    encoding_rs::BIG5,
+    encoding_rs::EUC_JP,
+    encoding_rs::EUC_KR,
+    encoding_rs::GB18030,
+    encoding_rs::GBK,
+    encoding_rs::IBM866,
+    encoding_rs::ISO_2022_JP,
+    encoding_rs::ISO_8859_2,
+    encoding_rs::ISO_8859_3,
+    encoding_rs::ISO_8859_4,
+    encoding_rs::ISO_8859_5,
+    encoding_rs::ISO_8859_6,
+    encoding_rs::ISO_8859_7,
+    encoding_rs::ISO_8859_8,
+    encoding_rs::ISO_8859_8_I,
+    encoding_rs::ISO_8859_10,
+    encoding_rs::ISO_8859_13,
+    encoding_rs::ISO_8859_14,
+    encoding_rs::ISO_8859_15,
+    encoding_rs::ISO_8859_16,
+    encoding_rs::KOI8_R,
+    encoding_rs::KOI8_U,
+    encoding_rs::MACINTOSH,
+    encoding_rs::REPLACEMENT,
+    encoding_rs::SHIFT_JIS,
+    encoding_rs::UTF_16BE,
+    encoding_rs::UTF_16LE,
+    encoding_rs::UTF_8,
+    encoding_rs::WINDOWS_874,
+    encoding_rs::WINDOWS_1250,
+    encoding_rs::WINDOWS_1251,
+    encoding_rs::WINDOWS_1252,
+    encoding_rs::WINDOWS_1253,
+    encoding_rs::WINDOWS_1254,
+    encoding_rs::WINDOWS_1255,
+    encoding_rs::WINDOWS_1256,
+    encoding_rs::WINDOWS_1257,
+    encoding_rs::WINDOWS_1258,
+    encoding_rs::X_MAC_CYRILLIC,
+    encoding_rs::X_USER_DEFINED,
+];
+
+/// Build a codec from an encoding label, named `encoding:<label>-enc`
+/// or `encoding:<label>-dec`. `None` if the name does not have this
+/// form, or encoding_rs does not know the label.
+///
+/// The label is any WHATWG label, for example `latin1` or `sjis`. Case
+/// does not matter.
+///
+/// The decoder removes a BOM of its own encoding. Both directions
+/// replace what they cannot convert: the decoder writes U+FFFD, the
+/// encoder writes an HTML numeric character reference.
+///
+/// There is no encoder for an encoding that encoding_rs cannot write
+/// (UTF-16LE, UTF-16BE, replacement). For these, `new_encoder` gives a
+/// UTF-8 encoder, so the name is rejected.
+fn make_encoding_codec(name: &str) -> Option<Box<dyn Codec>> {
+    let name = name.strip_prefix(ENCODING_PREFIX)?;
+    if let Some(label) = name.strip_suffix(ENCODING_ENC) {
+        let encoding = encoding_rs::Encoding::for_label(label.as_bytes())?;
+        if encoding.output_encoding() != encoding {
+            return None;
+        }
+        return Some(Box::new(EncodingRsEncoderAsCodec::new(
+            encoding.new_encoder(),
+            ErrorMode::Replace,
+        )));
+    }
+    if let Some(label) = name.strip_suffix(ENCODING_DEC) {
+        let encoding = encoding_rs::Encoding::for_label(label.as_bytes())?;
+        return Some(Box::new(EncodingRsDecoderAsCodec::new(
+            encoding.new_decoder_with_bom_removal(),
+            ErrorMode::Replace,
+        )));
+    }
+    None
+}
+
+/// Names of all encoding_rs codecs, `encoding:<name>-enc` and
+/// `encoding:<name>-dec`, with the lowercase name of each encoding.
+fn encoding_codec_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for encoding in ENCODINGS {
+        let name = encoding.name().to_ascii_lowercase();
+        if encoding.output_encoding() == *encoding {
+            names.push(format!("{ENCODING_PREFIX}{name}{ENCODING_ENC}"));
+        }
+        names.push(format!("{ENCODING_PREFIX}{name}{ENCODING_DEC}"));
+    }
+    names
+}
+
+/// The own codec names, then the compcol and encoding_rs codec names.
 fn all_codec_names() -> Vec<String> {
     CODECS
         .iter()
         .map(|(name, _)| name.to_string())
         .chain(compcol_codec_names())
+        .chain(encoding_codec_names())
         .collect()
 }
 
@@ -222,6 +328,13 @@ names).
 The encoder writes the whole stream at the end of input. The decoder
 reads one stream (gzip, xz and bzip2 also read concatenated streams).
 Algorithms: {compcol_names}
+
+Encoding codecs: encoding:LABEL-dec converts from the encoding to UTF-8,
+encoding:LABEL-enc converts from UTF-8 to the encoding. LABEL is any
+WHATWG encoding label, for example utf-16le, latin1 or sjis. The decoder
+writes U+FFFD for malformed input. The encoder writes an HTML numeric
+character reference, such as &#26085;, for a character that the encoding
+does not have. UTF-16LE, UTF-16BE and replacement have no encoder.
 
 Options:
   --list   print every codec name, one per line, and exit
@@ -252,6 +365,7 @@ stdout).
 Examples:
   echo hello | cargo run -p cli -- --readers identity identity rot13 --writers rot13 rot13 identity
   echo hello | cargo run -p cli -- --readers compcol-gzip-enc --writers compcol-gzip-dec
+  echo 日本語 | cargo run -p cli -- --readers encoding:sjis-enc --writers encoding:sjis-dec
 "
     )
 }
@@ -262,6 +376,7 @@ fn make_codec(name: &str) -> Result<Box<dyn Codec>, String> {
         .find(|(n, _)| *n == name)
         .map(|(_, ctor)| ctor())
         .or_else(|| make_compcol_codec(name))
+        .or_else(|| make_encoding_codec(name))
         .ok_or_else(|| {
             let names = all_codec_names().join(", ");
             format!("unknown codec {name:?} (expected one of: {names})")
@@ -936,6 +1051,49 @@ mod tests {
             "compcol-nosuch-dec",
             "compcol--enc",
             "compcol-quantum-enc",
+        ] {
+            let err = make_codec(name).err().unwrap();
+            assert!(err.contains(name), "{err}");
+        }
+    }
+
+    #[test]
+    fn encoding_round_trip() {
+        let text = "Hello, 日本語のテキスト";
+        for label in ["shift_jis", "iso-2022-jp", "gb18030", "euc-kr"] {
+            let output = run_io(
+                &names(&[&format!("encoding:{label}-enc")]),
+                &names(&[&format!("encoding:{label}-dec")]),
+                Cursor::new(text.as_bytes().to_vec()),
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(output, text.as_bytes(), "{label}");
+        }
+    }
+
+    #[test]
+    fn encoding_encoder_writes_the_legacy_bytes() {
+        let output = run_io(
+            &names(&["encoding:latin1-enc"]),
+            &[],
+            Cursor::new("é€日".as_bytes().to_vec()),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(output, b"\xE9\x80&#26085;");
+    }
+
+    #[test]
+    fn unknown_encoding_names_are_rejected() {
+        assert!(make_codec("encoding:utf-16le-dec").is_ok());
+        assert!(make_codec("encoding:SJIS-dec").is_ok());
+        for name in [
+            "encoding:utf-16le-enc",
+            "encoding:replacement-enc",
+            "encoding:nosuch-dec",
+            "encoding:sjis",
+            "encoding:-dec",
         ] {
             let err = make_codec(name).err().unwrap();
             assert!(err.contains(name), "{err}");

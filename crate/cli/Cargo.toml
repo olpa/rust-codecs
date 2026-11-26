@@ -9,7 +9,8 @@ repository = "https://github.com/olpa/rust-codecs"
 publish = false
 
 [dependencies]
-rust-codecs-core = { path = "../core", features = ["rot13", "base64", "json", "embedded-io", "compcol"] }
+rust-codecs-core = { path = "../core", features = ["rot13", "base64", "json", "embedded-io", "compcol", "encoding_rs"] }
+encoding_rs = "0.8.44"
 # `factory` gives by-name lookup; the rest are all algorithms compcol
 # offers (its `all` feature minus `tokio`).
 compcol = { version = "0.7.8", default-features = false, features = [

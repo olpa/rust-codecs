@@ -15,6 +15,8 @@
 //!   escaping.
 //! - Adapters for `compcol` encoders and decoders, see [`compcol`](mod@crate::compcol)
 //!   (feature `compcol`).
+//! - Adapters for `encoding_rs` decoders and encoders, see
+//!   [`encoding_rs`](mod@crate::encoding_rs) (feature `encoding_rs`).
 //! - Bundled I/O backends for `std::io` and `embedded_io` provide
 //!   [`CodecReader`](sources_and_sinks::std_io::CodecReader),
 //!   [`BufReadCodecReader`](sources_and_sinks::std_io::BufReadCodecReader),
@@ -256,7 +258,8 @@ mod feature_coverage {
             feature = "json",
             feature = "embedded-io",
             feature = "rot13",
-            feature = "compcol"
+            feature = "compcol",
+            feature = "encoding_rs"
         )),
         ignore = "some optional features are disabled — run `cargo test --all-features`"
     )]
@@ -267,6 +270,10 @@ mod feature_coverage {
         assert!(cfg!(feature = "json"), "feature \"json\" is off");
         assert!(cfg!(feature = "rot13"), "feature \"rot13\" is off");
         assert!(cfg!(feature = "compcol"), "feature \"compcol\" is off");
+        assert!(
+            cfg!(feature = "encoding_rs"),
+            "feature \"encoding_rs\" is off"
+        );
         assert!(
             cfg!(feature = "embedded-io"),
             "feature \"embedded-io\" is off"

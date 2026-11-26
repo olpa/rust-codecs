@@ -12,6 +12,7 @@ base64 = { version = "0.22", optional = true, default-features = false }
 json-escape = { git = "https://github.com/olpa/json-escape", rev = "f08a2f26d308738a5c48957d8eb151f1e5bdea60", optional = true }
 embedded-io = { version = "0.7.1", optional = true, default-features = false }
 compcol = { version = "0.7.8", default-features = false, optional = true }
+encoding_rs = { version = "0.8.44", default-features = false, optional = true }
 
 [features]
 default = ["std"]
@@ -22,9 +23,11 @@ base64 = ["dep:base64"]
 json = ["dep:json-escape"]
 embedded-io = ["dep:embedded-io"]
 compcol = ["dep:compcol"]
+encoding_rs = ["dep:encoding_rs"]
 
 [dev-dependencies]
 compcol = { version = "0.7.8", default-features = false, features = ["deflate", "zlib", "gzip"] }
+encoding_rs = "0.8.44"
 
 [package.metadata.docs.rs]
 all-features = true
