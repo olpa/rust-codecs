@@ -89,7 +89,11 @@ fn shift_error(e: Error, consumed: usize, written: usize) -> Error {
 /// [`ErrorMode::Replace`]: it needs room for a numeric character
 /// reference (10 bytes) and a character (4 bytes for GB18030), and
 /// ISO-2022-JP adds an escape sequence (3 bytes).
-const STAGING_LEN: usize = 32;
+///
+/// The buffer takes the rest of 64 bytes after the two counters of
+/// [`Staged`]: 48 bytes with 64-bit `usize`, 56 bytes with 32-bit.
+/// The reason for the round size is aesthetics.
+const STAGING_LEN: usize = 64 - 2 * size_of::<usize>();
 
 /// The output that the inner codec wrote, but that did not fit into
 /// the output of the caller.
@@ -99,6 +103,9 @@ struct Staged {
     pos: usize,
     len: usize,
 }
+
+// See `STAGING_LEN`.
+const _: () = assert!(size_of::<Staged>() == 64);
 
 impl Staged {
     const fn new() -> Self {
