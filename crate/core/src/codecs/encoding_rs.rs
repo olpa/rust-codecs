@@ -185,89 +185,92 @@ impl InnerStep {
 /// input is read, without a call to `step`. Use `false` for `last`
 /// calls: they must reach `InputEmpty` also with empty input.
 ///
-/// The function returns the staging buffer and the combined step. The
-/// stop of the step is `NextDoesNotFit` only if `output` is full or
-/// the staging buffer holds more bytes than the rest of `output`.
+/// The function returns the combined step, and the staging buffer if
+/// it called `step` with it. The stop of the step is `NextDoesNotFit`
+/// only if `output` is full or the staging buffer holds more bytes than
+/// the rest of `output`.
 fn inner_step(
     input_len: usize,
     output: &mut [u8],
     stop_at_input_end: bool,
     mut step: impl FnMut(usize, &mut [u8]) -> InnerStep,
-) -> (Staged, InnerStep) {
-    let mut staged = Staged::new();
-    let combined = 'step: {
-        //
-        // Convert into the output
-        //
+) -> (Option<Staged>, InnerStep) {
+    //
+    // Convert into the output
+    //
 
-        if output.is_empty() {
-            break 'step InnerStep::new(InnerStop::NextDoesNotFit, 0, 0);
-        }
-        if stop_at_input_end && input_len == 0 {
-            break 'step InnerStep::new(InnerStop::InputEmpty, 0, 0);
-        }
-        let direct = step(0, output);
-        let consumed = direct.counts.consumed;
-        let written = direct.counts.written;
-        if consumed > input_len || written > output.len() {
-            break 'step contract_violation_step(Error::SUBCODE_BYTE_COUNT_CLAIM, 0, 0);
-        }
-        match direct.stop {
-            InnerStop::InputEmpty => break 'step input_empty(consumed, input_len, written),
-            InnerStop::Failed { .. } => break 'step direct,
-            InnerStop::NextDoesNotFit => {
-                if written == output.len() {
-                    break 'step direct;
-                }
+    if output.is_empty() {
+        return (None, InnerStep::new(InnerStop::NextDoesNotFit, 0, 0));
+    }
+    if stop_at_input_end && input_len == 0 {
+        return (None, InnerStep::new(InnerStop::InputEmpty, 0, 0));
+    }
+    let direct = step(0, output);
+    let consumed = direct.counts.consumed;
+    let written = direct.counts.written;
+    if consumed > input_len || written > output.len() {
+        return (
+            None,
+            contract_violation_step(Error::SUBCODE_BYTE_COUNT_CLAIM, 0, 0),
+        );
+    }
+    match direct.stop {
+        InnerStop::InputEmpty => return (None, input_empty(consumed, input_len, written)),
+        InnerStop::Failed { .. } => return (None, direct),
+        InnerStop::NextDoesNotFit => {
+            if written == output.len() {
+                return (None, direct);
             }
         }
+    }
 
-        //
-        // Convert into the staging buffer
-        //
+    //
+    // Convert into the staging buffer
+    //
 
-        // The next output unit does not fit into the rest of `output`.
-        let refill = step(consumed, &mut staged.buf);
-        if refill.counts.consumed > input_len - consumed || refill.counts.written > STAGING_LEN {
-            break 'step contract_violation_step(
-                Error::SUBCODE_BYTE_COUNT_CLAIM,
-                consumed,
-                written,
-            );
-        }
-        staged.len = refill.counts.written;
-        let consumed = consumed + refill.counts.consumed;
-        match refill.stop {
-            InnerStop::InputEmpty => input_empty(consumed, input_len, written),
-            InnerStop::Failed { .. } => InnerStep::new(refill.stop, consumed, written),
-            InnerStop::NextDoesNotFit => {
-                // A unit that did not fit into the rest of `output` must
-                // make the staging buffer longer than the rest.
-                if staged.len <= output.len() - written {
-                    contract_violation_step(SUBCODE_NO_PROGRESS, consumed, written)
-                } else {
-                    InnerStep::new(InnerStop::NextDoesNotFit, consumed, written)
-                }
+    // The next output unit does not fit into the rest of `output`.
+    let mut staged = Staged::new();
+    let refill = step(consumed, &mut staged.buf);
+    if refill.counts.consumed > input_len - consumed || refill.counts.written > STAGING_LEN {
+        return (
+            None,
+            contract_violation_step(Error::SUBCODE_BYTE_COUNT_CLAIM, consumed, written),
+        );
+    }
+    staged.len = refill.counts.written;
+    let consumed = consumed + refill.counts.consumed;
+    let combined = match refill.stop {
+        InnerStop::InputEmpty => input_empty(consumed, input_len, written),
+        InnerStop::Failed { .. } => InnerStep::new(refill.stop, consumed, written),
+        InnerStop::NextDoesNotFit => {
+            // A unit that did not fit into the rest of `output` must
+            // make the staging buffer longer than the rest.
+            if staged.len <= output.len() - written {
+                contract_violation_step(SUBCODE_NO_PROGRESS, consumed, written)
+            } else {
+                InnerStep::new(InnerStop::NextDoesNotFit, consumed, written)
             }
         }
     };
-    (staged, combined)
+    (Some(staged), combined)
 }
 
-/// Store the staging buffer from [`inner_step`] in `out_staged`, copy
-/// what fits into the rest of `output`, and make the result of the
-/// call.
+/// Store the staging buffer from [`inner_step`], if any, in
+/// `out_staged`. Copy what fits into the rest of `output`, and make the
+/// result of the call.
 ///
 /// `out_staged` must be empty: the function replaces it. After an
 /// error, the function copies nothing. The staged bytes stay for the
 /// next call.
 fn deliver(
     out_staged: &mut Staged,
-    staged: Staged,
+    staged: Option<Staged>,
     step: InnerStep,
     output: &mut [u8],
 ) -> Result<Progress, Error> {
-    *out_staged = staged;
+    if let Some(staged) = staged {
+        *out_staged = staged;
+    }
     let TransferCounts { consumed, written } = step.counts;
     match step.stop {
         InnerStop::Failed {
