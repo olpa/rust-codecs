@@ -778,17 +778,24 @@ impl Codec for FromUtf8AsCodec {
         self.phase.check_open()?;
 
         //
-        // Complete and encode a held character
+        // Write the staged bytes
         //
 
-        let mut taken = 0;
+        // The staged bytes come before the held character and the input.
         let mut written = 0;
-        if self.pending.len > 0 {
-            // The staged bytes come before the held character.
+        if !self.staged.is_empty() {
             written = self.staged.drain(output);
             if !self.staged.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: 0 });
             }
+        }
+
+        //
+        // Complete and encode a held character
+        //
+
+        let mut taken = 0;
+        if self.pending.len > 0 {
             let (t, w, still_held) =
                 self.encode_pending(input, &mut output[written..])
                     .map_err(|e| Error {
@@ -1114,6 +1121,23 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::CorruptStream);
         assert_eq!(e.codec_subcode, SUBCODE_INVALID_UTF8);
         assert_eq!(e.consumed, 1);
+    }
+
+    #[test]
+    fn encoder_writes_staged_bytes_on_empty_input() {
+        let mut enc = FromUtf8AsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Fatal);
+        let mut out = [0u8; 64];
+        // "日" is 0x93 0xFA in Shift_JIS. Only the first byte fits.
+        assert_eq!(
+            enc.process("日".as_bytes(), &mut out[..1]),
+            Ok(Progress::OutputFilled { consumed: 3 })
+        );
+        assert_eq!(out[0], 0x93);
+        assert_eq!(
+            enc.process(&[], &mut out),
+            Ok(Progress::InputConsumed { written: 1 })
+        );
+        assert_eq!(out[0], 0xFA);
     }
 
     #[test]
