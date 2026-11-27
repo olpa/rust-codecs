@@ -181,10 +181,6 @@ impl InnerStep {
 /// staging buffer. It does not copy from the staging buffer into
 /// `output`: [`deliver`] does that.
 ///
-/// If `stop_at_input_end` is true, the function returns as soon as all
-/// input is read, without a call to `step`. Use `false` for `last`
-/// calls: they must reach `InputEmpty` also with empty input.
-///
 /// The function returns the combined step, and the staging buffer if
 /// it called `step` with it. The stop of the step is `NextDoesNotFit`
 /// only if `output` is full or the staging buffer holds more bytes than
@@ -192,19 +188,20 @@ impl InnerStep {
 fn inner_step(
     input_len: usize,
     output: &mut [u8],
-    stop_at_input_end: bool,
     mut step: impl FnMut(usize, &mut [u8]) -> InnerStep,
 ) -> (Option<Staged>, InnerStep) {
-    //
-    // Convert into the output
-    //
-
+    // No early exit for empty input. At the end of the stream, `finish`
+    // calls the encoding_rs codec with empty input and its `last`
+    // argument set to true. The codec then writes the output that it
+    // still holds, such as U+FFFD for a truncated byte sequence, or the
+    // ISO-2022-JP escape sequence back to ASCII.
     if output.is_empty() {
         return (None, InnerStep::new(InnerStop::NextDoesNotFit, 0, 0));
     }
-    if stop_at_input_end && input_len == 0 {
-        return (None, InnerStep::new(InnerStop::InputEmpty, 0, 0));
-    }
+
+    //
+    // Convert into the output
+    //
     let direct = step(0, output);
     let consumed = direct.counts.consumed;
     let written = direct.counts.written;
@@ -448,7 +445,7 @@ impl ToUtf8AsCodec {
             had_replacements,
             ..
         } = self;
-        let (staged, step) = inner_step(input.len(), output, !last, |offset, dst| {
+        let (staged, step) = inner_step(input.len(), output, |offset, dst| {
             let src = &input[offset..];
             match mode {
                 ErrorMode::Replace => {
@@ -541,6 +538,9 @@ impl Codec for ToUtf8AsCodec {
         let Some(written) = self.out_staged.drain_all(output) else {
             return Ok(Progress::OutputFilled { consumed: 0 });
         };
+        if input.is_empty() {
+            return Ok(Progress::InputConsumed { written });
+        }
         match self
             .decode(input, &mut output[written..], false)
             .map_err(|e| shift_error(e, 0, written))?
@@ -700,7 +700,7 @@ impl FromUtf8AsCodec {
             unmappable,
             ..
         } = self;
-        let (staged, step) = inner_step(input.len(), output, !last, |offset, dst| {
+        let (staged, step) = inner_step(input.len(), output, |offset, dst| {
             let Some(src) = input.get(offset..) else {
                 return InnerStep {
                     stop: InnerStop::Failed {
@@ -902,13 +902,14 @@ impl Codec for FromUtf8AsCodec {
             taken = t;
             written += w;
             if still_held {
-                if taken == input.len() && written < output.len() {
+                if self.in_held.as_str().is_none() {
+                    // Incomplete: only more input completes it.
                     return Ok(Progress::InputConsumed { written });
                 }
                 return Ok(Progress::OutputFilled { consumed: taken });
             }
             // A full output can leave bytes in the staging buffer.
-            if written == output.len() {
+            if !self.out_staged.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: taken });
             }
         }
