@@ -296,8 +296,8 @@ fn finish_staged(
 /// UTF-8.
 ///
 /// ```
-/// # use rust_codecs_core::encoding_rs::{EncodingRsDecoderAsCodec, ErrorMode};
-/// let codec = EncodingRsDecoderAsCodec::new(
+/// # use rust_codecs_core::encoding_rs::{ToUtf8AsCodec, ErrorMode};
+/// let codec = ToUtf8AsCodec::new(
 ///     encoding_rs::SHIFT_JIS.new_decoder_with_bom_removal(),
 ///     ErrorMode::Replace,
 /// );
@@ -327,7 +327,7 @@ fn finish_staged(
 /// continue after the error, call `process` with the input after
 /// `consumed`.
 #[derive(Debug)]
-pub struct EncodingRsDecoderAsCodec {
+pub struct ToUtf8AsCodec {
     inner: Decoder,
     mode: ErrorMode,
     staged: Staged,
@@ -338,7 +338,7 @@ pub struct EncodingRsDecoderAsCodec {
     had_replacements: bool,
 }
 
-impl EncodingRsDecoderAsCodec {
+impl ToUtf8AsCodec {
     /// A decoder adapter for `inner`.
     pub fn new(inner: Decoder, mode: ErrorMode) -> Self {
         Self {
@@ -425,7 +425,7 @@ impl EncodingRsDecoderAsCodec {
     }
 }
 
-impl DrainCodec for EncodingRsDecoderAsCodec {
+impl DrainCodec for ToUtf8AsCodec {
     /// Write the staged output. A partial character stays in the inner
     /// decoder: only more input or `finish` completes it.
     fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
@@ -458,7 +458,7 @@ impl DrainCodec for EncodingRsDecoderAsCodec {
     }
 }
 
-impl Codec for EncodingRsDecoderAsCodec {
+impl Codec for ToUtf8AsCodec {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         self.phase.check_open()?;
         match self.decode(input, output, false)? {
@@ -505,8 +505,8 @@ fn is_incomplete_char(bytes: &[u8]) -> bool {
 /// split between two inputs.
 ///
 /// ```
-/// # use rust_codecs_core::encoding_rs::{EncodingRsEncoderAsCodec, ErrorMode};
-/// let codec = EncodingRsEncoderAsCodec::new(
+/// # use rust_codecs_core::encoding_rs::{FromUtf8AsCodec, ErrorMode};
+/// let codec = FromUtf8AsCodec::new(
 ///     encoding_rs::SHIFT_JIS.new_encoder(),
 ///     ErrorMode::Fatal,
 /// );
@@ -539,7 +539,7 @@ fn is_incomplete_char(bytes: &[u8]) -> bool {
 ///   [`unmappable`](Self::unmappable) to get it. To continue after the
 ///   error, call `process` with the input after `consumed`.
 #[derive(Debug)]
-pub struct EncodingRsEncoderAsCodec {
+pub struct FromUtf8AsCodec {
     inner: Encoder,
     mode: ErrorMode,
     staged: Staged,
@@ -552,7 +552,7 @@ pub struct EncodingRsEncoderAsCodec {
     unmappable: Option<char>,
 }
 
-impl EncodingRsEncoderAsCodec {
+impl FromUtf8AsCodec {
     /// An encoder adapter for `inner`.
     pub fn new(inner: Encoder, mode: ErrorMode) -> Self {
         Self {
@@ -722,7 +722,7 @@ impl EncodingRsEncoderAsCodec {
     }
 }
 
-impl DrainCodec for EncodingRsEncoderAsCodec {
+impl DrainCodec for FromUtf8AsCodec {
     /// Write the staged output. A held partial character stays: only
     /// more input completes it.
     fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
@@ -772,7 +772,7 @@ impl DrainCodec for EncodingRsEncoderAsCodec {
     }
 }
 
-impl Codec for EncodingRsEncoderAsCodec {
+impl Codec for FromUtf8AsCodec {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         self.unmappable = None;
         self.phase.check_open()?;
@@ -898,6 +898,57 @@ mod tests {
         TEXT.repeat(repeat)
     }
 
+    // ----
+    // Sanity checks
+    // ----
+
+    /// "grüß" in Latin-1: `ü` is 0xFC, `ß` is 0xDF.
+    const GRUSS_LATIN1: &[u8] = b"gr\xFC\xDF";
+
+    /// The encoding for the label "latin1". The WHATWG Encoding Standard
+    /// maps it to windows-1252, which is the same as Latin-1 for "grüß".
+    fn latin1() -> &'static Encoding {
+        Encoding::for_label(b"latin1").unwrap()
+    }
+
+    #[test]
+    fn sanity_decode_latin1_to_utf8() {
+        let mut dec = ToUtf8AsCodec::new(latin1().new_decoder(), ErrorMode::Fatal);
+        let mut out = [0u8; 16];
+        let progress = dec.process(GRUSS_LATIN1, &mut out).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 6 });
+        assert_eq!(&out[..6], "grüß".as_bytes());
+        assert_eq!(dec.finish(&mut out), Ok(DrainProgress::Done { written: 0 }));
+    }
+
+    #[test]
+    fn sanity_encode_utf8_to_latin1() {
+        let mut enc = FromUtf8AsCodec::new(latin1().new_encoder(), ErrorMode::Fatal);
+        let mut out = [0u8; 16];
+        let progress = enc.process("grüß".as_bytes(), &mut out).unwrap();
+        assert_eq!(progress, Progress::InputConsumed { written: 4 });
+        assert_eq!(&out[..4], GRUSS_LATIN1);
+        assert_eq!(enc.finish(&mut out), Ok(DrainProgress::Done { written: 0 }));
+    }
+
+    #[test]
+    fn sanity_encoder_rejects_input_that_is_not_utf8() {
+        // Latin-1 bytes are not valid UTF-8: 0xFC is not followed by
+        // continuation bytes.
+        let mut enc = FromUtf8AsCodec::new(latin1().new_encoder(), ErrorMode::Fatal);
+        let mut out = [0u8; 16];
+        let e = enc.process(GRUSS_LATIN1, &mut out).unwrap_err();
+        assert_eq!(
+            e,
+            error(ErrorKind::CorruptStream, SUBCODE_INVALID_UTF8, 2, 2)
+        );
+        assert_eq!(&out[..2], b"gr");
+    }
+
+    // ----
+    // Detailed tests
+    // ----
+
     #[test]
     fn decode_matches_one_shot_decode() {
         let text = text(50);
@@ -905,7 +956,7 @@ mod tests {
             let (bytes, _, _) = encoding.encode(&text);
             let (expected, _) = encoding.decode_without_bom_handling(&bytes);
             for chunk in [1, 2, 3, 7, 4096] {
-                let mut codec = EncodingRsDecoderAsCodec::new(
+                let mut codec = ToUtf8AsCodec::new(
                     encoding.new_decoder_without_bom_handling(),
                     ErrorMode::Replace,
                 );
@@ -928,8 +979,7 @@ mod tests {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         for chunk in [1, 3, 4096] {
-            let mut codec =
-                EncodingRsDecoderAsCodec::new(WINDOWS_1252.new_decoder(), ErrorMode::Fatal);
+            let mut codec = ToUtf8AsCodec::new(WINDOWS_1252.new_decoder(), ErrorMode::Fatal);
             let output = run(&mut codec, &bytes, chunk);
             assert_eq!(output, TEXT.as_bytes(), "chunk {chunk}");
             assert_eq!(codec.encoding(), UTF_16LE);
@@ -950,8 +1000,7 @@ mod tests {
         ] {
             let (expected, _, _) = encoding.encode(&text);
             for chunk in [1, 2, 3, 7, 4096] {
-                let mut codec =
-                    EncodingRsEncoderAsCodec::new(encoding.new_encoder(), ErrorMode::Replace);
+                let mut codec = FromUtf8AsCodec::new(encoding.new_encoder(), ErrorMode::Replace);
                 let output = run(&mut codec, text.as_bytes(), chunk);
                 assert_eq!(output, &expected[..], "{} chunk {chunk}", encoding.name());
             }
@@ -960,21 +1009,19 @@ mod tests {
 
     #[test]
     fn replace_mode_reports_replacements() {
-        let mut dec = EncodingRsDecoderAsCodec::new(
-            UTF_8.new_decoder_without_bom_handling(),
-            ErrorMode::Replace,
-        );
+        let mut dec =
+            ToUtf8AsCodec::new(UTF_8.new_decoder_without_bom_handling(), ErrorMode::Replace);
         assert_eq!(run(&mut dec, b"a\xFFb", 1), "a\u{FFFD}b".as_bytes());
         assert!(dec.had_replacements());
 
-        let mut enc = EncodingRsEncoderAsCodec::new(WINDOWS_1252.new_encoder(), ErrorMode::Replace);
+        let mut enc = FromUtf8AsCodec::new(WINDOWS_1252.new_encoder(), ErrorMode::Replace);
         assert_eq!(run(&mut enc, "a日b".as_bytes(), 1), b"a&#26085;b");
         assert!(enc.had_unmappables());
     }
 
     #[test]
     fn fatal_decoder_reports_malformed_input() {
-        let mut dec = EncodingRsDecoderAsCodec::new(
+        let mut dec = ToUtf8AsCodec::new(
             SHIFT_JIS.new_decoder_without_bom_handling(),
             ErrorMode::Fatal,
         );
@@ -996,7 +1043,7 @@ mod tests {
 
     #[test]
     fn fatal_decoder_rejects_a_truncated_sequence_at_finish() {
-        let mut dec = EncodingRsDecoderAsCodec::new(
+        let mut dec = ToUtf8AsCodec::new(
             SHIFT_JIS.new_decoder_without_bom_handling(),
             ErrorMode::Fatal,
         );
@@ -1012,7 +1059,7 @@ mod tests {
 
     #[test]
     fn fatal_encoder_reports_the_unmappable_character() {
-        let mut enc = EncodingRsEncoderAsCodec::new(WINDOWS_1252.new_encoder(), ErrorMode::Fatal);
+        let mut enc = FromUtf8AsCodec::new(WINDOWS_1252.new_encoder(), ErrorMode::Fatal);
         let mut out = [0u8; 64];
         let input = "ab日cd".as_bytes();
         let e = enc.process(input, &mut out).unwrap_err();
@@ -1030,7 +1077,7 @@ mod tests {
 
     #[test]
     fn fatal_encoder_reports_an_unmappable_split_character() {
-        let mut enc = EncodingRsEncoderAsCodec::new(WINDOWS_1252.new_encoder(), ErrorMode::Fatal);
+        let mut enc = FromUtf8AsCodec::new(WINDOWS_1252.new_encoder(), ErrorMode::Fatal);
         let mut out = [0u8; 64];
         let input = "a日".as_bytes();
         assert_eq!(
@@ -1045,7 +1092,7 @@ mod tests {
 
     #[test]
     fn encoder_rejects_invalid_utf8() {
-        let mut enc = EncodingRsEncoderAsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
+        let mut enc = FromUtf8AsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
         let mut out = [0u8; 64];
         let e = enc.process(b"ab\xFFcd", &mut out).unwrap_err();
         assert_eq!(
@@ -1057,7 +1104,7 @@ mod tests {
 
     #[test]
     fn encoder_rejects_invalid_utf8_after_a_split_character() {
-        let mut enc = EncodingRsEncoderAsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
+        let mut enc = FromUtf8AsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
         let mut out = [0u8; 64];
         assert_eq!(
             enc.process(b"a\xE6", &mut out),
@@ -1071,7 +1118,7 @@ mod tests {
 
     #[test]
     fn encoder_rejects_an_incomplete_character_at_finish() {
-        let mut enc = EncodingRsEncoderAsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
+        let mut enc = FromUtf8AsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
         let mut out = [0u8; 64];
         assert_eq!(
             enc.process(b"a\xE6\x97", &mut out),
@@ -1090,7 +1137,7 @@ mod tests {
 
     #[test]
     fn iso_2022_jp_finish_writes_the_escape_to_ascii_byte_by_byte() {
-        let mut enc = EncodingRsEncoderAsCodec::new(ISO_2022_JP.new_encoder(), ErrorMode::Fatal);
+        let mut enc = FromUtf8AsCodec::new(ISO_2022_JP.new_encoder(), ErrorMode::Fatal);
         let mut out = [0u8; 64];
         let mut pos = 0;
         let input = "日".as_bytes();
@@ -1129,13 +1176,13 @@ mod tests {
         let after_finish = contract_violation(Error::SUBCODE_AFTER_FINISH, 0, 0);
         let mut out = [0u8; 16];
 
-        let mut dec = EncodingRsDecoderAsCodec::new(UTF_8.new_decoder(), ErrorMode::Replace);
+        let mut dec = ToUtf8AsCodec::new(UTF_8.new_decoder(), ErrorMode::Replace);
         assert_eq!(dec.finish(&mut out), Ok(DrainProgress::Done { written: 0 }));
         assert_eq!(dec.process(b"x", &mut out), Err(after_finish));
         assert_eq!(dec.flush(&mut out), Err(after_finish));
         assert_eq!(dec.finish(&mut out), Ok(DrainProgress::Done { written: 0 }));
 
-        let mut enc = EncodingRsEncoderAsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
+        let mut enc = FromUtf8AsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
         assert_eq!(enc.finish(&mut out), Ok(DrainProgress::Done { written: 0 }));
         assert_eq!(enc.process(b"x", &mut out), Err(after_finish));
         assert_eq!(enc.flush(&mut out), Err(after_finish));
@@ -1144,12 +1191,12 @@ mod tests {
 
     #[test]
     fn empty_output_makes_no_inner_call() {
-        let mut dec = EncodingRsDecoderAsCodec::new(UTF_8.new_decoder(), ErrorMode::Replace);
+        let mut dec = ToUtf8AsCodec::new(UTF_8.new_decoder(), ErrorMode::Replace);
         assert_eq!(
             dec.process(b"abc", &mut []),
             Ok(Progress::OutputFilled { consumed: 0 })
         );
-        let mut enc = EncodingRsEncoderAsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
+        let mut enc = FromUtf8AsCodec::new(SHIFT_JIS.new_encoder(), ErrorMode::Replace);
         assert_eq!(
             enc.process(b"abc", &mut []),
             Ok(Progress::OutputFilled { consumed: 0 })

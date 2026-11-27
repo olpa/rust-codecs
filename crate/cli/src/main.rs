@@ -17,9 +17,7 @@ use rust_codecs_core::boundary_as_codec::BoundaryAwareCodecAsCodec;
 use rust_codecs_core::compcol::{
     CompcolDecoderAsBoundaryAwareCodec, CompcolEncoderAsBoundaryAwareCodec, FlushMode,
 };
-use rust_codecs_core::encoding_rs::{
-    EncodingRsDecoderAsCodec, EncodingRsEncoderAsCodec, ErrorMode,
-};
+use rust_codecs_core::encoding_rs::{ErrorMode, FromUtf8AsCodec, ToUtf8AsCodec};
 use rust_codecs_core::sources_and_sinks::std_io::{
     BufReadCodecReader, BufReadSource, CodecWriter, StdSink,
 };
@@ -264,14 +262,14 @@ fn make_encoding_codec(name: &str) -> Option<Box<dyn Codec>> {
         if encoding.output_encoding() != encoding {
             return None;
         }
-        return Some(Box::new(EncodingRsEncoderAsCodec::new(
+        return Some(Box::new(FromUtf8AsCodec::new(
             encoding.new_encoder(),
             ErrorMode::Replace,
         )));
     }
     if let Some(label) = name.strip_suffix(ENCODING_DEC) {
         let encoding = encoding_rs::Encoding::for_label(label.as_bytes())?;
-        return Some(Box::new(EncodingRsDecoderAsCodec::new(
+        return Some(Box::new(ToUtf8AsCodec::new(
             encoding.new_decoder_with_bom_removal(),
             ErrorMode::Replace,
         )));
