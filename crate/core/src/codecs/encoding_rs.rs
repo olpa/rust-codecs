@@ -168,6 +168,17 @@ impl InnerStep {
             counts: TransferCounts { consumed, written },
         }
     }
+
+    fn contract_violation(codec_subcode: usize, consumed: usize, written: usize) -> Self {
+        Self::new(
+            InnerStop::Failed {
+                kind: ErrorKind::ContractViolation,
+                codec_subcode,
+            },
+            consumed,
+            written,
+        )
+    }
 }
 
 /// Convert `input_len` bytes of input into `output`, and the output
@@ -208,11 +219,13 @@ fn inner_step(
     if consumed > input_len || written > output.len() {
         return (
             None,
-            contract_violation_step(Error::SUBCODE_BYTE_COUNT_CLAIM, 0, 0),
+            InnerStep::contract_violation(Error::SUBCODE_BYTE_COUNT_CLAIM, 0, 0),
         );
     }
     match direct.stop {
-        InnerStop::InputEmpty => return (None, input_empty(consumed, input_len, written)),
+        InnerStop::InputEmpty => {
+            return (None, check_map_input_empty(consumed, input_len, written))
+        }
         InnerStop::Failed { .. } => return (None, direct),
         InnerStop::NextDoesNotFit => {
             if written == output.len() {
@@ -231,19 +244,19 @@ fn inner_step(
     if refill.counts.consumed > input_len - consumed || refill.counts.written > STAGING_LEN {
         return (
             None,
-            contract_violation_step(Error::SUBCODE_BYTE_COUNT_CLAIM, consumed, written),
+            InnerStep::contract_violation(Error::SUBCODE_BYTE_COUNT_CLAIM, consumed, written),
         );
     }
     staged.len = refill.counts.written;
     let consumed = consumed + refill.counts.consumed;
     let combined = match refill.stop {
-        InnerStop::InputEmpty => input_empty(consumed, input_len, written),
+        InnerStop::InputEmpty => check_map_input_empty(consumed, input_len, written),
         InnerStop::Failed { .. } => InnerStep::new(refill.stop, consumed, written),
         InnerStop::NextDoesNotFit => {
             // A unit that did not fit into the rest of `output` must
             // make the staging buffer longer than the rest.
             if staged.len <= output.len() - written {
-                contract_violation_step(SUBCODE_NO_PROGRESS, consumed, written)
+                InnerStep::contract_violation(SUBCODE_NO_PROGRESS, consumed, written)
             } else {
                 InnerStep::new(InnerStop::NextDoesNotFit, consumed, written)
             }
@@ -290,36 +303,20 @@ fn deliver(
     }
 }
 
-fn contract_violation_step(codec_subcode: usize, consumed: usize, written: usize) -> InnerStep {
-    InnerStep::new(
-        InnerStop::Failed {
-            kind: ErrorKind::ContractViolation,
-            codec_subcode,
-        },
-        consumed,
-        written,
-    )
-}
-
 /// The step for `InputEmpty` from the inner codec. Fail if the inner
 /// codec did not read all of the input.
-fn input_empty(consumed: usize, input_len: usize, written: usize) -> InnerStep {
+fn check_map_input_empty(consumed: usize, input_len: usize, written: usize) -> InnerStep {
     if consumed != input_len {
-        return contract_violation_step(SUBCODE_INPUT_LEFT, consumed, written);
+        return InnerStep::contract_violation(SUBCODE_INPUT_LEFT, consumed, written);
     }
     InnerStep::new(InnerStop::InputEmpty, consumed, written)
 }
 
 /// Shared `flush`: write the staged bytes.
-fn flush_staged(
-    staged: &mut Staged,
-    phase: FinishPhase,
-    output: &mut [u8],
-) -> Result<DrainProgress, Error> {
-    phase.check_open()?;
+fn flush_staged(staged: &mut Staged, output: &mut [u8]) -> DrainProgress {
     match staged.drain_all(output) {
-        Some(written) => Ok(DrainProgress::Done { written }),
-        None => Ok(DrainProgress::OutputFilled),
+        Some(written) => DrainProgress::Done { written },
+        None => DrainProgress::OutputFilled,
     }
 }
 
@@ -492,7 +489,8 @@ impl DrainCodec for ToUtf8AsCodec {
     /// Write the staged output. A partial character stays in the inner
     /// decoder: only more input or `finish` completes it.
     fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
-        flush_staged(&mut self.out_staged, self.phase, output)
+        self.phase.check_open()?;
+        Ok(flush_staged(&mut self.out_staged, output))
     }
 
     /// Write the staged output, and end the stream of the inner decoder.
@@ -817,7 +815,8 @@ impl DrainCodec for FromUtf8AsCodec {
     /// Write the staged output. A held partial character stays: only
     /// more input completes it.
     fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
-        flush_staged(&mut self.out_staged, self.phase, output)
+        self.phase.check_open()?;
+        Ok(flush_staged(&mut self.out_staged, output))
     }
 
     /// Write the staged output and a held character, and end the stream
