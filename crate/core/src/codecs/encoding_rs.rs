@@ -63,6 +63,16 @@ fn error(kind: ErrorKind, codec_subcode: usize, consumed: usize, written: usize)
     }
 }
 
+/// `e` with `consumed` and `written` added to its counts. Use it for
+/// an error of a call that started after earlier input and output.
+fn shift_error(e: Error, consumed: usize, written: usize) -> Error {
+    Error {
+        consumed: consumed + e.consumed,
+        written: written + e.written,
+        ..e
+    }
+}
+
 fn contract_violation(codec_subcode: usize, consumed: usize, written: usize) -> Error {
     error(
         ErrorKind::ContractViolation,
@@ -83,10 +93,10 @@ fn contract_violation(codec_subcode: usize, consumed: usize, written: usize) -> 
 /// are free. With too small an output, it makes no progress. The
 /// adapter then converts into the staging buffer and copies from it.
 ///
-/// One step must fit into the buffer. The worst case is an encoder in
-/// [`ErrorMode::Replace`]: it needs room for a numeric character
-/// reference (10 bytes) and a character (4 bytes for GB18030), and
-/// ISO-2022-JP adds an escape sequence (3 bytes).
+/// One inner transfer must fit into the buffer. The worst case is an
+/// encoder in [`ErrorMode::Replace`]: it needs room for a numeric
+/// character reference (10 bytes) and a character (4 bytes for
+/// GB18030), and ISO-2022-JP adds an escape sequence (3 bytes).
 const STAGING_LEN: usize = 32;
 
 /// The output that the inner codec wrote, but that did not fit into
@@ -119,6 +129,17 @@ impl Staged {
         self.pos += take;
         take
     }
+
+    /// Copy the held bytes to the start of `out`. Return the number of
+    /// copied bytes if all bytes fit. Return `None` if bytes are left.
+    fn drain_all(&mut self, out: &mut [u8]) -> Option<usize> {
+        let written = self.drain(out);
+        if self.is_empty() {
+            Some(written)
+        } else {
+            None
+        }
+    }
 }
 
 // ----
@@ -136,34 +157,34 @@ enum InnerStop {
 }
 
 /// The result of one call of the inner codec.
-struct InnerStep {
+struct InnerTransfer {
     stop: InnerStop,
     counts: TransferCounts,
 }
 
 /// Convert `input_len` bytes of input into `output`.
 ///
-/// `step(offset, dst)` calls the inner codec for the input from
-/// `offset`. The closure has the input and the value of `last`.
+/// `inner_transfer(offset, dst)` calls the inner codec for the input
+/// from `offset`. The closure has the input and the value of `last`.
 ///
-/// The function first copies the staged bytes to `output`. Then it
-/// calls `step` until the input is read or `output` is full. When the
-/// inner codec stops before `output` is full, the function calls `step`
-/// with the staging buffer.
+/// The staging buffer must be empty. The function calls
+/// `inner_transfer` until the input is read or `output` is full. When
+/// the inner codec stops before `output` is full, the function calls
+/// `inner_transfer` with the staging buffer.
 ///
 /// If `stop_at_input_end` is true, the function returns as soon as all
-/// input is read, without a call to `step`. Use `false` for `last`
-/// calls: they must reach `InputEmpty` also with empty input.
+/// input is read, without a call to `inner_transfer`. Use `false` for
+/// `last` calls: they must reach `InputEmpty` also with empty input.
 ///
 /// The counts of an error are relative to this call.
-fn transfer(
+fn transfer_loop(
     staged: &mut Staged,
     input_len: usize,
     output: &mut [u8],
     stop_at_input_end: bool,
-    mut step: impl FnMut(usize, &mut [u8]) -> InnerStep,
+    mut inner_transfer: impl FnMut(usize, &mut [u8]) -> InnerTransfer,
 ) -> Result<Progress, Error> {
-    let mut written = staged.drain(output);
+    let mut written = 0;
     let mut consumed = 0;
     loop {
         if written == output.len() {
@@ -172,9 +193,9 @@ fn transfer(
         if stop_at_input_end && consumed == input_len {
             return Ok(Progress::InputConsumed { written });
         }
-        // The staging buffer is empty here: `drain` left `output` full,
-        // or it emptied the buffer.
-        let direct = step(consumed, &mut output[written..]);
+        // The staging buffer is empty here. It was empty at the start.
+        // After a refill, `drain` left `output` full or emptied it.
+        let direct = inner_transfer(consumed, &mut output[written..]);
         let in_left = input_len - consumed;
         if direct.counts.consumed > in_left || direct.counts.written > output.len() - written {
             return Err(contract_violation(
@@ -200,7 +221,7 @@ fn transfer(
 
         // The next output unit does not fit into the rest of `output`.
         // Convert it into the staging buffer, and copy what fits.
-        let staging = step(consumed, &mut staged.buf);
+        let staging = inner_transfer(consumed, &mut staged.buf);
         if staging.counts.consumed > input_len - consumed || staging.counts.written > STAGING_LEN {
             return Err(contract_violation(
                 Error::SUBCODE_BYTE_COUNT_CLAIM,
@@ -248,11 +269,9 @@ fn flush_staged(
     output: &mut [u8],
 ) -> Result<DrainProgress, Error> {
     phase.check_open()?;
-    let written = staged.drain(output);
-    if staged.is_empty() {
-        Ok(DrainProgress::Done { written })
-    } else {
-        Ok(DrainProgress::OutputFilled)
+    match staged.drain_all(output) {
+        Some(written) => Ok(DrainProgress::Done { written }),
+        None => Ok(DrainProgress::OutputFilled),
     }
 }
 
@@ -264,12 +283,14 @@ fn finish_staged(
     output: &mut [u8],
     written: usize,
 ) -> DrainProgress {
-    let written = written + staged.drain(&mut output[written..]);
-    if staged.is_empty() {
-        phase.finish_done();
-        DrainProgress::Done { written }
-    } else {
-        DrainProgress::OutputFilled
+    match staged.drain_all(&mut output[written..]) {
+        Some(drained) => {
+            phase.finish_done();
+            DrainProgress::Done {
+                written: written + drained,
+            }
+        }
+        None => DrainProgress::OutputFilled,
     }
 }
 
@@ -374,7 +395,7 @@ impl ToUtf8AsCodec {
             had_replacements,
             ..
         } = self;
-        transfer(out_staged, input.len(), output, !last, |offset, dst| {
+        transfer_loop(out_staged, input.len(), output, !last, |offset, dst| {
             let src = &input[offset..];
             match mode {
                 ErrorMode::Replace => {
@@ -384,7 +405,7 @@ impl ToUtf8AsCodec {
                         CoderResult::InputEmpty => InnerStop::InputEmpty,
                         CoderResult::OutputFull => InnerStop::NextDoesNotFit,
                     };
-                    InnerStep {
+                    InnerTransfer {
                         stop,
                         counts: TransferCounts {
                             consumed: read,
@@ -403,7 +424,7 @@ impl ToUtf8AsCodec {
                             codec_subcode: SUBCODE_MALFORMED,
                         },
                     };
-                    InnerStep {
+                    InnerTransfer {
                         stop,
                         counts: TransferCounts {
                             consumed: read,
@@ -439,14 +460,20 @@ impl DrainCodec for ToUtf8AsCodec {
                 0,
             ));
         }
-        match self.decode(&[], output, true)? {
-            Progress::InputConsumed { written } => {
+        let Some(written) = self.out_staged.drain_all(output) else {
+            return Ok(DrainProgress::OutputFilled);
+        };
+        match self
+            .decode(&[], &mut output[written..], true)
+            .map_err(|e| shift_error(e, 0, written))?
+        {
+            Progress::InputConsumed { written: w } => {
                 self.inner_finished = true;
                 Ok(finish_staged(
                     &mut self.out_staged,
                     &mut self.phase,
                     output,
-                    written,
+                    written + w,
                 ))
             }
             Progress::OutputFilled { .. } => Ok(DrainProgress::OutputFilled),
@@ -457,7 +484,18 @@ impl DrainCodec for ToUtf8AsCodec {
 impl Codec for ToUtf8AsCodec {
     fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<Progress, Error> {
         self.phase.check_open()?;
-        self.decode(input, output, false)
+        let Some(written) = self.out_staged.drain_all(output) else {
+            return Ok(Progress::OutputFilled { consumed: 0 });
+        };
+        match self
+            .decode(input, &mut output[written..], false)
+            .map_err(|e| shift_error(e, 0, written))?
+        {
+            Progress::InputConsumed { written: w } => Ok(Progress::InputConsumed {
+                written: written + w,
+            }),
+            Progress::OutputFilled { consumed } => Ok(Progress::OutputFilled { consumed }),
+        }
     }
 }
 
@@ -606,9 +644,9 @@ impl FromUtf8AsCodec {
             unmappable,
             ..
         } = self;
-        transfer(out_staged, input.len(), output, !last, |offset, dst| {
+        transfer_loop(out_staged, input.len(), output, !last, |offset, dst| {
             let Some(src) = input.get(offset..) else {
-                return InnerStep {
+                return InnerTransfer {
                     stop: InnerStop::Failed {
                         kind: ErrorKind::ContractViolation,
                         codec_subcode: SUBCODE_NOT_CHAR_BOUNDARY,
@@ -624,7 +662,7 @@ impl FromUtf8AsCodec {
                         CoderResult::InputEmpty => InnerStop::InputEmpty,
                         CoderResult::OutputFull => InnerStop::NextDoesNotFit,
                     };
-                    InnerStep {
+                    InnerTransfer {
                         stop,
                         counts: TransferCounts {
                             consumed: read,
@@ -646,7 +684,7 @@ impl FromUtf8AsCodec {
                             }
                         }
                     };
-                    InnerStep {
+                    InnerTransfer {
                         stop,
                         counts: TransferCounts {
                             consumed: read,
@@ -742,23 +780,31 @@ impl DrainCodec for FromUtf8AsCodec {
                 0,
             ));
         }
-        let mut written = 0;
+        let Some(mut written) = self.out_staged.drain_all(output) else {
+            return Ok(DrainProgress::OutputFilled);
+        };
         if self.in_held.len > 0 {
             if self.in_held.as_str().is_none() {
                 return Err(error(
                     ErrorKind::CorruptStream,
                     SUBCODE_INCOMPLETE_UTF8,
                     0,
-                    0,
+                    written,
                 ));
             }
-            let (_, w, still_held) = self.encode_held(&[], output)?;
-            if still_held {
+            let (_, w, still_held) = self
+                .encode_held(&[], &mut output[written..])
+                .map_err(|e| shift_error(e, 0, written))?;
+            written += w;
+            // A full output can leave bytes in the staging buffer.
+            if still_held || written == output.len() {
                 return Ok(DrainProgress::OutputFilled);
             }
-            written = w;
         }
-        match self.encode("", &mut output[written..], true)? {
+        match self
+            .encode("", &mut output[written..], true)
+            .map_err(|e| shift_error(e, 0, written))?
+        {
             Progress::InputConsumed { written: w } => {
                 self.inner_finished = true;
                 Ok(finish_staged(
@@ -783,13 +829,9 @@ impl Codec for FromUtf8AsCodec {
         //
 
         // The staged bytes come before the held character and the input.
-        let mut written = 0;
-        if !self.out_staged.is_empty() {
-            written = self.out_staged.drain(output);
-            if !self.out_staged.is_empty() {
-                return Ok(Progress::OutputFilled { consumed: 0 });
-            }
-        }
+        let Some(mut written) = self.out_staged.drain_all(output) else {
+            return Ok(Progress::OutputFilled { consumed: 0 });
+        };
 
         //
         // Complete and encode a held character
@@ -797,18 +839,19 @@ impl Codec for FromUtf8AsCodec {
 
         let mut taken = 0;
         if self.in_held.len > 0 {
-            let (t, w, still_held) =
-                self.encode_held(input, &mut output[written..])
-                    .map_err(|e| Error {
-                        written: written + e.written,
-                        ..e
-                    })?;
+            let (t, w, still_held) = self
+                .encode_held(input, &mut output[written..])
+                .map_err(|e| shift_error(e, 0, written))?;
             taken = t;
             written += w;
             if still_held {
                 if taken == input.len() && written < output.len() {
                     return Ok(Progress::InputConsumed { written });
                 }
+                return Ok(Progress::OutputFilled { consumed: taken });
+            }
+            // A full output can leave bytes in the staging buffer.
+            if written == output.len() {
                 return Ok(Progress::OutputFilled { consumed: taken });
             }
         }
@@ -823,14 +866,9 @@ impl Codec for FromUtf8AsCodec {
         };
         let valid = chunk.valid();
         let invalid = chunk.invalid();
-        let fail = |e: Error| Error {
-            consumed: taken + e.consumed,
-            written: written + e.written,
-            ..e
-        };
         match self
             .encode(valid, &mut output[written..], false)
-            .map_err(fail)?
+            .map_err(|e| shift_error(e, taken, written))?
         {
             Progress::InputConsumed { written: w } => written += w,
             Progress::OutputFilled { consumed } => {
