@@ -142,7 +142,7 @@ impl Staged {
 }
 
 // ----
-// Transfer loop
+// Inner step
 // ----
 
 /// Why one call of the inner codec stopped.
@@ -159,6 +159,15 @@ enum InnerStop {
 struct InnerStep {
     stop: InnerStop,
     counts: TransferCounts,
+}
+
+impl InnerStep {
+    fn new(stop: InnerStop, consumed: usize, written: usize) -> Self {
+        Self {
+            stop,
+            counts: TransferCounts { consumed, written },
+        }
+    }
 }
 
 /// Convert `input_len` bytes of input into `output`, and the output
@@ -179,36 +188,36 @@ struct InnerStep {
 /// The function returns the staging buffer and the combined step. The
 /// stop of the step is `NextDoesNotFit` only if `output` is full or
 /// the staging buffer holds more bytes than the rest of `output`.
-fn convert(
+fn inner_step(
     input_len: usize,
     output: &mut [u8],
     stop_at_input_end: bool,
     mut step: impl FnMut(usize, &mut [u8]) -> InnerStep,
 ) -> (Staged, InnerStep) {
     let mut staged = Staged::new();
-    let combined = 'convert: {
+    let combined = 'step: {
         //
         // Convert into the output
         //
 
         if output.is_empty() {
-            break 'convert inner_step(InnerStop::NextDoesNotFit, 0, 0);
+            break 'step InnerStep::new(InnerStop::NextDoesNotFit, 0, 0);
         }
         if stop_at_input_end && input_len == 0 {
-            break 'convert inner_step(InnerStop::InputEmpty, 0, 0);
+            break 'step InnerStep::new(InnerStop::InputEmpty, 0, 0);
         }
         let direct = step(0, output);
         let consumed = direct.counts.consumed;
         let written = direct.counts.written;
         if consumed > input_len || written > output.len() {
-            break 'convert contract_violation_step(Error::SUBCODE_BYTE_COUNT_CLAIM, 0, 0);
+            break 'step contract_violation_step(Error::SUBCODE_BYTE_COUNT_CLAIM, 0, 0);
         }
         match direct.stop {
-            InnerStop::InputEmpty => break 'convert input_empty(consumed, input_len, written),
-            InnerStop::Failed { .. } => break 'convert direct,
+            InnerStop::InputEmpty => break 'step input_empty(consumed, input_len, written),
+            InnerStop::Failed { .. } => break 'step direct,
             InnerStop::NextDoesNotFit => {
                 if written == output.len() {
-                    break 'convert direct;
+                    break 'step direct;
                 }
             }
         }
@@ -220,7 +229,7 @@ fn convert(
         // The next output unit does not fit into the rest of `output`.
         let refill = step(consumed, &mut staged.buf);
         if refill.counts.consumed > input_len - consumed || refill.counts.written > STAGING_LEN {
-            break 'convert contract_violation_step(
+            break 'step contract_violation_step(
                 Error::SUBCODE_BYTE_COUNT_CLAIM,
                 consumed,
                 written,
@@ -230,14 +239,14 @@ fn convert(
         let consumed = consumed + refill.counts.consumed;
         match refill.stop {
             InnerStop::InputEmpty => input_empty(consumed, input_len, written),
-            InnerStop::Failed { .. } => inner_step(refill.stop, consumed, written),
+            InnerStop::Failed { .. } => InnerStep::new(refill.stop, consumed, written),
             InnerStop::NextDoesNotFit => {
                 // A unit that did not fit into the rest of `output` must
                 // make the staging buffer longer than the rest.
                 if staged.len <= output.len() - written {
                     contract_violation_step(SUBCODE_NO_PROGRESS, consumed, written)
                 } else {
-                    inner_step(InnerStop::NextDoesNotFit, consumed, written)
+                    InnerStep::new(InnerStop::NextDoesNotFit, consumed, written)
                 }
             }
         }
@@ -245,8 +254,9 @@ fn convert(
     (staged, combined)
 }
 
-/// Store the staging buffer from [`convert`] in `out_staged`, copy what
-/// fits into the rest of `output`, and make the result of the call.
+/// Store the staging buffer from [`inner_step`] in `out_staged`, copy
+/// what fits into the rest of `output`, and make the result of the
+/// call.
 ///
 /// `out_staged` must be empty: the function replaces it. After an
 /// error, the function copies nothing. The staged bytes stay for the
@@ -254,12 +264,12 @@ fn convert(
 fn deliver(
     out_staged: &mut Staged,
     staged: Staged,
-    combined: InnerStep,
+    step: InnerStep,
     output: &mut [u8],
 ) -> Result<Progress, Error> {
     *out_staged = staged;
-    let TransferCounts { consumed, written } = combined.counts;
-    match combined.stop {
+    let TransferCounts { consumed, written } = step.counts;
+    match step.stop {
         InnerStop::Failed {
             kind,
             codec_subcode,
@@ -280,15 +290,8 @@ fn deliver(
     }
 }
 
-fn inner_step(stop: InnerStop, consumed: usize, written: usize) -> InnerStep {
-    InnerStep {
-        stop,
-        counts: TransferCounts { consumed, written },
-    }
-}
-
 fn contract_violation_step(codec_subcode: usize, consumed: usize, written: usize) -> InnerStep {
-    inner_step(
+    InnerStep::new(
         InnerStop::Failed {
             kind: ErrorKind::ContractViolation,
             codec_subcode,
@@ -304,7 +307,7 @@ fn input_empty(consumed: usize, input_len: usize, written: usize) -> InnerStep {
     if consumed != input_len {
         return contract_violation_step(SUBCODE_INPUT_LEFT, consumed, written);
     }
-    inner_step(InnerStop::InputEmpty, consumed, written)
+    InnerStep::new(InnerStop::InputEmpty, consumed, written)
 }
 
 /// Shared `flush`: write the staged bytes.
@@ -442,7 +445,7 @@ impl ToUtf8AsCodec {
             had_replacements,
             ..
         } = self;
-        let (staged, combined) = convert(input.len(), output, !last, |offset, dst| {
+        let (staged, step) = inner_step(input.len(), output, !last, |offset, dst| {
             let src = &input[offset..];
             match mode {
                 ErrorMode::Replace => {
@@ -481,7 +484,7 @@ impl ToUtf8AsCodec {
                 }
             }
         });
-        deliver(out_staged, staged, combined, output)
+        deliver(out_staged, staged, step, output)
     }
 }
 
@@ -694,7 +697,7 @@ impl FromUtf8AsCodec {
             unmappable,
             ..
         } = self;
-        let (staged, combined) = convert(input.len(), output, !last, |offset, dst| {
+        let (staged, step) = inner_step(input.len(), output, !last, |offset, dst| {
             let Some(src) = input.get(offset..) else {
                 return InnerStep {
                     stop: InnerStop::Failed {
@@ -744,7 +747,7 @@ impl FromUtf8AsCodec {
                 }
             }
         });
-        deliver(out_staged, staged, combined, output)
+        deliver(out_staged, staged, step, output)
     }
 
     /// Complete the held character with bytes from `input`, and encode
