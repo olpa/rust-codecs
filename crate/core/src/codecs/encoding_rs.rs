@@ -330,7 +330,7 @@ fn finish_staged(
 pub struct ToUtf8AsCodec {
     inner: Decoder,
     mode: ErrorMode,
-    staged: Staged,
+    out_staged: Staged,
     phase: FinishPhase,
     /// The inner decoder reported the end of the stream. Do not call it
     /// again.
@@ -344,7 +344,7 @@ impl ToUtf8AsCodec {
         Self {
             inner,
             mode,
-            staged: Staged::new(),
+            out_staged: Staged::new(),
             phase: FinishPhase::Open,
             inner_finished: false,
             had_replacements: false,
@@ -383,11 +383,11 @@ impl ToUtf8AsCodec {
         let Self {
             inner,
             mode,
-            staged,
+            out_staged,
             had_replacements,
             ..
         } = self;
-        transfer(staged, input.len(), output, !last, |offset, dst| {
+        transfer(out_staged, input.len(), output, !last, |offset, dst| {
             let src = &input[offset..];
             match mode {
                 ErrorMode::Replace => {
@@ -429,7 +429,7 @@ impl DrainCodec for ToUtf8AsCodec {
     /// Write the staged output. A partial character stays in the inner
     /// decoder: only more input or `finish` completes it.
     fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
-        flush_staged(&mut self.staged, self.phase, output)
+        flush_staged(&mut self.out_staged, self.phase, output)
     }
 
     /// Write the staged output, and end the stream of the inner decoder.
@@ -441,13 +441,18 @@ impl DrainCodec for ToUtf8AsCodec {
         }
         self.phase.start_finish();
         if self.inner_finished {
-            return Ok(finish_staged(&mut self.staged, &mut self.phase, output, 0));
+            return Ok(finish_staged(
+                &mut self.out_staged,
+                &mut self.phase,
+                output,
+                0,
+            ));
         }
         match self.decode(&[], output, true)? {
             Transfer::InputEmpty { written } => {
                 self.inner_finished = true;
                 Ok(finish_staged(
-                    &mut self.staged,
+                    &mut self.out_staged,
                     &mut self.phase,
                     output,
                     written,
@@ -542,8 +547,8 @@ fn is_incomplete_char(bytes: &[u8]) -> bool {
 pub struct FromUtf8AsCodec {
     inner: Encoder,
     mode: ErrorMode,
-    staged: Staged,
-    pending: PendingChar,
+    out_staged: Staged,
+    in_held: PendingChar,
     phase: FinishPhase,
     /// The inner encoder reported the end of the stream. Do not call it
     /// again.
@@ -558,8 +563,8 @@ impl FromUtf8AsCodec {
         Self {
             inner,
             mode,
-            staged: Staged::new(),
-            pending: PendingChar {
+            out_staged: Staged::new(),
+            in_held: PendingChar {
                 buf: [0; 4],
                 len: 0,
             },
@@ -608,12 +613,12 @@ impl FromUtf8AsCodec {
         let Self {
             inner,
             mode,
-            staged,
+            out_staged,
             had_unmappables,
             unmappable,
             ..
         } = self;
-        transfer(staged, input.len(), output, !last, |offset, dst| {
+        transfer(out_staged, input.len(), output, !last, |offset, dst| {
             let Some(src) = input.get(offset..) else {
                 return Step {
                     status: Status::Failed {
@@ -669,24 +674,24 @@ impl FromUtf8AsCodec {
     /// bytes written, and whether the character is still held. The
     /// character stays held if `input` ends before it is complete, or
     /// if `output` is full.
-    fn encode_pending(
+    fn encode_held(
         &mut self,
         input: &[u8],
         output: &mut [u8],
     ) -> Result<(usize, usize, bool), Error> {
         let mut taken = 0;
-        while is_incomplete_char(&self.pending.buf[..self.pending.len]) {
+        while is_incomplete_char(&self.in_held.buf[..self.in_held.len]) {
             let Some(&byte) = input.get(taken) else {
                 return Ok((taken, 0, true));
             };
-            self.pending.buf[self.pending.len] = byte;
-            self.pending.len += 1;
+            self.in_held.buf[self.in_held.len] = byte;
+            self.in_held.len += 1;
             taken += 1;
         }
         // A copy, because `encode` borrows all of `self`.
-        let buf = self.pending.buf;
-        let Ok(text) = core::str::from_utf8(&buf[..self.pending.len]) else {
-            self.pending.len = 0;
+        let buf = self.in_held.buf;
+        let Ok(text) = core::str::from_utf8(&buf[..self.in_held.len]) else {
+            self.in_held.len = 0;
             // The byte that broke the character is not consumed.
             return Err(error(
                 ErrorKind::CorruptStream,
@@ -698,12 +703,12 @@ impl FromUtf8AsCodec {
         let text_len = text.len();
         match self.encode(text, output, false) {
             Ok(Transfer::InputEmpty { written }) => {
-                self.pending.len = 0;
+                self.in_held.len = 0;
                 Ok((taken, written, false))
             }
             Ok(Transfer::OutputFilled { consumed }) => {
                 if consumed == text_len {
-                    self.pending.len = 0;
+                    self.in_held.len = 0;
                     Ok((taken, output.len(), false))
                 } else {
                     Ok((taken, output.len(), true))
@@ -711,7 +716,7 @@ impl FromUtf8AsCodec {
             }
             Err(e) => {
                 if e.consumed == text_len {
-                    self.pending.len = 0;
+                    self.in_held.len = 0;
                 }
                 Err(Error {
                     consumed: if e.consumed == text_len { taken } else { 0 },
@@ -726,7 +731,7 @@ impl DrainCodec for FromUtf8AsCodec {
     /// Write the staged output. A held partial character stays: only
     /// more input completes it.
     fn flush(&mut self, output: &mut [u8]) -> Result<DrainProgress, Error> {
-        flush_staged(&mut self.staged, self.phase, output)
+        flush_staged(&mut self.out_staged, self.phase, output)
     }
 
     /// Write the staged output and a held character, and end the stream
@@ -739,11 +744,16 @@ impl DrainCodec for FromUtf8AsCodec {
         }
         self.phase.start_finish();
         if self.inner_finished {
-            return Ok(finish_staged(&mut self.staged, &mut self.phase, output, 0));
+            return Ok(finish_staged(
+                &mut self.out_staged,
+                &mut self.phase,
+                output,
+                0,
+            ));
         }
         let mut written = 0;
-        if self.pending.len > 0 {
-            if self.pending.as_str().is_none() {
+        if self.in_held.len > 0 {
+            if self.in_held.as_str().is_none() {
                 return Err(error(
                     ErrorKind::CorruptStream,
                     SUBCODE_INCOMPLETE_UTF8,
@@ -751,7 +761,7 @@ impl DrainCodec for FromUtf8AsCodec {
                     0,
                 ));
             }
-            let (_, w, still_held) = self.encode_pending(&[], output)?;
+            let (_, w, still_held) = self.encode_held(&[], output)?;
             if still_held {
                 return Ok(DrainProgress::OutputFilled);
             }
@@ -761,7 +771,7 @@ impl DrainCodec for FromUtf8AsCodec {
             Transfer::InputEmpty { written: w } => {
                 self.inner_finished = true;
                 Ok(finish_staged(
-                    &mut self.staged,
+                    &mut self.out_staged,
                     &mut self.phase,
                     output,
                     written + w,
@@ -783,9 +793,9 @@ impl Codec for FromUtf8AsCodec {
 
         // The staged bytes come before the held character and the input.
         let mut written = 0;
-        if !self.staged.is_empty() {
-            written = self.staged.drain(output);
-            if !self.staged.is_empty() {
+        if !self.out_staged.is_empty() {
+            written = self.out_staged.drain(output);
+            if !self.out_staged.is_empty() {
                 return Ok(Progress::OutputFilled { consumed: 0 });
             }
         }
@@ -795,9 +805,9 @@ impl Codec for FromUtf8AsCodec {
         //
 
         let mut taken = 0;
-        if self.pending.len > 0 {
+        if self.in_held.len > 0 {
             let (t, w, still_held) =
-                self.encode_pending(input, &mut output[written..])
+                self.encode_held(input, &mut output[written..])
                     .map_err(|e| Error {
                         written: written + e.written,
                         ..e
@@ -848,8 +858,8 @@ impl Codec for FromUtf8AsCodec {
         }
         let at_end = valid.len() + invalid.len() == rest.len();
         if at_end && is_incomplete_char(invalid) {
-            self.pending.buf[..invalid.len()].copy_from_slice(invalid);
-            self.pending.len = invalid.len();
+            self.in_held.buf[..invalid.len()].copy_from_slice(invalid);
+            self.in_held.len = invalid.len();
             return Ok(Progress::InputConsumed { written });
         }
         Err(error(
