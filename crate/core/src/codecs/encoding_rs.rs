@@ -181,11 +181,41 @@ impl InnerStep {
     }
 }
 
-/// Convert `input_len` bytes of input into `output`, and the output
-/// that does not fit into a new staging buffer.
+/// The input of an inner codec: bytes for a decoder, UTF-8 text for an
+/// encoder.
+trait Input {
+    fn len(&self) -> usize;
+
+    /// The input from `offset`. `None` if `offset` is not a valid start.
+    fn tail(&self, offset: usize) -> Option<&Self>;
+}
+
+impl Input for [u8] {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn tail(&self, offset: usize) -> Option<&Self> {
+        self.get(offset..)
+    }
+}
+
+impl Input for str {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    /// `None` also if `offset` is inside a UTF-8 character.
+    fn tail(&self, offset: usize) -> Option<&Self> {
+        self.get(offset..)
+    }
+}
+
+/// Convert `input` into `output`, and the output that does not fit
+/// into a new staging buffer.
 ///
-/// `step(offset, dst)` calls the inner codec for the input from
-/// `offset`. The closure has the input and the value of `last`.
+/// `step(src, dst)` calls the inner codec. The closure has the value
+/// of `last`.
 ///
 /// The function calls `step` with `output`. When the inner codec stops
 /// before `output` is full, the function calls `step` again with the
@@ -196,11 +226,12 @@ impl InnerStep {
 /// it called `step` with it. The stop of the step is `NextDoesNotFit`
 /// only if `output` is full or the staging buffer holds more bytes than
 /// the rest of `output`.
-fn inner_step(
-    input_len: usize,
+fn inner_step<I: Input + ?Sized>(
+    input: &I,
     output: &mut [u8],
-    mut step: impl FnMut(usize, &mut [u8]) -> InnerStep,
+    mut step: impl FnMut(&I, &mut [u8]) -> InnerStep,
 ) -> (Option<Staged>, InnerStep) {
+    let input_len = input.len();
     // No early exit for empty input. At the end of the stream, `finish`
     // calls the encoding_rs codec with empty input and its `last`
     // argument set to true. The codec then writes the output that it
@@ -213,7 +244,7 @@ fn inner_step(
     //
     // Convert into the output
     //
-    let direct = step(0, output);
+    let direct = step(input, output);
     let consumed = direct.counts.consumed;
     let written = direct.counts.written;
     if consumed > input_len || written > output.len() {
@@ -239,8 +270,14 @@ fn inner_step(
     //
 
     // The next output unit does not fit into the rest of `output`.
+    let Some(rest) = input.tail(consumed) else {
+        return (
+            None,
+            InnerStep::contract_violation(SUBCODE_NOT_CHAR_BOUNDARY, consumed, written),
+        );
+    };
     let mut staged = Staged::new();
-    let refill = step(consumed, &mut staged.buf);
+    let refill = step(rest, &mut staged.buf);
     if refill.counts.consumed > input_len - consumed || refill.counts.written > STAGING_LEN {
         return (
             None,
@@ -442,42 +479,39 @@ impl ToUtf8AsCodec {
             had_replacements,
             ..
         } = self;
-        let (staged, step) = inner_step(input.len(), output, |offset, dst| {
-            let src = &input[offset..];
-            match mode {
-                ErrorMode::Replace => {
-                    let (result, read, written, replaced) = inner.decode_to_utf8(src, dst, last);
-                    *had_replacements |= replaced;
-                    let stop = match result {
-                        CoderResult::InputEmpty => InnerStop::InputEmpty,
-                        CoderResult::OutputFull => InnerStop::NextDoesNotFit,
-                    };
-                    InnerStep {
-                        stop,
-                        counts: TransferCounts {
-                            consumed: read,
-                            written,
-                        },
-                    }
+        let (staged, step) = inner_step(input, output, |src, dst| match mode {
+            ErrorMode::Replace => {
+                let (result, read, written, replaced) = inner.decode_to_utf8(src, dst, last);
+                *had_replacements |= replaced;
+                let stop = match result {
+                    CoderResult::InputEmpty => InnerStop::InputEmpty,
+                    CoderResult::OutputFull => InnerStop::NextDoesNotFit,
+                };
+                InnerStep {
+                    stop,
+                    counts: TransferCounts {
+                        consumed: read,
+                        written,
+                    },
                 }
-                ErrorMode::Fatal => {
-                    let (result, read, written) =
-                        inner.decode_to_utf8_without_replacement(src, dst, last);
-                    let stop = match result {
-                        DecoderResult::InputEmpty => InnerStop::InputEmpty,
-                        DecoderResult::OutputFull => InnerStop::NextDoesNotFit,
-                        DecoderResult::Malformed(_, _) => InnerStop::Failed {
-                            kind: ErrorKind::CorruptStream,
-                            codec_subcode: SUBCODE_MALFORMED,
-                        },
-                    };
-                    InnerStep {
-                        stop,
-                        counts: TransferCounts {
-                            consumed: read,
-                            written,
-                        },
-                    }
+            }
+            ErrorMode::Fatal => {
+                let (result, read, written) =
+                    inner.decode_to_utf8_without_replacement(src, dst, last);
+                let stop = match result {
+                    DecoderResult::InputEmpty => InnerStop::InputEmpty,
+                    DecoderResult::OutputFull => InnerStop::NextDoesNotFit,
+                    DecoderResult::Malformed(_, _) => InnerStop::Failed {
+                        kind: ErrorKind::CorruptStream,
+                        codec_subcode: SUBCODE_MALFORMED,
+                    },
+                };
+                InnerStep {
+                    stop,
+                    counts: TransferCounts {
+                        consumed: read,
+                        written,
+                    },
                 }
             }
         });
@@ -698,53 +732,42 @@ impl FromUtf8AsCodec {
             unmappable,
             ..
         } = self;
-        let (staged, step) = inner_step(input.len(), output, |offset, dst| {
-            let Some(src) = input.get(offset..) else {
-                return InnerStep {
-                    stop: InnerStop::Failed {
-                        kind: ErrorKind::ContractViolation,
-                        codec_subcode: SUBCODE_NOT_CHAR_BOUNDARY,
-                    },
-                    counts: TransferCounts::default(),
+        let (staged, step) = inner_step(input, output, |src, dst| match mode {
+            ErrorMode::Replace => {
+                let (result, read, written, replaced) = inner.encode_from_utf8(src, dst, last);
+                *had_unmappables |= replaced;
+                let stop = match result {
+                    CoderResult::InputEmpty => InnerStop::InputEmpty,
+                    CoderResult::OutputFull => InnerStop::NextDoesNotFit,
                 };
-            };
-            match mode {
-                ErrorMode::Replace => {
-                    let (result, read, written, replaced) = inner.encode_from_utf8(src, dst, last);
-                    *had_unmappables |= replaced;
-                    let stop = match result {
-                        CoderResult::InputEmpty => InnerStop::InputEmpty,
-                        CoderResult::OutputFull => InnerStop::NextDoesNotFit,
-                    };
-                    InnerStep {
-                        stop,
-                        counts: TransferCounts {
-                            consumed: read,
-                            written,
-                        },
-                    }
+                InnerStep {
+                    stop,
+                    counts: TransferCounts {
+                        consumed: read,
+                        written,
+                    },
                 }
-                ErrorMode::Fatal => {
-                    let (result, read, written) =
-                        inner.encode_from_utf8_without_replacement(src, dst, last);
-                    let stop = match result {
-                        EncoderResult::InputEmpty => InnerStop::InputEmpty,
-                        EncoderResult::OutputFull => InnerStop::NextDoesNotFit,
-                        EncoderResult::Unmappable(c) => {
-                            *unmappable = Some(c);
-                            InnerStop::Failed {
-                                kind: ErrorKind::Unsupported,
-                                codec_subcode: SUBCODE_UNMAPPABLE,
-                            }
+            }
+            ErrorMode::Fatal => {
+                let (result, read, written) =
+                    inner.encode_from_utf8_without_replacement(src, dst, last);
+                let stop = match result {
+                    EncoderResult::InputEmpty => InnerStop::InputEmpty,
+                    EncoderResult::OutputFull => InnerStop::NextDoesNotFit,
+                    EncoderResult::Unmappable(c) => {
+                        *unmappable = Some(c);
+                        InnerStop::Failed {
+                            kind: ErrorKind::Unsupported,
+                            codec_subcode: SUBCODE_UNMAPPABLE,
                         }
-                    };
-                    InnerStep {
-                        stop,
-                        counts: TransferCounts {
-                            consumed: read,
-                            written,
-                        },
                     }
+                };
+                InnerStep {
+                    stop,
+                    counts: TransferCounts {
+                        consumed: read,
+                        written,
+                    },
                 }
             }
         });
